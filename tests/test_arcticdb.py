@@ -159,3 +159,132 @@ def test_get_universe_symbols_raises_if_list_fails(monkeypatch):
 
     with pytest.raises(RuntimeError, match="list_symbols"):
         ae_arctic.get_universe_symbols("test-bucket")
+
+
+# ── load_universe_ohlcv ──────────────────────────────────────────────────────
+
+
+def _stub_arctic_with_ohlcv(monkeypatch, frames, symbols=None):
+    """Install an arcticdb stub whose universe lib serves ``frames``.
+
+    ``frames`` is ``{ticker: DataFrame}``; ``.read(sym, date_range, columns)``
+    returns an object with ``.data`` sliced to the date_range (and columns if
+    given), mirroring the real arcticdb read contract.
+    """
+    syms = list(symbols) if symbols is not None else list(frames)
+
+    class _ReadResult:
+        def __init__(self, data):
+            self.data = data
+
+    class _Lib:
+        def list_symbols(self):
+            return syms
+
+        def read(self, sym, date_range=None, columns=None):
+            df = frames[sym]
+            if date_range is not None:
+                lo, hi = date_range
+                # Real ArcticDB stores tz-naive indexes; compare on a
+                # tz-naive view so a tz-aware test fixture still slices
+                # (production strips tz after .read, not before).
+                ix = df.index
+                if getattr(ix, "tz", None) is not None:
+                    ix = ix.tz_localize(None)
+                df = df[(ix >= lo) & (ix <= hi)]
+            if columns is not None:
+                df = df[list(columns)]
+            return _ReadResult(df.copy())
+
+    class _Arctic:
+        def get_library(self, name):
+            return _Lib()
+
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: _Arctic()
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+
+def test_load_universe_ohlcv_returns_slim_cache_shape(monkeypatch):
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=5, freq="D")
+    frames = {
+        "AAA": pd.DataFrame({"Close": [1.0, 2, 3, 4, 5], "Volume": [10] * 5}, index=idx),
+        "BBB": pd.DataFrame({"Close": [9.0, 8, 7, 6, 5], "Volume": [20] * 5}, index=idx),
+    }
+    _stub_arctic_with_ohlcv(monkeypatch, frames)
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+
+    assert set(out) == {"AAA", "BBB"}
+    for df in out.values():
+        assert isinstance(df.index, pd.DatetimeIndex)
+        assert df.index.tz is None
+        assert df.index.is_monotonic_increasing
+    assert out["AAA"]["Close"].tolist() == [1, 2, 3, 4, 5]
+
+
+def test_load_universe_ohlcv_default_symbols_from_library(monkeypatch):
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=2, freq="D")
+    frames = {"XYZ": pd.DataFrame({"Close": [1.0, 2]}, index=idx)}
+    _stub_arctic_with_ohlcv(monkeypatch, frames, symbols=["XYZ"])
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+    assert list(out) == ["XYZ"]
+
+
+def test_load_universe_ohlcv_drops_tz_and_dupes(monkeypatch):
+    pd = pytest.importorskip("pandas")
+    idx = pd.DatetimeIndex(
+        ["2025-01-02", "2025-01-01", "2025-01-02"], tz="US/Eastern"
+    )
+    frames = {"DUP": pd.DataFrame({"Close": [2.0, 1.0, 99.0]}, index=idx)}
+    _stub_arctic_with_ohlcv(monkeypatch, frames)
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+    df = out["DUP"]
+    assert df.index.tz is None
+    assert df.index.is_monotonic_increasing
+    assert not df.index.has_duplicates
+    assert len(df) == 2  # 3 rows, one duplicate date collapsed
+    # keep="last" then sort -> 2025-01-01 row=1.0, deduped 2025-01-02 row=99.0
+    assert df["Close"].tolist() == [1.0, 99.0]
+
+
+def test_load_universe_ohlcv_skips_failures_partial_load(monkeypatch):
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=2, freq="D")
+    good = pd.DataFrame({"Close": [1.0, 2]}, index=idx)
+
+    class _ReadResult:
+        def __init__(self, data):
+            self.data = data
+
+    class _Lib:
+        def list_symbols(self):
+            return ["GOOD", "BAD", "EMPTY"]
+
+        def read(self, sym, date_range=None, columns=None):
+            if sym == "BAD":
+                raise RuntimeError("boom")
+            if sym == "EMPTY":
+                return _ReadResult(good.iloc[0:0])
+            return _ReadResult(good.copy())
+
+    class _Arctic:
+        def get_library(self, name):
+            return _Lib()
+
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: _Arctic()
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+    assert list(out) == ["GOOD"]  # BAD raised, EMPTY empty -> both dropped
+
+
+def test_load_universe_ohlcv_empty_universe_returns_empty(monkeypatch):
+    pytest.importorskip("pandas")
+    _stub_arctic_with_ohlcv(monkeypatch, {}, symbols=[])
+    assert ae_arctic.load_universe_ohlcv("b") == {}
