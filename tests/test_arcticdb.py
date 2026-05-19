@@ -288,3 +288,87 @@ def test_load_universe_ohlcv_empty_universe_returns_empty(monkeypatch):
     pytest.importorskip("pandas")
     _stub_arctic_with_ohlcv(monkeypatch, {}, symbols=[])
     assert ae_arctic.load_universe_ohlcv("b") == {}
+
+
+# ── load_macro_series ────────────────────────────────────────────────────────
+
+
+def test_load_macro_series_reads_requested_symbols(monkeypatch):
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=4, freq="D")
+    frames = {
+        "VIX": pd.DataFrame({"Close": [18.0, 19, 20, 21]}, index=idx),
+        "TNX": pd.DataFrame({"Close": [4.0, 4.1, 4.2, 4.3]}, index=idx),
+        "XLK": pd.DataFrame({"Close": [200.0, 201, 202, 203]}, index=idx),
+        "features": pd.DataFrame({"Close": [0.0]}, index=idx[:1]),  # non-price
+    }
+    _stub_arctic_with_ohlcv(monkeypatch, frames)
+
+    out = ae_arctic.load_macro_series(
+        "b", ["VIX", "TNX", "XLK"], lookback_days=3650, end="2025-12-31"
+    )
+    # Only the requested symbols — the heterogeneous 'features' key is NOT
+    # read (required-symbols contract protects against it).
+    assert set(out) == {"VIX", "TNX", "XLK"}
+    assert out["VIX"]["Close"].tolist() == [18, 19, 20, 21]
+    for df in out.values():
+        assert isinstance(df.index, pd.DatetimeIndex)
+        assert df.index.tz is None
+
+
+def test_load_macro_series_requires_symbols_returns_empty(monkeypatch):
+    pytest.importorskip("pandas")
+    _stub_arctic_with_ohlcv(monkeypatch, {"VIX": None}, symbols=["VIX"])
+    # No symbols requested -> empty (no read-all default for the macro lib).
+    assert ae_arctic.load_macro_series("b", []) == {}
+
+
+def test_load_macro_series_partial_load_skips_failures(monkeypatch):
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=2, freq="D")
+    good = pd.DataFrame({"Close": [1.0, 2]}, index=idx)
+
+    class _Res:
+        def __init__(self, data):
+            self.data = data
+
+    class _Lib:
+        def list_symbols(self):
+            return ["GLD", "MISSING"]
+
+        def read(self, sym, date_range=None, columns=None):
+            if sym == "MISSING":
+                raise RuntimeError("no such symbol")
+            return _Res(good.copy())
+
+    class _Arctic:
+        def get_library(self, name):
+            return _Lib()
+
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: _Arctic()
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+    out = ae_arctic.load_macro_series(
+        "b", ["GLD", "MISSING"], lookback_days=3650, end="2025-12-31"
+    )
+    assert list(out) == ["GLD"]
+
+
+def test_load_macro_series_shares_normalization_with_universe(monkeypatch):
+    """The shared core gives macro reads identical tz/dup normalization."""
+    pd = pytest.importorskip("pandas")
+    idx = pd.DatetimeIndex(
+        ["2025-01-02", "2025-01-01", "2025-01-02"], tz="US/Eastern"
+    )
+    frames = {"USO": pd.DataFrame({"Close": [2.0, 1.0, 99.0]}, index=idx)}
+    _stub_arctic_with_ohlcv(monkeypatch, frames)
+
+    out = ae_arctic.load_macro_series(
+        "b", ["USO"], lookback_days=3650, end="2025-12-31"
+    )
+    df = out["USO"]
+    assert df.index.tz is None
+    assert df.index.is_monotonic_increasing
+    assert not df.index.has_duplicates
+    assert df["Close"].tolist() == [1.0, 99.0]  # keep="last" then sort
