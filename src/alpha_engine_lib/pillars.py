@@ -35,15 +35,23 @@ What's here:
 
 What's NOT here (intentionally):
 
-  - The ``CompositeBreakdown`` shape (Phase 4 of the arc) — lives in
-    alpha-engine-research's scoring layer because it's coupled to the
-    research-internal regime/macro state.
   - The quant-pillar substrate (factor-substrate composites for Growth +
     Stewardship) — those live in alpha-engine-data's factor profile JSON
     and are consumed by research's ``score_aggregator`` as floats.
   - Stance derivation — Phase 5 of the arc; ``scoring/stance_deriver.py``
     in alpha-engine-research, fed BY pillar subscores but not part of the
     schema layer.
+
+What WAS originally carved out but is now here (Phase 4, 2026-05-21):
+
+  - ``CompositeBreakdown`` + ``PillarContribution`` + ``LegacyComponentBlend``
+    — Phase 4 lifted these into lib (originally scoped as research-internal)
+    because alpha-engine-backtester's Phase 6 weight optimizer + alpha-engine-
+    dashboard's Phase 7 radar surfaces both need to consume the SAME shape
+    research emits. Same isomorphism rationale as ``QualitativePillarAssessment``:
+    cross-repo schema drift is a worse failure mode than the slight coupling
+    overhead. macro_shift + sector_modifier are passed as inputs to the
+    composite, not embedded as policy, so the shape is policy-agnostic.
 
 Schema-validation discipline mirrors ``agent_schemas``:
 
@@ -463,3 +471,286 @@ class QualitativePillarAssessment(BaseModel):
             self.defensiveness.score,
         ]
         return round(sum(scores) / len(scores))
+
+
+# ── Composite breakdown (Phase 4 — pillar-decomposed scoring output) ─────
+
+
+class PillarContribution(BaseModel):
+    """Per-pillar contribution to the composite score.
+
+    One ``PillarContribution`` per pillar in ``PILLARS``. Carries the
+    within-pillar blend (``α × qual + (1-α) × quant``) plus the
+    across-pillar weight so the composite is fully reconstructible and
+    decomposable for attribution.
+
+    Effective ``within_pillar_qual_weight`` may differ from the configured
+    default when one of the two components is unavailable:
+      * pillar_assessment absent for this ticker → ``qual_weight = 0.0``
+        (degrades to pure factor-profile-quant for this pillar)
+      * factor_profile absent for this ticker / pillar → ``qual_weight = 1.0``
+        (degrades to pure pillar-assessment-qual for this pillar)
+
+    ``blended`` is ``None`` only when BOTH components are unavailable —
+    in that case ``contribution = 0.0`` and the pillar drops out of the
+    weighted_base sum (with weight reallocating pro-rata is a Phase 6
+    concern, not a Phase 4 concern; Phase 4 keeps the static weights).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    pillar: PillarLiteral = Field(
+        description="Which of the 6 pillars this contribution covers."
+    )
+    qual_component: float | None = Field(
+        default=None,
+        description=(
+            "Qualitative subscore from ``QualitativePillarAssessment.{pillar}.score`` "
+            "(0-100). ``None`` when pillar emission disabled or absent for ticker."
+        ),
+    )
+    quant_component: float | None = Field(
+        default=None,
+        description=(
+            "Quantitative subscore from the factor substrate "
+            "(``factors/profiles/latest.json``). ``None`` when no factor profile "
+            "exists for this ticker / pillar (Stewardship has thin quant signal "
+            "and may often be None until the factor side accumulates more "
+            "history)."
+        ),
+    )
+    within_pillar_qual_weight: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Effective α used in this pillar's qual/quant blend "
+            "(``blended = α × qual + (1-α) × quant``). May differ from the "
+            "configured default when one component is unavailable — see class "
+            "docstring."
+        ),
+    )
+    blended: float | None = Field(
+        default=None,
+        description=(
+            "Within-pillar blend ``α × qual + (1-α) × quant``. ``None`` only "
+            "when both qual_component AND quant_component are ``None``."
+        ),
+    )
+    pillar_weight: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Across-pillar weight in the composite weighted_base sum. "
+            "At Phase 4 default this is 0 for every pillar (legacy_blend "
+            "carries the entire composite). Phase 6 optimizer ramps these up."
+        ),
+    )
+    contribution: float = Field(
+        description=(
+            "Actual contribution to weighted_base: "
+            "``pillar_weight × blended`` (0 when blended is None)."
+        )
+    )
+
+
+class LegacyComponentBlend(BaseModel):
+    """Legacy quant/qual/factor blend kept alongside pillar contributions.
+
+    At Phase 4 default weights — ``w_legacy_quant = 0.35``,
+    ``w_legacy_qual = 0.35``, ``w_factor = 0.30`` — this term IS the
+    composite (pillar weights all 0), so ``weighted_base`` matches the
+    legacy ``compute_composite_score`` output BY CONSTRUCTION. The
+    plan-doc ±0.5 fixture regression criterion is satisfied structurally,
+    not by fixture-tuning hope.
+
+    Phase 6 weight optimizer ramps these weights DOWN as pillar weights
+    ramp UP. Sum of all weights (legacy + pillar) MUST equal 1.0 — see
+    ``CompositeBreakdown.check_weights_sum_to_one``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    quant_score: float | None = Field(
+        default=None,
+        description=(
+            "Opaque quant_score scalar from the Quant Analyst (0-100). "
+            "Carries information not available in the pillar decomposition "
+            "(quant_analyst doesn't emit per-pillar quant subscores yet), so "
+            "kept here at non-zero weight at Phase 4."
+        ),
+    )
+    qual_score: float | None = Field(
+        default=None,
+        description=(
+            "Opaque qual_score scalar from the Qual Analyst (0-100). When "
+            "pillar emission is enabled this is also derivable via "
+            "``QualitativePillarAssessment.derive_legacy_qual_score()`` for "
+            "consistency checking."
+        ),
+    )
+    factor_subscore: float | None = Field(
+        default=None,
+        description=(
+            "Regime-conditional linear blend of factor pillar composites "
+            "(quality / momentum / value / low_vol [+ growth / stewardship "
+            "post Phase 3b]). Already pillar-decomposed on the quant side, "
+            "so retained at non-zero weight pre-Phase-6."
+        ),
+    )
+    w_legacy_quant: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Weight on the legacy opaque quant_score scalar."
+    )
+    w_legacy_qual: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Weight on the legacy opaque qual_score scalar."
+    )
+    w_factor: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Weight on factor_subscore."
+    )
+    contribution: float = Field(
+        description=(
+            "Actual contribution to weighted_base: "
+            "``w_legacy_quant × quant_score + w_legacy_qual × qual_score "
+            "+ w_factor × factor_subscore`` (with None components zero-treated)."
+        )
+    )
+
+
+class CompositeBreakdown(BaseModel):
+    """Pillar-decomposed composite score breakdown — Phase 4 output of
+    the attractiveness-pillars-260520 arc.
+
+    Produced by alpha-engine-research's ``score_aggregator`` per ticker.
+    Consumed by alpha-engine-backtester (Phase 6 — weight optimizer for
+    per-pillar attribution + auto-tuned weights) and alpha-engine-
+    dashboard (Phase 7 — per-pillar radar rendering + drill-downs).
+
+    Why this shape lives in lib rather than research:
+      The original Phase 1 design (lib v0.22.0) carved this out as
+      research-internal "because it's coupled to research-internal
+      regime/macro state." Phase 4 lifts it because backtester and
+      dashboard both need to consume it; cross-repo schema drift is a
+      worse failure mode than the slight policy coupling. Policy
+      coupling is avoided by treating macro_shift + sector_modifier as
+      INPUT SCALARS in research's compute path — the shape itself is
+      policy-agnostic.
+
+    Invariants:
+      * ``Σ pillar_weights + (w_legacy_quant + w_legacy_qual + w_factor) == 1.0``
+        within 1e-6 tolerance. Enforced by ``check_weights_sum_to_one``.
+      * ``final_score == clamp(weighted_base + macro_shift + boosts_total
+        + catalyst_modulation, 0, 100)`` — round to 1 decimal.
+      * At Phase 4 default weights (pillar_weights all 0, legacy weights
+        0.35 / 0.35 / 0.30), ``final_score`` reproduces
+        ``compute_composite_score`` output exactly when all components
+        are present.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    final_score: float | None = Field(
+        default=None,
+        description=(
+            "Composite score (0-100, clamped) used by CIO + executor for "
+            "rating + ranking. ``None`` when score_failed."
+        ),
+    )
+    weighted_base: float | None = Field(
+        default=None,
+        description=(
+            "Composite before macro_shift + boosts + catalyst_modulation are "
+            "added. Equals Σ pillar_contributions.contribution + "
+            "legacy_blend.contribution. ``None`` when score_failed."
+        ),
+    )
+    macro_shift: float = Field(
+        description=(
+            "Macro sector modifier shift in score points. Range "
+            "[-MACRO_MAX_SHIFT_POINTS, +MACRO_MAX_SHIFT_POINTS] — currently "
+            "±25.0 in research config; passed in as a computed scalar."
+        )
+    )
+    boosts_total: float = Field(
+        description=(
+            "Sum of additive signal boosts after the per-composite cap. "
+            "Range [-max_aggregate_boost, +max_aggregate_boost] — currently "
+            "±10.0 in research config."
+        )
+    )
+    catalyst_modulation: int = Field(
+        default=0,
+        ge=-20,
+        le=20,
+        description=(
+            "Near-term catalyst horizon shift from "
+            "``QualitativePillarAssessment.catalyst_horizon_modulation``. "
+            "0 when pillar emission disabled or absent for ticker — keeps "
+            "Phase 4 default behavior identical to legacy."
+        ),
+    )
+    pillar_contributions: list[PillarContribution] = Field(
+        default_factory=list,
+        description=(
+            "Per-pillar contribution to the composite (0 or 6 entries — "
+            "either all 6 pillars or none if pillar_assessment absent). At "
+            "Phase 4 default, every pillar_weight is 0 so every contribution "
+            "is 0; the structural breakdown is still emitted for "
+            "observability + downstream attribution."
+        ),
+    )
+    legacy_blend: LegacyComponentBlend = Field(
+        description=(
+            "Legacy quant/qual/factor blend with its own weights. At Phase 4 "
+            "default this term IS the composite (pillar weights all 0)."
+        )
+    )
+    score_failed: bool = Field(
+        default=False,
+        description=(
+            "True when input components are all None — composite cannot be "
+            "computed and final_score is None. Downstream rating defaults to "
+            "HOLD."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_weights_sum_to_one(self) -> CompositeBreakdown:
+        """Sum of all weights (pillar + legacy) must equal 1.0.
+
+        Holds the invariant that weighted_base is bounded by [0, 100]
+        when every component is in [0, 100] — without this, the optimizer
+        could pick a weight config where weighted_base routinely exceeds
+        100 and the clamp eats real signal.
+
+        Tolerance 1e-6 accommodates floating-point error from
+        backtester-auto-tuned weights.
+        """
+        pillar_sum = sum(c.pillar_weight for c in self.pillar_contributions)
+        legacy_sum = (
+            self.legacy_blend.w_legacy_quant
+            + self.legacy_blend.w_legacy_qual
+            + self.legacy_blend.w_factor
+        )
+        total = pillar_sum + legacy_sum
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"CompositeBreakdown weights must sum to 1.0; got "
+                f"pillar_sum={pillar_sum:.6f} + legacy_sum={legacy_sum:.6f} "
+                f"= {total:.6f}"
+            )
+        return self
+
+    def pillar_contributions_by_name(self) -> dict[str, PillarContribution]:
+        """Return pillar_contributions as a dict keyed by pillar name.
+
+        Convenience for consumers that want pillar-keyed access. Returns
+        empty dict when pillar_contributions is empty (legacy-only path).
+        Iteration order follows ``PILLARS``.
+        """
+        by_name = {c.pillar: c for c in self.pillar_contributions}
+        return {p: by_name[p] for p in PILLARS if p in by_name}
