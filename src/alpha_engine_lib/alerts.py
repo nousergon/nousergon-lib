@@ -56,10 +56,13 @@ surveillance failure must not mask the primary error.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Final
 
 logger = logging.getLogger(__name__)
@@ -67,6 +70,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_SNS_TOPIC_NAME: Final[str] = "alpha-engine-alerts"
 DEFAULT_REGION: Final[str] = "us-east-1"
 SEVERITY_PUSH: Final[frozenset[str]] = frozenset({"error", "critical"})
+
+# ── Dedup (v0.24.0) ──────────────────────────────────────────────────────────
+# When the caller passes a ``dedup_key``, ``publish`` writes a marker at
+# ``s3://{dedup_bucket}/{DEDUP_MARKER_PREFIX}/{sha1(dedup_key)[:16]}.json``
+# after the first successful publish. Subsequent calls with the same
+# ``dedup_key`` within ``dedup_window_min`` minutes find the marker and
+# skip the publish. See the :func:`publish` docstring.
+DEFAULT_DEDUP_BUCKET: Final[str] = "alpha-engine-research"
+DEDUP_MARKER_PREFIX: Final[str] = "_alerts/_dedup"
+DEFAULT_DEDUP_WINDOW_MIN: Final[int] = 60
 
 
 @dataclass
@@ -85,17 +98,29 @@ class PublishResult:
     one channel and fail in the other. :attr:`any_ok` is the typical
     caller gate (success = at least one channel delivered the alert);
     :attr:`all_ok` is the strict variant for callers that want both.
+
+    When the caller passes ``dedup_key`` and an earlier publish for the
+    same key is still within window, :attr:`dedup_skipped` is True and
+    neither channel is attempted; :attr:`any_ok` still reports True
+    (the alert is logically in the operator's hands by virtue of the
+    earlier successful publish).
     """
 
     sns: ChannelResult = field(default_factory=lambda: ChannelResult(ok=False, detail="not attempted"))
     telegram: ChannelResult = field(default_factory=lambda: ChannelResult(ok=False, detail="not attempted"))
+    dedup_skipped: bool = False
+    dedup_reason: str = ""
 
     @property
     def any_ok(self) -> bool:
+        if self.dedup_skipped:
+            return True
         return self.sns.ok or self.telegram.ok
 
     @property
     def all_ok(self) -> bool:
+        if self.dedup_skipped:
+            return True
         return self.sns.ok and self.telegram.ok
 
 
@@ -157,6 +182,154 @@ def _publish_telegram(message: str, severity: str) -> ChannelResult:
         return ChannelResult(ok=False, detail=f"telegram error: {exc!r}")
 
 
+def _dedup_marker_key(dedup_key: str) -> str:
+    """Stable S3 key for a dedup_key marker.
+
+    Hashes the dedup_key so the on-disk path is opaque + bounded length
+    (S3 keys can be arbitrarily long but operator-facing S3 listings
+    are easier to read with fixed-width entries). The original
+    dedup_key is preserved inside the marker JSON body for debugging.
+    """
+    digest = hashlib.sha1(dedup_key.encode("utf-8")).hexdigest()[:16]
+    return f"{DEDUP_MARKER_PREFIX}/{digest}.json"
+
+
+def _check_dedup_marker(
+    bucket: str,
+    marker_key: str,
+    *,
+    dedup_window_min: int | None,
+) -> tuple[bool, str]:
+    """Check whether a recent publish for this dedup_key is still in window.
+
+    Returns ``(within_window, reason)``. ``within_window=True`` means
+    the caller should skip publish; ``False`` means proceed.
+
+    Fail-safe: any S3 error other than NoSuchKey returns
+    ``(False, "<error description>")`` so the caller proceeds to
+    publish. An extra alert is preferable to silently dropping a real
+    failure-surveillance event because the marker bucket was
+    unreachable.
+
+    ``dedup_window_min=None`` means "forever" — any existing marker
+    suppresses subsequent publishes indefinitely.
+    """
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError as exc:
+        return False, f"boto3 unavailable: {exc!r}"
+    client = boto3.client("s3")
+    try:
+        resp = client.get_object(Bucket=bucket, Key=marker_key)
+        payload = json.loads(resp["Body"].read())
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "NoSuchKey":
+            return False, "no marker"
+        logger.warning(
+            "alerts.publish: dedup marker check errored (fail-safe to publish): %s",
+            exc,
+        )
+        return False, f"marker check error: {exc!r}"
+    except Exception as exc:  # boto3 missing, network, JSON parse
+        logger.warning(
+            "alerts.publish: dedup marker parse failed (fail-safe to publish): %s",
+            exc,
+        )
+        return False, f"marker parse error: {exc!r}"
+
+    if dedup_window_min is None:
+        return True, f"marker exists; dedup_window_min=None (forever)"
+
+    last_at_str = payload.get("last_published_at") or payload.get("first_published_at")
+    if not last_at_str:
+        return False, "marker missing timestamp"
+    try:
+        last_at = datetime.fromisoformat(last_at_str.replace("Z", "+00:00"))
+    except ValueError:
+        return False, f"marker timestamp unparseable: {last_at_str!r}"
+
+    now = datetime.now(timezone.utc)
+    elapsed = now - last_at
+    window = timedelta(minutes=dedup_window_min)
+    if elapsed < window:
+        remaining = window - elapsed
+        return True, (
+            f"within {dedup_window_min}min window "
+            f"(last published {int(elapsed.total_seconds())}s ago; "
+            f"{int(remaining.total_seconds())}s remaining)"
+        )
+    return False, f"marker expired ({int(elapsed.total_seconds())}s ago > {dedup_window_min}min)"
+
+
+def _write_dedup_marker(
+    bucket: str,
+    marker_key: str,
+    *,
+    dedup_key: str,
+    formatted_message: str,
+) -> None:
+    """Persist (or refresh) the dedup marker after a successful publish.
+
+    Read-modify-write: increments ``publish_count`` if the marker
+    already exists, otherwise starts a fresh marker. Best-effort — any
+    failure is logged at WARNING and swallowed (worst case: one
+    duplicate alert next time within the window).
+    """
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError as exc:
+        logger.warning(
+            "alerts.publish: dedup marker write skipped — boto3 unavailable: %s",
+            exc,
+        )
+        return
+    client = boto3.client("s3")
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Read-modify-write so first_published_at is preserved across window
+    # refreshes; publish_count grows monotonically.
+    first_published_at = now_iso
+    publish_count = 1
+    try:
+        resp = client.get_object(Bucket=bucket, Key=marker_key)
+        prior = json.loads(resp["Body"].read())
+        first_published_at = prior.get("first_published_at", now_iso)
+        publish_count = int(prior.get("publish_count", 0)) + 1
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code != "NoSuchKey":
+            # Non-fatal — fall through to write a fresh marker.
+            logger.warning(
+                "alerts.publish: dedup marker RMW read failed (writing fresh): %s",
+                exc,
+            )
+    except Exception:  # JSON parse / corrupt marker — overwrite
+        pass
+
+    payload = {
+        "dedup_key": dedup_key,
+        "first_published_at": first_published_at,
+        "last_published_at": now_iso,
+        "publish_count": publish_count,
+        "message_preview": formatted_message[:200],
+    }
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=marker_key,
+            Body=json.dumps(payload).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "alerts.publish: dedup marker write failed "
+            "(best-effort, swallowed; next call within window may re-publish): %s",
+            exc,
+        )
+
+
 def publish(
     message: str,
     *,
@@ -165,6 +338,9 @@ def publish(
     sns: bool = True,
     telegram: bool = True,
     sns_topic_arn: str | None = None,
+    dedup_key: str | None = None,
+    dedup_window_min: int | None = DEFAULT_DEDUP_WINDOW_MIN,
+    dedup_bucket: str | None = None,
 ) -> PublishResult:
     """Fan out a failure alert to the operator-surveillance channels.
 
@@ -172,6 +348,30 @@ def publish(
     Telegram (``@nous_ergon_alerts_bot``). Pass ``sns=False`` /
     ``telegram=False`` to suppress individual channels (useful for
     tests, or for callers that have a narrower target).
+
+    **Dedup** (v0.24.0). When ``dedup_key`` is provided, the call
+    checks an S3 marker at
+    ``s3://{dedup_bucket}/_alerts/_dedup/{sha1(dedup_key)[:16]}.json``.
+    If the marker exists and the last publish for that key is within
+    ``dedup_window_min`` minutes (default ``60``; ``None`` = forever),
+    the publish is suppressed and :attr:`PublishResult.dedup_skipped`
+    is True. After a successful fresh publish, the marker is written
+    (or refreshed) with an incremented ``publish_count``. Use cases:
+
+    - **One email per cost anomaly** even when ``evaluate.py`` runs
+      multiple times for the same date — pass a deterministic
+      ``dedup_key`` derived from the anomaly inputs.
+    - **One alert per Lambda canary rollback episode** even when 8
+      Lambda repos cascade-fail from one shared lib regression — pass
+      ``dedup_key=f"canary-rollback-{lib_pin_sha}"`` so the cascading
+      deploys all collapse to one operator email.
+    - **Once-per-hour throttling** on noisy WARN paths — pass any
+      stable key + leave the default 60min window.
+
+    Dedup is best-effort: any S3 error during the check falls through
+    to publish (better an extra alert than a silent drop). Marker
+    write failure after a successful publish is logged but does NOT
+    propagate (worst case is one duplicate next call within window).
 
     :param message: The alert body. Severity tag + source prefix are
         prepended automatically (e.g. ``"[ERROR] spot_backtest.sh: <body>"``).
@@ -186,13 +386,44 @@ def publish(
     :param sns_topic_arn: Explicit topic ARN. Defaults to
         ``arn:aws:sns:{region}:{account_id}:alpha-engine-alerts`` resolved
         from env + STS.
+    :param dedup_key: Opaque caller-chosen string. Same key + same
+        window ⇒ at most one publish per window. ``None`` (default)
+        disables dedup entirely; legacy callers behave unchanged.
+    :param dedup_window_min: Window in minutes after which a fresh
+        publish is allowed for the same ``dedup_key``. Default
+        ``60``. Pass ``None`` for "forever" (publish once per
+        ``dedup_key`` for the lifetime of the marker bucket).
+    :param dedup_bucket: S3 bucket holding the markers. Defaults to
+        ``alpha-engine-research`` (the shared corpus bucket).
     :returns: :class:`PublishResult` — caller can inspect per-channel
         outcomes. :attr:`PublishResult.any_ok` is the typical success
         gate; :attr:`PublishResult.all_ok` is the strict variant.
+        On dedup-skip, :attr:`PublishResult.dedup_skipped` is True and
+        :attr:`PublishResult.dedup_reason` explains why.
     """
     result = PublishResult()
     formatted = _format_message(message, severity, source)
 
+    # ── Dedup check (pre-publish) ────────────────────────────────────────
+    marker_key: str | None = None
+    bucket = dedup_bucket or DEFAULT_DEDUP_BUCKET
+    if dedup_key:
+        marker_key = _dedup_marker_key(dedup_key)
+        within_window, reason = _check_dedup_marker(
+            bucket, marker_key, dedup_window_min=dedup_window_min,
+        )
+        if within_window:
+            result.dedup_skipped = True
+            result.dedup_reason = reason
+            result.sns = ChannelResult(ok=False, detail="suppressed by dedup")
+            result.telegram = ChannelResult(ok=False, detail="suppressed by dedup")
+            logger.info(
+                "alerts.publish: skipped publish for dedup_key=%r (%s)",
+                dedup_key, reason,
+            )
+            return result
+
+    # ── Publish ──────────────────────────────────────────────────────────
     if sns:
         arn = _resolve_sns_topic_arn(sns_topic_arn)
         if arn is None:
@@ -206,6 +437,13 @@ def publish(
 
     if telegram:
         result.telegram = _publish_telegram(formatted, severity=severity)
+
+    # ── Dedup marker write (post-publish, only if any channel succeeded) ─
+    if marker_key and (result.sns.ok or result.telegram.ok):
+        _write_dedup_marker(
+            bucket, marker_key,
+            dedup_key=dedup_key, formatted_message=formatted,
+        )
 
     return result
 
@@ -260,10 +498,50 @@ def main(argv: list[str] | None = None) -> int:
             "arn:aws:sns:{region}:{account_id}:alpha-engine-alerts."
         ),
     )
+    pub.add_argument(
+        "--dedup-key",
+        default=None,
+        help=(
+            "Optional opaque dedup key. When set, ``publish`` checks an "
+            "S3 marker first and suppresses the alert if an earlier "
+            "publish for the same key is within --dedup-window-min. "
+            "Use for cost anomalies / canary rollback episodes / any "
+            "noisy WARN path that benefits from rate-limiting. Bash "
+            "callers typically pass a bucketed timestamp, e.g. "
+            "--dedup-key \"canary-rollback-$(date -u +%Y%m%d%H)\"."
+        ),
+    )
+    pub.add_argument(
+        "--dedup-window-min",
+        type=int,
+        default=DEFAULT_DEDUP_WINDOW_MIN,
+        help=(
+            f"Window in minutes after which a fresh publish is allowed for "
+            f"the same --dedup-key (default: {DEFAULT_DEDUP_WINDOW_MIN}). "
+            "Pass 0 for 'forever' (publish once per --dedup-key for the "
+            "lifetime of the marker bucket)."
+        ),
+    )
+    pub.add_argument(
+        "--dedup-bucket",
+        default=None,
+        help=(
+            f"S3 bucket holding the dedup markers. Defaults to "
+            f"{DEFAULT_DEDUP_BUCKET!r}."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING)
+
+    # CLI convention: --dedup-window-min 0 = forever; map to None for the
+    # Python API (whose default is 60 + None=forever).
+    window_min: int | None
+    if args.dedup_window_min == 0:
+        window_min = None
+    else:
+        window_min = args.dedup_window_min
 
     result = publish(
         args.message,
@@ -272,15 +550,24 @@ def main(argv: list[str] | None = None) -> int:
         sns=not args.no_sns,
         telegram=not args.no_telegram,
         sns_topic_arn=args.sns_topic_arn,
+        dedup_key=args.dedup_key,
+        dedup_window_min=window_min,
+        dedup_bucket=args.dedup_bucket,
     )
 
     # One-line status to stderr (stdout reserved for structured output if
     # any caller starts parsing it). Bash callers can ignore.
-    print(
-        f"alerts.publish: sns.ok={result.sns.ok} ({result.sns.detail}); "
-        f"telegram.ok={result.telegram.ok} ({result.telegram.detail})",
-        file=sys.stderr,
-    )
+    if result.dedup_skipped:
+        print(
+            f"alerts.publish: dedup_skipped=True ({result.dedup_reason})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"alerts.publish: sns.ok={result.sns.ok} ({result.sns.detail}); "
+            f"telegram.ok={result.telegram.ok} ({result.telegram.detail})",
+            file=sys.stderr,
+        )
 
     return 0 if result.any_ok else 1
 
