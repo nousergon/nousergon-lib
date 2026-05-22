@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alpha-engine-lib"
-version = "0.24.0"
-description = "Shared utilities for Alpha Engine modules — preflight, logging, ArcticDB, dates, calendar, decision capture, cost tracking, RAG, agent output schemas, transparency-substrate health checks, SSM-backed secrets, universe-membership filtering, Telegram push notifications, failure-surveillance fan-out (SNS + Telegram with CLI for Bash callers + dedup-key/dedup-window-min S3-marker idempotency), data-source Protocols + shapes (NewsArticle / AnalystSnapshot / FilingDocument), and pillar-decomposed attractiveness scoring shapes (PILLARS / MoatAssessment / PillarSubscore / QualitativePillarAssessment / CompositeBreakdown)"
+version = "0.25.0"
+description = "Shared utilities for Alpha Engine modules — preflight, logging, ArcticDB, dates, calendar, decision capture, cost tracking, RAG, agent output schemas, transparency-substrate health checks, SSM-backed secrets, universe-membership filtering, Telegram push notifications, failure-surveillance fan-out (SNS + Telegram with CLI for Bash callers + dedup-key/dedup-window-min S3-marker idempotency), data-source Protocols + shapes (NewsArticle / AnalystSnapshot / FilingDocument), pillar-decomposed attractiveness scoring shapes (PILLARS / MoatAssessment / PillarSubscore / QualitativePillarAssessment / CompositeBreakdown), and SSM-step log-capture chokepoint (Python CLI replacement for the inline bash trap + tee pattern that broke under ASL States.Array escape semantics)"
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
 # 3.9 support 2026-04-29, so upgrade is on the near-term roadmap). All
