@@ -62,6 +62,16 @@ def test_wait_grouping_parents_are_in_registry():
     )
 
 
+def test_wait_for_instance_ready_maps_to_start_executor_ec2():
+    """Regression pin (v0.28.1) — `WaitForInstanceReady` is the post-boot
+    settle delay after `StartExecutorEC2` in the Weekday SF. Caught by
+    the alpha-engine-dashboard registry-drift CI test on first Phase-2
+    run; v0.28.0 shipped without it because the original `jq` walk
+    filtered to `Task`-type states and missed bare `Wait`-type companions.
+    """
+    assert registry.WAIT_GROUPING.get("WaitForInstanceReady") == "StartExecutorEC2"
+
+
 def test_wait_grouping_keys_are_wait_prefix():
     """Every key in WAIT_GROUPING is a ``WaitFor*`` state name (sanity check
     that we haven't accidentally rolled up a non-wait state)."""
