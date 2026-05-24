@@ -11,6 +11,7 @@ import pytest
 
 from alpha_engine_lib.logging import (
     JSONFormatter,
+    SecretsRedactingFilter,
     _seed_flow_doctor_secrets,
     get_flow_doctor,
     setup_logging,
@@ -368,3 +369,160 @@ def test_seed_runs_before_flow_doctor_init(
 
     for var in _FD_VARS:
         assert env_at_init[var] == f"resolved-{var}"
+
+
+# ── SecretsRedactingFilter ────────────────────────────────────────────────
+
+
+class _CapturingHandler(logging.Handler):
+    """Test helper that captures emitted messages."""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _run_through_filter(message: str, *args) -> str:
+    """Pipe a single log record through SecretsRedactingFilter + capture."""
+    logger = logging.getLogger("_redaction_test")
+    logger.handlers.clear()
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    handler = _CapturingHandler()
+    handler.addFilter(SecretsRedactingFilter())
+    logger.addHandler(handler)
+    logger.warning(message, *args)
+    return handler.messages[-1]
+
+
+def test_redacts_fmp_apikey_in_url():
+    msg = (
+        "FMP grades-consensus failed for APO: 402 "
+        "https://financialmodelingprep.com/stable/grades-consensus?"
+        "apikey=1vR8poht91Y6snXRwZdGaAUgqGAalagf&symbol=APO"
+    )
+    out = _run_through_filter(msg)
+    assert "1vR8poht91Y6snXRwZdGaAUgqGAalagf" not in out
+    assert "<REDACTED>" in out
+    assert "&symbol=APO" in out  # post-key URL params preserved
+
+
+def test_redacts_apikey_in_args_substitution():
+    """logger.warning('...%s', key) — redact AFTER format-string interp."""
+    msg = "FMP failed: %s"
+    url = "https://api.com/x?apikey=1vR8poht91Y6snXRwZdGaAUgqGAalagf"
+    out = _run_through_filter(msg, url)
+    assert "1vR8poht91Y6snXRwZdGaAUgqGAalagf" not in out
+    assert "<REDACTED>" in out
+
+
+def test_redacts_aws_access_key_id():
+    msg = "AWS credential AKIAIOSFODNN7EXAMPLE in env"
+    out = _run_through_filter(msg)
+    assert "AKIAIOSFODNN7EXAMPLE" not in out
+    assert "<AWS_ACCESS_KEY_REDACTED>" in out
+
+
+def test_redacts_anthropic_api_key():
+    msg = "Anthropic call failed with key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv"
+    out = _run_through_filter(msg)
+    assert "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv" not in out
+    assert "<ANTHROPIC_KEY_REDACTED>" in out
+
+
+def test_redacts_openai_style_key():
+    msg = "OpenAI key sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+    out = _run_through_filter(msg)
+    assert "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789" not in out
+    assert "<OPENAI_KEY_REDACTED>" in out
+
+
+def test_redacts_bearer_token():
+    msg = "Authorization: Bearer abc123def456ghi789jkl012"
+    out = _run_through_filter(msg)
+    assert "abc123def456ghi789jkl012" not in out
+    assert "<REDACTED>" in out
+
+
+def test_redacts_github_pat_classic_and_fine_grained():
+    classic = _run_through_filter("Token: ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ab")
+    assert "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ab" not in classic
+    assert "<GITHUB_TOKEN_REDACTED>" in classic
+    fg = _run_through_filter("Token: github_pat_11ABCDEFG0AbCdEfGhIjKlMnOpQrStUv")
+    assert "github_pat_11ABCDEFG0AbCdEfGhIjKlMnOpQrStUv" not in fg
+    assert "<GITHUB_TOKEN_REDACTED>" in fg
+
+
+def test_short_token_below_floor_not_redacted():
+    """A ?apikey=abc value below the 16-char floor is NOT redacted —
+    false-positive avoidance for short ID-like tokens."""
+    out = _run_through_filter("Request: https://api.com/x?apikey=shortkey&y=1")
+    assert "shortkey" in out  # under length floor
+    assert "<REDACTED>" not in out
+
+
+def test_no_match_is_unchanged():
+    msg = "Normal log line with no secrets"
+    out = _run_through_filter(msg)
+    assert out == msg
+
+
+def test_filter_never_raises_on_malformed_record():
+    """A filter that crashes is worse than one that no-ops — verify the
+    catch-all swallows exceptions silently."""
+    f = SecretsRedactingFilter()
+    # Synthesise a record whose getMessage will raise — args mismatch.
+    record = logging.LogRecord(
+        name="test", level=logging.INFO, pathname=__file__, lineno=1,
+        msg="%s %s %s", args=("only-one-arg",), exc_info=None,
+    )
+    # Should not raise; should return True (record passes through).
+    assert f.filter(record) is True
+
+
+def test_per_record_opt_out_via_no_redact_attr():
+    f = SecretsRedactingFilter()
+    msg = "apikey=1vR8poht91Y6snXRwZdGaAUgqGAalagf"
+    record = logging.LogRecord(
+        name="test", level=logging.INFO, pathname=__file__, lineno=1,
+        msg=msg, args=(), exc_info=None,
+    )
+    record.no_redact = True
+    f.filter(record)
+    # Unmodified since opt-out flag was set
+    assert record.getMessage() == msg
+
+
+def test_setup_logging_attaches_filter_by_default(monkeypatch):
+    monkeypatch.delenv("ALPHA_ENGINE_DISABLE_LOG_REDACTION", raising=False)
+    setup_logging("test")
+    root = logging.getLogger()
+    assert len(root.handlers) == 1
+    handler = root.handlers[0]
+    assert any(
+        isinstance(f, SecretsRedactingFilter) for f in handler.filters
+    ), "SecretsRedactingFilter must be attached by default"
+
+
+def test_setup_logging_opt_out_via_env_var(monkeypatch):
+    monkeypatch.setenv("ALPHA_ENGINE_DISABLE_LOG_REDACTION", "1")
+    setup_logging("test")
+    root = logging.getLogger()
+    handler = root.handlers[0]
+    assert not any(
+        isinstance(f, SecretsRedactingFilter) for f in handler.filters
+    ), "Filter must NOT be attached when ALPHA_ENGINE_DISABLE_LOG_REDACTION=1"
+
+
+def test_end_to_end_setup_logging_redacts_emitted_message(monkeypatch, capsys):
+    monkeypatch.delenv("ALPHA_ENGINE_DISABLE_LOG_REDACTION", raising=False)
+    setup_logging("test")
+    logging.getLogger().warning(
+        "FMP failed: https://x.com/?apikey=1vR8poht91Y6snXRwZdGaAUgqGAalagf"
+    )
+    captured = capsys.readouterr()
+    assert "1vR8poht91Y6snXRwZdGaAUgqGAalagf" not in (captured.out + captured.err)
+    assert "<REDACTED>" in (captured.out + captured.err)

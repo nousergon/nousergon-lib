@@ -59,6 +59,96 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
+# Default-active secrets redaction patterns. Applied at the logging-handler
+# layer by SecretsRedactingFilter so every log record reaching stdout / CW
+# Logs / flow-doctor has the matching substrings replaced. Conservative
+# by design — false positives (over-redaction) are visible; false negatives
+# (leaked keys) reach public CW Logs.
+#
+# Pattern list is closed-form: every alpha-engine secret class known to leak
+# at the data-collector / research / predictor / backtester log sites. Adding
+# a new pattern is a one-line addition; opt-out per-record/per-attach is
+# possible via ``record.no_redact = True`` (rare — see ``SecretsRedactingFilter``).
+#
+# Origin: 2026-05-24 audit on alpha-engine-research-runner CW Logs surfaced
+# the FMP API key in plaintext inside HTTP-error WARNING lines (the FMP
+# /stable 402 paid-tier errors mid-Research). alpha-engine-data #255 had
+# shipped a repo-local scrubber for the same defect class earlier; lifting
+# to the lib chokepoint per [[feedback_lift_invariants_to_chokepoint_after_second_recurrence]]
+# closes the recurrence permanently across every repo that consumes
+# ``alpha_engine_lib.logging.setup_logging``.
+_SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # URL-query-string credentials: `?apikey=...&symbol=X` /
+    # `?api_key=...` / `?key=...` / `?token=...`. Conservative length
+    # floor (16 chars) avoids redacting short ID-like tokens that look
+    # alphanumeric but aren't secrets.
+    (
+        re.compile(
+            r"([?&](?:apikey|api_key|key|token|access_token|auth_token)=)"
+            r"([A-Za-z0-9_\-\.]{16,})"
+        ),
+        r"\1<REDACTED>",
+    ),
+    # AWS Access Key ID — exactly 16 alphanumerics after AKIA prefix.
+    (re.compile(r"\bAKIA[A-Z0-9]{16}\b"), "<AWS_ACCESS_KEY_REDACTED>"),
+    # Anthropic API keys — sk-ant-{api,sid,oat}-...
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{16,}"), "<ANTHROPIC_KEY_REDACTED>"),
+    # OpenAI-style secret keys — sk-... 32+ chars (covers project keys).
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{32,}"), "<OPENAI_KEY_REDACTED>"),
+    # Authorization: Bearer <token> headers, case-insensitive.
+    (
+        re.compile(r"(authorization:\s*bearer\s+)([A-Za-z0-9_\-\.]+)", re.IGNORECASE),
+        r"\1<REDACTED>",
+    ),
+    # GitHub personal access tokens — classic (ghp_*) and fine-grained
+    # (github_pat_*). Both have well-known prefixes; min-length 30
+    # guards against the prefix-alone false-positive.
+    (re.compile(r"\b(?:ghp_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9_]{30,}"), "<GITHUB_TOKEN_REDACTED>"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "<GITHUB_TOKEN_REDACTED>"),
+)
+
+
+class SecretsRedactingFilter(logging.Filter):
+    """logging.Filter that redacts known secret-shaped substrings from
+    every log record's formatted message.
+
+    Attached by default to the handler created by :func:`setup_logging`.
+    Opt-out via the ``ALPHA_ENGINE_DISABLE_LOG_REDACTION=1`` env var (for
+    cases where redaction obscures debugging of a non-secret pattern that
+    matches a redaction regex by coincidence).
+
+    Per-record opt-out is also possible via ``record.no_redact = True``
+    on a record where the redaction is known-safe to skip. Use rarely —
+    the default-active posture is a security property.
+
+    Never raises. A regex compilation or replacement error is caught and
+    the original record passes through unmodified (better to log
+    something than nothing). The catch is intentionally broad: a logging
+    filter that crashes is worse than one that silently no-ops.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "no_redact", False):
+            return True
+        try:
+            # Render the message with its args so substitution sees the
+            # actual emitted text (otherwise a `logger.warning("...%s...", key)`
+            # would pass `record.msg` containing only the format string).
+            rendered = record.getMessage()
+            redacted = rendered
+            for pattern, replacement in _SECRET_REDACTION_PATTERNS:
+                redacted = pattern.sub(replacement, redacted)
+            if redacted != rendered:
+                # Replace the format string + clear args so downstream
+                # formatters re-emit the redacted text rather than
+                # re-interpolating.
+                record.msg = redacted
+                record.args = ()
+        except Exception:  # noqa: BLE001 - filter MUST NOT crash logging
+            pass
+        return True
+
+
 def get_flow_doctor():
     """Return the shared flow-doctor instance, or None if not initialized."""
     return _fd_instance
@@ -189,6 +279,15 @@ def setup_logging(
         handler.setFormatter(logging.Formatter(
             f"%(asctime)s %(levelname)s [{name}] %(message)s"
         ))
+
+    # Attach secrets-redacting filter by default. Closes the FMP-API-key /
+    # AWS-key / Anthropic-key / GitHub-PAT plaintext-log class system-wide
+    # (every consumer of alpha_engine_lib.logging.setup_logging inherits
+    # the filter on its next lib pin bump). Opt-out via
+    # ALPHA_ENGINE_DISABLE_LOG_REDACTION=1 for the rare debugging scenario
+    # where a redaction regex matches a non-secret pattern.
+    if os.environ.get("ALPHA_ENGINE_DISABLE_LOG_REDACTION", "0") != "1":
+        handler.addFilter(SecretsRedactingFilter())
 
     root = logging.getLogger()
     root.handlers.clear()
