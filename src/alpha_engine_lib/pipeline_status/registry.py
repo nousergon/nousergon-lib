@@ -75,6 +75,7 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # Weekday SF
     "WaitForMorningPlanner": "RunMorningPlanner",
     "WaitForTradingDayCheck": "CheckTradingDay",
+    "WaitForInstanceReady": "StartExecutorEC2",
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
     # the Saturday map above (same state name). Lookup-by-name is OK because
     # the parent name is the same in both SFs.
