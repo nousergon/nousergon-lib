@@ -18,7 +18,9 @@ from alpha_engine_lib.cost import (
     PriceTable,
     PriceTableLoadError,
     compute_cost,
+    load_default_pricing,
     load_pricing,
+    metadata_from_anthropic_message,
     recompute_cost,
 )
 from alpha_engine_lib.decision_capture import ModelMetadata
@@ -329,3 +331,122 @@ class TestLoadPricing:
         )
         with pytest.raises(PriceTableLoadError, match="not.*sorted"):
             load_pricing(yaml_path)
+
+
+# ── load_default_pricing (packaged YAML) ──────────────────────────────────
+
+
+class TestLoadDefaultPricing:
+    def test_returns_pricetable_with_known_models(self):
+        table = load_default_pricing()
+        # Packaged file ships cards for the three current frontier models.
+        # The exact rates may evolve; we only assert the models are present
+        # so this test doesn't break on every price update.
+        names = {c.model_name for c in table.cards}
+        assert "claude-haiku-4-5" in names
+        assert "claude-sonnet-4-6" in names
+        assert "claude-opus-4-7" in names
+
+    def test_default_card_lookup_works(self):
+        table = load_default_pricing()
+        card = table.get("claude-sonnet-4-6", date(2026, 5, 25))
+        # Sonnet 4.x input rate is $3/M; locked here as a smoke check
+        # that the packaged YAML actually parsed.
+        assert card.input_per_1m == pytest.approx(3.0)
+
+
+# ── metadata_from_anthropic_message (SDK adapter) ─────────────────────────
+
+
+class _FakeUsage:
+    """Duck-typed stand-in for ``anthropic.types.Usage``."""
+
+    def __init__(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_input_tokens: int | None = None,
+        cache_creation_input_tokens: int | None = None,
+    ):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.cache_read_input_tokens = cache_read_input_tokens
+        self.cache_creation_input_tokens = cache_creation_input_tokens
+
+
+class _FakeMessage:
+    """Duck-typed stand-in for ``anthropic.types.Message``."""
+
+    def __init__(self, *, model: str, usage: _FakeUsage):
+        self.model = model
+        self.usage = usage
+
+
+class TestMetadataFromAnthropicMessage:
+    def test_basic_no_cache(self):
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(input_tokens=850, output_tokens=2700),
+        )
+        m = metadata_from_anthropic_message(msg)
+        assert m.model_name == "claude-sonnet-4-6"
+        assert m.input_tokens == 850
+        assert m.output_tokens == 2700
+        assert m.cache_read_tokens == 0
+        assert m.cache_create_tokens == 0
+        assert m.cost_usd == 0.0  # caller fills via recompute_cost
+
+    def test_with_cache_fields_populated(self):
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(
+                input_tokens=100,
+                output_tokens=200,
+                cache_read_input_tokens=1500,
+                cache_creation_input_tokens=2000,
+            ),
+        )
+        m = metadata_from_anthropic_message(msg)
+        assert m.cache_read_tokens == 1500
+        assert m.cache_create_tokens == 2000
+
+    def test_none_cache_fields_zero_default(self):
+        # Anthropic SDK returns None on these when caching wasn't used —
+        # adapter must zero-default, not propagate None into ModelMetadata
+        # (which would fail ge=0 validation).
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(
+                input_tokens=10,
+                output_tokens=20,
+                cache_read_input_tokens=None,
+                cache_creation_input_tokens=None,
+            ),
+        )
+        m = metadata_from_anthropic_message(msg)
+        assert m.cache_read_tokens == 0
+        assert m.cache_create_tokens == 0
+
+    def test_model_name_override(self):
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6-20260101",
+            usage=_FakeUsage(input_tokens=1, output_tokens=1),
+        )
+        m = metadata_from_anthropic_message(msg, model_name="claude-sonnet-4-6")
+        assert m.model_name == "claude-sonnet-4-6"
+
+    def test_integrates_with_recompute_cost(self):
+        # End-to-end: SDK message → ModelMetadata → recompute against
+        # the packaged default rate card. Locks the seam morning-signal
+        # (and any other raw-SDK consumer) will actually use.
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(input_tokens=1_000_000, output_tokens=0),
+        )
+        m = metadata_from_anthropic_message(msg)
+        cost = recompute_cost(m, load_default_pricing(), at=date(2026, 5, 25))
+        # 1M Sonnet input tokens @ $3/M = $3.00.
+        assert cost == pytest.approx(3.0)
+        assert m.cost_usd == pytest.approx(3.0)
+

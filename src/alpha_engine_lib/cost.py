@@ -31,9 +31,14 @@ overlap or unsorted input per ``feedback_no_silent_fails``.
 - :class:`PriceCard` — one (model_name, effective_from) → per-1M-token rate row.
 - :class:`PriceTable` — wraps a list of cards with effective-date lookup.
 - :func:`load_pricing` — reads ``model_pricing.yaml`` into a ``PriceTable``.
+- :func:`load_default_pricing` — loads the packaged-default rate card for
+  consumers that don't maintain their own external YAML.
 - :func:`compute_cost` — pure math from token counts + price card.
 - :func:`recompute_cost` — recompute and overwrite ``cost_usd`` on a
   ``ModelMetadata`` from a ``PriceTable`` and a query date.
+- :func:`metadata_from_anthropic_message` — raw-Anthropic-SDK adapter;
+  maps a ``Message.usage`` onto a ``ModelMetadata`` for consumers using
+  the SDK directly (no LangChain).
 - :exc:`PriceCardLookupError` — raised when no card matches a (model, date)
   query (do not swallow).
 
@@ -44,13 +49,22 @@ Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from alpha_engine_lib.decision_capture import ModelMetadata
+
+if TYPE_CHECKING:
+    # Structural Protocol below describes the only attributes we touch on
+    # an Anthropic SDK ``Message`` — kept here so that ``anthropic`` does
+    # not have to be a hard dependency of this library. Consumers that
+    # call :func:`metadata_from_anthropic_message` install ``anthropic``
+    # in their own environment.
+    pass
 
 
 # ── Price card ────────────────────────────────────────────────────────────
@@ -165,6 +179,42 @@ class PriceTable(BaseModel):
 
 
 # ── YAML loader ───────────────────────────────────────────────────────────
+
+
+_DEFAULT_PRICING_RESOURCE = "model_pricing.yaml"
+
+
+def load_default_pricing() -> PriceTable:
+    """Load the :class:`PriceTable` shipped inside this package.
+
+    Convenience entry point for consumers that don't maintain their own
+    operator-managed rate card (e.g. ``morning-signal`` or any other
+    non-alpha-engine app pulling in this library purely for cost
+    telemetry). Alpha-engine repos that need a separately-versioned card
+    (so an Anthropic price change can ship without a lib bump) should
+    keep calling :func:`load_pricing` with their own YAML path.
+
+    The default file lives at ``alpha_engine_lib/model_pricing.yaml`` and
+    is shipped as package data; updates ride normal lib version bumps.
+    """
+    with resources.files("alpha_engine_lib").joinpath(
+        _DEFAULT_PRICING_RESOURCE
+    ).open() as fh:
+        raw: Any = yaml.safe_load(fh)
+
+    if not isinstance(raw, dict) or "cards" not in raw:
+        raise PriceTableLoadError(
+            f"Packaged {_DEFAULT_PRICING_RESOURCE}: expected top-level "
+            f"mapping with 'cards' key; got {type(raw).__name__}"
+        )
+    if not isinstance(raw["cards"], list):
+        raise PriceTableLoadError(
+            f"Packaged {_DEFAULT_PRICING_RESOURCE}: 'cards' must be a "
+            f"list; got {type(raw['cards']).__name__}"
+        )
+
+    cards = [PriceCard.model_validate(entry) for entry in raw["cards"]]
+    return PriceTable(cards=cards)
 
 
 def load_pricing(path: Path | str) -> PriceTable:
@@ -292,3 +342,84 @@ def recompute_cost(
     if overwrite:
         metadata.cost_usd = cost
     return cost
+
+
+# ── Anthropic SDK adapter ─────────────────────────────────────────────────
+
+
+class _AnthropicUsageLike(Protocol):
+    """Structural type for an Anthropic SDK ``Usage`` object.
+
+    Mirrors ``anthropic.types.Usage`` (input_tokens / output_tokens are
+    required; cache fields and server_tool_use are optional). Defined as
+    a Protocol so this module does not import ``anthropic`` at runtime —
+    consumers pass the SDK's actual ``Usage`` and duck-typing handles
+    the rest.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cache_read_input_tokens: int | None
+    cache_creation_input_tokens: int | None
+
+
+class _AnthropicMessageLike(Protocol):
+    """Structural type for an Anthropic SDK ``Message`` object."""
+
+    model: str
+    usage: _AnthropicUsageLike
+
+
+def metadata_from_anthropic_message(
+    msg: _AnthropicMessageLike,
+    *,
+    model_name: str | None = None,
+) -> ModelMetadata:
+    """Map an Anthropic SDK ``Message.usage`` onto a :class:`ModelMetadata`.
+
+    Raw-Anthropic-SDK counterpart to the LangChain callback handler in
+    ``alpha-engine-research/graph/llm_cost_tracker.py``. For consumers
+    that call ``client.messages.create()`` directly (no LangChain stack),
+    this is the canonical capture point — pass the returned ``Message``
+    and the adapter pulls out the four token classes the cost-telemetry
+    pipeline cares about.
+
+    Parameters
+    ----------
+    msg
+        Any object shaped like ``anthropic.types.Message`` (must expose
+        ``model: str`` and ``usage`` with the four token-count attributes).
+        Not imported at runtime — the structural Protocol above is the
+        only contract.
+    model_name
+        Override for ``ModelMetadata.model_name``. Defaults to
+        ``msg.model`` — set this when the SDK reports a different
+        identifier than the one cataloged in your price table (e.g.
+        dated suffixes, model aliases).
+
+    Returns
+    -------
+    ModelMetadata
+        With ``model_name`` populated, token counts from ``msg.usage``
+        (cache fields zero-defaulted when the SDK returns ``None``), and
+        ``cost_usd=0.0``. Call :func:`recompute_cost` with a
+        :class:`PriceTable` to fill the cost.
+
+    Notes
+    -----
+    Server-tool-use counts (e.g. ``usage.server_tool_use.web_search_requests``)
+    are NOT folded into ``ModelMetadata`` here — they would inflate token
+    cost using a token-based rate when the actual billing is a flat fee
+    per request. A dedicated web-search-fee surface is a planned follow-up
+    once a second consumer materializes (the per-request-fee primitive is
+    a different shape from the per-1M-token primitive this module
+    handles).
+    """
+    u = msg.usage
+    return ModelMetadata(
+        model_name=model_name if model_name is not None else msg.model,
+        input_tokens=u.input_tokens,
+        output_tokens=u.output_tokens,
+        cache_read_tokens=getattr(u, "cache_read_input_tokens", None) or 0,
+        cache_create_tokens=getattr(u, "cache_creation_input_tokens", None) or 0,
+    )
