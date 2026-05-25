@@ -4,36 +4,41 @@ Reranking sits between candidate generation (`retrieve(method="hybrid", ...)`)
 and LLM consumption. Hybrid retrieval over a wide candidate pool (e.g. top-30)
 gives high recall; rerank then provides precision by scoring each
 ``(query, document)`` pair jointly under a model that's purpose-built for
-relevance ranking. This decouples the two trade-offs that bi-encoders /
-keyword retrieval can't resolve simultaneously.
+relevance ranking.
 
-Two implementations are shipped:
+**One implementation shipped:** :class:`CrossEncoderReranker` — local
+BAAI ``bge-reranker-v2-m3`` (or any cross-encoder loadable via
+``sentence-transformers``). Zero external API surface, deterministic,
+~100-300ms latency on CPU at top-50. The institutional/SOTA rerank
+pattern for production RAG is domain-finetuned cross-encoders;
+general-purpose CE models (like our bundled BAAI default) are tier-2
+SOTA, dominant for general-domain RAG but expected to regress on
+specialized corpora until finetuned on domain-labeled (query, doc,
+relevance) pairs.
 
-- :class:`CrossEncoderReranker` — local BAAI ``bge-reranker-v2-m3`` (or any
-  cross-encoder loadable via ``sentence-transformers``). Zero external API
-  surface, deterministic, ~100-300ms latency on CPU at top-50. Default for
-  Alpha Engine consumers per the no-new-vendor posture.
-- :class:`LLMJudgeReranker` — Anthropic Haiku with a 1-5 relevance rubric.
-  Higher latency + cost than cross-encoder; configurable opt-in for
-  scenarios that need rerank criteria beyond pure semantic similarity
-  ("rerank by recency-weighted relevance", "rerank by financial
-  materiality").
+**``LLMJudgeReranker`` removed v0.34.0** (2026-05-25). The class
+fired one Haiku call per (query, doc) pair — a tier-5 SOTA approach
+useful for novel rubrics that lack training labels, not for general
+relevance reranking. Empirical eval on the SEC-filings RAG corpus
+(2026-05-12, EXPERIMENTS.md) measured -14.2% recall@10 vs the hybrid
+w=0.7 baseline. Removed per ``[[preference_llm_calls_confined_to_research_module]]``
++ the no-lift finding. Re-attempting LLM-judge rerank in the future
+goes inside alpha-engine-research (where LLM calls belong); the
+institutional rerank-revisit path is domain-finetune the CE model
+on operator-labeled retrieval triples.
 
-Both implementations share the :class:`Reranker` protocol and the in-process
-:class:`RerankCache` (LRU, keyed by ``sha256(query) + chunk_id``). Cache
-lifetime is the process / Lambda container — no cross-run persistence,
-because query embeddings drift with corpus updates and rerank scores are
-cheap-to-recompute relative to the LLM call they enable.
+The :class:`RerankCache` (LRU, keyed by ``sha256(query) + chunk_id``)
+is process-local — no cross-run persistence, because query embeddings
+drift with corpus updates and rerank scores are cheap to recompute.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from .retrieval import RetrievalResult
 
@@ -201,100 +206,6 @@ class CrossEncoderReranker:
         return _attach_and_sort(candidates, scores, self.name, top_k)
 
 
-# ── LLM-as-judge ────────────────────────────────────────────────────────────
-
-
-# Default rubric — kept terse to fit a Haiku context window comfortably
-# at top-50 candidates and to leave room for the candidate text itself.
-# Scores follow a 1-5 integer Likert that the model returns as plain
-# JSON for deterministic parsing.
-_DEFAULT_LLM_RUBRIC = (
-    "Rate the relevance of the following document to the query on a "
-    "1-5 scale where 1=irrelevant, 3=tangentially related, 5=directly "
-    "answers the query. Respond with ONLY a single integer between 1 "
-    "and 5."
-)
-
-
-@dataclass
-class LLMJudgeReranker:
-    """LLM-as-judge reranker — one Haiku call per (query, doc) pair.
-
-    More expensive + slower than the cross-encoder (one LLM round-trip
-    per candidate vs. one batched local-model inference for the whole
-    set) but more flexible: the rubric can encode criteria beyond
-    semantic similarity ("rerank by recency-weighted financial
-    materiality"). Configure via :attr:`rubric` at construction.
-
-    Default ``rubric`` is a strict 1-5 Likert; output is parsed as
-    ``int(response.strip()[0])`` to tolerate the occasional Haiku
-    leading whitespace or trailing punctuation. Parses that fail
-    produce a neutral score of 3 + a warning log; the caller's batch
-    still completes.
-
-    The Anthropic client is injected so consumers can plug in a
-    pre-configured ``ChatAnthropic`` (langchain) or
-    ``anthropic.Anthropic`` instance. The protocol surface is just
-    ``client.messages.create(...)`` for the raw SDK shape.
-    """
-
-    client: object
-    model: str = "claude-haiku-4-5-20251001"
-    rubric: str = _DEFAULT_LLM_RUBRIC
-    cache: RerankCache = field(default_factory=RerankCache)
-    name: str = "llm_judge"
-
-    def rerank(
-        self,
-        query: str,
-        candidates: list[RetrievalResult],
-        top_k: int,
-    ) -> list[RetrievalResult]:
-        if not candidates:
-            return []
-
-        scores: list[float | None] = [None] * len(candidates)
-        for idx, cand in enumerate(candidates):
-            key = self.cache.make_key(query, cand.chunk_id)
-            cached = self.cache.get(key)
-            if cached is not None:
-                scores[idx] = cached
-                continue
-            score = self._score_one(query, cand.content)
-            scores[idx] = score
-            self.cache.put(key, score)
-
-        return _attach_and_sort(candidates, scores, self.name, top_k)
-
-    def _score_one(self, query: str, content: str) -> float:
-        # Truncate the candidate text so a top-50 sweep at ~3K tokens per
-        # candidate doesn't push the prompt past Haiku's window.
-        snippet = content[:4000]
-        prompt = (
-            f"{self.rubric}\n\n"
-            f"Query: {query}\n\n"
-            f"Document:\n{snippet}\n\n"
-            f"Score (1-5):"
-        )
-        try:
-            response = self.client.messages.create(  # type: ignore[attr-defined]
-                model=self.model,
-                max_tokens=8,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            # Anthropic SDK response shape: response.content is a list of
-            # content blocks; the first text block holds the integer.
-            text_block = response.content[0]
-            raw = getattr(text_block, "text", str(text_block)).strip()
-            return float(int(raw[0]))
-        except (ValueError, IndexError, AttributeError) as exc:
-            logger.warning(
-                "LLMJudgeReranker parse-fail (returning neutral 3): %s — raw=%r",
-                exc, locals().get("raw", "<no response>"),
-            )
-            return 3.0
-
-
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -331,47 +242,25 @@ def _attach_and_sort(
 _RERANKER_REGISTRY: dict[str, Reranker] = {}
 
 
-# Factory hook used by :func:`get_reranker` for the ``"llm_judge"``
-# case — exposed at module scope so tests can patch it without
-# importing the anthropic SDK. Default constructs an Anthropic client
-# from the environment, matching the pattern used elsewhere in
-# alpha-engine-research.
-def _default_llm_judge_factory() -> Reranker:
-    try:
-        from anthropic import Anthropic  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise ImportError(
-            "LLMJudgeReranker requires the anthropic SDK. "
-            "Install via: pip install anthropic"
-        ) from exc
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "LLMJudgeReranker needs ANTHROPIC_API_KEY in the environment."
-        )
-    return LLMJudgeReranker(client=Anthropic(api_key=api_key))
-
-
-_LLM_JUDGE_FACTORY: Callable[[], Reranker] = _default_llm_judge_factory
-
-
 def get_reranker(name: str) -> Reranker:
     """Resolve a named reranker, constructing + caching on first use.
 
-    Supported names: ``"cross_encoder"`` (default — local BAAI),
-    ``"llm_judge"`` (Anthropic Haiku via the ``anthropic`` SDK).
-    Tests register fakes by writing directly to
-    :data:`_RERANKER_REGISTRY` before the ``retrieve(rerank=...)`` call.
+    Supported names: ``"cross_encoder"`` (local BAAI bge-reranker-v2-m3
+    via sentence-transformers). Tests register fakes by writing
+    directly to :data:`_RERANKER_REGISTRY` before the
+    ``retrieve(rerank=...)`` call.
+
+    ``"llm_judge"`` was removed v0.34.0 — see module docstring for the
+    no-lift finding + the institutional rerank-revisit path
+    (domain-finetune the CE model, not LLM-judge).
     """
     if name in _RERANKER_REGISTRY:
         return _RERANKER_REGISTRY[name]
     if name == "cross_encoder":
         instance: Reranker = CrossEncoderReranker()
-    elif name == "llm_judge":
-        instance = _LLM_JUDGE_FACTORY()
     else:
         raise ValueError(
-            f"Unknown reranker {name!r}; supported: 'cross_encoder', 'llm_judge'"
+            f"Unknown reranker {name!r}; supported: 'cross_encoder'"
         )
     _RERANKER_REGISTRY[name] = instance
     return instance

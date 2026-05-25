@@ -46,8 +46,8 @@ class RetrievalResult:
     vector_score: float | None = None    # cosine similarity, [-1, 1]; None if not retrieved via vector
     keyword_score: float | None = None   # ts_rank_cd, [0, ∞); None if not retrieved via keyword
     combined_score: float | None = None  # blended score in hybrid mode; None for non-hybrid
-    rerank_score: float | None = None    # cross-encoder / LLM-judge score; None if rerank wasn't run
-    rerank_method: str | None = None     # "cross_encoder" / "llm_judge" / None — disambiguates which reranker stamped this
+    rerank_score: float | None = None    # cross-encoder score; None if rerank wasn't run
+    rerank_method: str | None = None     # "cross_encoder" / None — disambiguates which reranker stamped this
 
 
 def retrieve(
@@ -78,12 +78,11 @@ def retrieve(
             Ignored for non-hybrid methods.
         rerank: When set, run a reranker over the retrieved candidates
             before truncating to ``top_k``. Supported values:
-            ``"cross_encoder"`` (local BAAI bge-reranker-v2-m3 — default
-            choice when reranking, no API cost) or ``"llm_judge"``
-            (Anthropic Haiku with a 1-5 relevance rubric — opt-in,
-            higher latency + cost). ``None`` (default) preserves the
-            pre-rerank behavior — back-compat path for callers not yet
-            wired to reranking.
+            ``"cross_encoder"`` (local BAAI bge-reranker-v2-m3 — no
+            API cost). ``None`` (default) preserves the pre-rerank
+            behavior — back-compat path for callers not yet wired to
+            reranking. ``"llm_judge"`` was removed v0.34.0 (see
+            ``rerank`` module docstring for the no-lift finding).
         rerank_input_n: When ``rerank`` is set, retrieve this many
             candidates from the underlying method before passing the
             pool to the reranker. Larger pools give the reranker more
