@@ -191,6 +191,30 @@ def _label_for_arn(state_machine_arn: str) -> str:
     return PIPELINE_LABELS.get(sm_name, sm_name or "Unknown SF")
 
 
+def _region_from_arn(state_machine_arn: str) -> Optional[str]:
+    """Extract the AWS region from a Step Functions ARN.
+
+    ARN shape: ``arn:aws:states:<region>:<account>:stateMachine:<name>``.
+    Returns the region segment, or None if the ARN doesn't parse — in
+    which case the boto3 client falls back to its normal region resolution
+    (env vars / config / instance metadata). The lib is permissive on
+    malformed input here because the downstream boto3 call will fail
+    loud with a typed error that surfaces via ``_raise_for_boto_error``.
+
+    Why this exists: Step Functions is a regional service and boto3
+    raises ``NoRegionError`` if no region is discoverable. Streamlit
+    systemd environments on EC2 may not have ``AWS_REGION`` set, but the
+    ARN ALWAYS carries the region — extracting it eliminates a class of
+    "missing region" failures at the lib chokepoint.
+    """
+    if not state_machine_arn or not state_machine_arn.startswith("arn:"):
+        return None
+    parts = state_machine_arn.split(":")
+    if len(parts) < 4 or not parts[3]:
+        return None
+    return parts[3]
+
+
 def _failure_cause_from(describe_resp: dict) -> str:
     """Extract + truncate the failure cause from DescribeExecution response.
 
@@ -430,7 +454,7 @@ def read_pipeline_state(
     if client is None:  # pragma: no cover — production path
         import boto3
 
-        client = boto3.client("stepfunctions")
+        client = boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn))
 
     label = _label_for_arn(state_machine_arn)
 
