@@ -1,0 +1,55 @@
+name: Tests
+
+# pytest matrix across declared Python versions. Required check on PRs to
+# main so a lib feature can't ship before being validated against the
+# floor of declared support.
+#
+# Origin: ROADMAP L218 — alpha-engine-lib v0.31.0 shipped a latent
+# TypeError on import under Python 3.9 (Pydantic V2 evaluates field
+# annotations via get_type_hints, which cannot eval PEP 604 `str | None`
+# under 3.9 even when `from __future__ import annotations` is present).
+# morning-signal #24 surfaced it on consumer-side CI; v0.32.0 patched it
+# via conditional `eval_type_backport` dep. This workflow is the
+# chokepoint that catches the next regression of the class at lib-build
+# time rather than consumer-side.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev + transitive extras
+        # [dev] alone is insufficient — three test modules import
+        # optional-extra deps at module load time:
+        #   - tests/test_rag_rerank.py + test_rag_retrieval_hybrid.py
+        #     transit `alpha_engine_lib.rag.__init__` → `db.py` → psycopg2
+        #     ([rag] extra)
+        #   - tests/test_transparency.py imports pandas ([arcticdb] extra)
+        # sentence-transformers ([rerank] extra) and flow-doctor
+        # ([flow_doctor] extra) are NOT needed — both deferred until first
+        # call inside the relevant module / tests mock the model load.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rag,arcticdb]"
+
+      - name: Run pytest
+        run: python -m pytest -q
