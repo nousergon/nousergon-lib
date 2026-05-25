@@ -152,18 +152,47 @@ results = retrieve(
 
 Requires the `[rag]` extra. Embeddings are Voyage `voyage-3-lite` (512d); the database backend is Neon Postgres with pgvector + HNSW indexes.
 
+### `ssm_dispatcher` — SSM send-command + poll chokepoint
+
+Canonical Python primitive for the `run_ssm` bash helper that previously appeared as a ~54-line mirror across each dispatcher script that drives a spot instance over the SSM transport. The pre-lift shape — base64-wrap the script body, `aws ssm send-command --document-name AWS-RunShellScript`, loop on `get-command-invocation`, stream the `StandardOutputContent` delta, propagate the inner exit — now lives in one place where the polling cadence, error-class handling, and S3 output-key layout match across every consumer.
+
+```bash
+python -m alpha_engine_lib.ssm_dispatcher run \
+  --instance-id "$INSTANCE_ID" \
+  --description "bootstrap" \
+  --timeout 3600 \
+  --output-bucket "$S3_BUCKET" \
+  --output-key-prefix "${S3_STAGING_PREFIX}/ssm-output" \
+  --region "$AWS_REGION" \
+  --script-stdin <<'BOOTSTRAP'
+set -eo pipefail
+export HOME=/home/ec2-user AWS_REGION=us-east-1
+# ...the script body the SSM target will execute...
+BOOTSTRAP
+```
+
+Exit 0 on `Success`; exit 1 on any terminal non-Success status, send-command failure, or unrecoverable poll failure; exit 2 on bad CLI input. `InvocationDoesNotExist` during the first 60s after SendCommand counts as a registration race and keeps polling — closes the 2026-05-23 Saturday SF substrate weakness at the chokepoint rather than per-SF-JSON Retry block.
+
+### `ssm_log_capture` — SSM-step log capture + S3 ship-on-exit chokepoint
+
+Pairs with `ssm_dispatcher` on the SSM target side. The dispatcher script tells the target instance to invoke `python -m alpha_engine_lib.ssm_log_capture run --slug X --log /var/log/X.log -- bash <launcher>`; the target wrapper tees the launcher's stdout/stderr to a local log file and to its own stdout (so the SSM `StandardOutputContent` channel still surfaces output to the dispatcher), then on exit ships the full local log to `s3://alpha-engine-research/_ssm_logs/{slug}/{date}/{host}-{time}.log` regardless of the inner exit code. Replaces the inline `trap 'aws s3 cp ...' EXIT` pattern that broke under ASL `States.Array` escape semantics (2026-05-22 Friday-PM dry-pass catch).
+
+### `ec2_spot` — capacity-resilient spot-launch chokepoint
+
+Rotates across `(instance_type × subnet)` combinations on `InsufficientInstanceCapacity` / `InsufficientHostCapacity` / `Unsupported` / `InvalidAvailabilityZone` / `SpotMaxPriceTooLow`; non-capacity errors raise immediately. CLI exit 64 distinguishes capacity exhaustion from generic failure. Replaces the hardcoded single-subnet + single-instance-type launch pattern that mirrored across each dispatcher; landed 2026-05-22 after the third-recurrence-in-a-month spot-launch fragility.
+
 ## How it's used
 
 All six Nous Ergon module repos depend on this lib:
 
 | Module | Repo | What it imports from here |
 |---|---|---|
-| Data | [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar`, `rag` (ingestion) |
+| Data | [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar`, `rag` (ingestion), `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launchers) |
 | Research | [`alpha-engine-research`](https://github.com/cipher813/alpha-engine-research) | `logging`, `decision_capture`, `cost`, `dates`, `rag` (retrieval), `agent_schemas` (canonical LLM-output contracts) |
-| Predictor | [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) | `logging`, `preflight`, `arcticdb`, `dates` |
+| Predictor | [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) | `logging`, `preflight`, `arcticdb`, `dates`, `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launcher) |
 | Executor | [`alpha-engine`](https://github.com/cipher813/alpha-engine) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar` |
-| Backtester | [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) | `logging`, `preflight`, `arcticdb`, `dates`, `agent_schemas` (replay-harness Pydantic validation) |
-| Dashboard | [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) | `logging`, `arcticdb`, `dates` |
+| Backtester | [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) | `logging`, `preflight`, `arcticdb`, `dates`, `agent_schemas` (replay-harness Pydantic validation), `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launcher) |
+| Dashboard | [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) | `logging`, `arcticdb`, `dates`, hosts the SSM-target `.venv` that `ssm_dispatcher` invokes via `python -m` |
 
 ## Development
 
