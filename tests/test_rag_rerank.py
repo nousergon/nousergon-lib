@@ -1,4 +1,4 @@
-"""Tests for the RAG rerank primitive (alpha-engine-lib v0.11.0).
+"""Tests for the RAG rerank primitive (alpha-engine-lib v0.11.0+).
 
 Covers:
 
@@ -7,12 +7,15 @@ Covers:
    circuits repeat scoring; passthrough when candidates empty. Real
    BAAI model load is mocked via the ``_model`` slot so tests don't
    download 600MB of weights.
-3. ``LLMJudgeReranker`` — parses Haiku output; falls back to neutral
-   score on parse failure; cache short-circuits repeats.
-4. ``retrieve(rerank=...)`` — fetches ``rerank_input_n`` from the
+3. ``retrieve(rerank=...)`` — fetches ``rerank_input_n`` from the
    underlying method, passes through to the reranker, truncates to
    ``top_k``; rerank=None preserves legacy behavior; invalid
    ``rerank_input_n < top_k`` raises.
+
+``LLMJudgeReranker`` (formerly tested here) was removed v0.34.0. See
+the ``rerank`` module docstring for the no-lift finding +
+institutional rerank-revisit path (domain-finetune CE on retrieval
+triples, not LLM-judge).
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ import pytest
 
 from alpha_engine_lib.rag.rerank import (
     CrossEncoderReranker,
-    LLMJudgeReranker,
     RerankCache,
     _RERANKER_REGISTRY,
     get_reranker,
@@ -176,82 +178,6 @@ class TestCrossEncoderReranker:
         with patch.dict("sys.modules", {"sentence_transformers": None}):
             with pytest.raises(ImportError, match=r"alpha-engine-lib\[rerank\]"):
                 reranker._ensure_model()
-
-
-# ── LLMJudgeReranker ────────────────────────────────────────────────────────
-
-
-def _mock_anthropic_client(score_by_content: dict[str, int]) -> MagicMock:
-    """Return a MagicMock anthropic client that scores by content lookup."""
-    client = MagicMock()
-
-    def _create(*, model: str, max_tokens: int, messages: list[dict]) -> object:
-        prompt = messages[0]["content"]
-        # The prompt embeds the document content after "Document:\n".
-        doc_start = prompt.index("Document:\n") + len("Document:\n")
-        doc_end = prompt.index("\n\nScore")
-        content = prompt[doc_start:doc_end]
-        score = score_by_content.get(content, 3)
-        block = MagicMock()
-        block.text = str(score)
-        response = MagicMock()
-        response.content = [block]
-        return response
-
-    client.messages.create.side_effect = _create
-    return client
-
-
-class TestLLMJudgeReranker:
-    def test_parses_haiku_integer_response(self) -> None:
-        client = _mock_anthropic_client({"low": 1, "mid": 3, "high": 5})
-        reranker = LLMJudgeReranker(client=client)
-        candidates = [
-            _make_result("low", "c1"),
-            _make_result("mid", "c2"),
-            _make_result("high", "c3"),
-        ]
-        out = reranker.rerank("query", candidates, top_k=3)
-        assert [r.content for r in out] == ["high", "mid", "low"]
-        assert out[0].rerank_score == pytest.approx(5.0)
-        assert out[0].rerank_method == "llm_judge"
-
-    def test_cache_hit_skips_llm_call(self) -> None:
-        client = _mock_anthropic_client({"x": 4, "y": 2})
-        reranker = LLMJudgeReranker(client=client)
-        candidates = [_make_result("x", "cx"), _make_result("y", "cy")]
-        reranker.rerank("query", candidates, top_k=2)
-        first = client.messages.create.call_count
-        reranker.rerank("query", candidates, top_k=2)
-        assert client.messages.create.call_count == first
-
-    def test_parse_failure_returns_neutral_three(self) -> None:
-        # Mock client returns malformed output for "bad", normal for "good".
-        client = MagicMock()
-
-        def _create(*, model, max_tokens, messages):
-            prompt = messages[0]["content"]
-            block = MagicMock()
-            if "bad" in prompt:
-                block.text = "garbage"  # int(garbage[0]) → ValueError
-            else:
-                block.text = "5"
-            response = MagicMock()
-            response.content = [block]
-            return response
-
-        client.messages.create.side_effect = _create
-        reranker = LLMJudgeReranker(client=client)
-        out = reranker.rerank(
-            "query",
-            [_make_result("bad", "c1"), _make_result("good", "c2")],
-            top_k=2,
-        )
-        # "good" wins with 5.0; "bad" falls back to neutral 3.0.
-        assert out[0].content == "good"
-        assert out[0].rerank_score == pytest.approx(5.0)
-        assert out[1].content == "bad"
-        assert out[1].rerank_score == pytest.approx(3.0)
 
 
 # ── retrieve(rerank=...) integration ────────────────────────────────────────
