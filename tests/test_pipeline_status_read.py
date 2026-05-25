@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from alpha_engine_lib.pipeline_status import (
+    PipelineExecutionSummary,
     PipelineRun,
     RunStatus,
     SFNAccessDenied,
@@ -30,10 +31,12 @@ from alpha_engine_lib.pipeline_status import (
     SFNThrottled,
     TaskRow,
     TaskStatus,
+    list_recent_pipeline_runs,
     read_pipeline_state,
 )
 from alpha_engine_lib.pipeline_status.read import (
     PipelineStatusError,
+    _extract_pipeline_role,
     _failure_cause_from,
     _materialize_tasks,
     _parse_ts,
@@ -535,3 +538,248 @@ def test_task_row_archive_round_trips_through_json_for_artifact_reason():
         "round-trip — same regression class as the ArchivePageRef test."
     )
     assert "Terminal success" in round_tripped_task.archive.reason
+
+
+# ── pipeline_role extraction (Option-D substrate) ─────────────────────────
+
+
+def test_extract_pipeline_role_happy_path():
+    """Standard EventBridge cron payload with pipeline_role set."""
+    describe = {
+        "input": '{"pipeline_role": "weekly", "run_date": "2026-05-30"}',
+    }
+    assert _extract_pipeline_role(describe) == "weekly"
+
+
+def test_extract_pipeline_role_missing_field():
+    """Pre-Option-D execution input (no pipeline_role key) returns None."""
+    describe = {"input": '{"run_date": "2026-05-30"}'}
+    assert _extract_pipeline_role(describe) is None
+
+
+def test_extract_pipeline_role_missing_input_field():
+    """DescribeExecution may omit the input field entirely on terminal
+    states (rare but possible) — degrade to None, not crash."""
+    assert _extract_pipeline_role({}) is None
+    assert _extract_pipeline_role({"input": None}) is None
+    assert _extract_pipeline_role({"input": ""}) is None
+
+
+def test_extract_pipeline_role_malformed_json():
+    """Malformed input JSON — WARN-and-return-None per the lib's
+    permissive parse policy. Recording surface is the WARN log."""
+    describe = {"input": "{not valid json"}
+    assert _extract_pipeline_role(describe) is None
+
+
+def test_extract_pipeline_role_input_is_array_not_object():
+    """SF allows array-shaped input; defensively handle it (return None
+    rather than raise) — pipeline_role is a top-level field on object
+    inputs only."""
+    describe = {"input": '["weekly"]'}
+    assert _extract_pipeline_role(describe) is None
+
+
+def test_extract_pipeline_role_empty_string_returns_none():
+    """An explicit empty string in pipeline_role is treated as 'not set'
+    so the dashboard renders 'role: unknown' instead of '': empty cells
+    are operator-noise."""
+    describe = {"input": '{"pipeline_role": ""}'}
+    assert _extract_pipeline_role(describe) is None
+
+
+# ── Role filter + execution_arn paths in read_pipeline_state ──────────────
+
+
+def _make_describe_response(*, status="SUCCEEDED", role: Optional[str] = None) -> dict:
+    """Build a DescribeExecution response carrying an optional
+    pipeline_role on the input JSON. Default times preserved."""
+    body: dict = {
+        "status": status,
+        "startDate": datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
+        "stopDate": datetime(2026, 5, 24, 11, 30, tzinfo=timezone.utc),
+    }
+    if role is not None:
+        body["input"] = f'{{"pipeline_role": "{role}", "run_date": "2026-05-24"}}'
+    else:
+        body["input"] = '{"run_date": "2026-05-24"}'
+    return body
+
+
+def _make_multi_execution_mock(
+    *,
+    executions: list[dict],
+    describe_by_arn: dict[str, dict],
+) -> MagicMock:
+    """Build an SFN mock where ListExecutions returns a list and
+    DescribeExecution dispatches by executionArn to the right response."""
+    client = MagicMock()
+    client.list_executions.return_value = {"executions": executions}
+
+    def _dispatch(executionArn: str, **_kwargs):
+        return describe_by_arn[executionArn]
+
+    client.describe_execution.side_effect = _dispatch
+    client.get_execution_history.return_value = {"events": []}
+    return client
+
+
+def test_read_pipeline_state_default_returns_most_recent_unchanged():
+    """No role_filter, no execution_arn — same as pre-Option-D: most-recent
+    execution per ListExecutions maxResults=1."""
+    client = _make_sfn_mock()
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+    assert run.status == RunStatus.SUCCEEDED
+    # ListExecutions was called with maxResults=1 (default path).
+    client.list_executions.assert_called_once()
+    call_kwargs = client.list_executions.call_args.kwargs
+    assert call_kwargs.get("maxResults") == 1
+
+
+def test_read_pipeline_state_with_role_filter_finds_first_match():
+    """Three executions in history: smoke / weekly / smoke. Filter to
+    'weekly' — picks the middle one."""
+    smoke1_arn = EXECUTION_ARN + "-smoke1"
+    weekly_arn = EXECUTION_ARN + "-weekly"
+    smoke2_arn = EXECUTION_ARN + "-smoke2"
+    client = _make_multi_execution_mock(
+        executions=[
+            {"executionArn": smoke1_arn, "name": "smoke-l1995"},
+            {"executionArn": weekly_arn, "name": "weekly-20260524T090000"},
+            {"executionArn": smoke2_arn, "name": "smoke-debug"},
+        ],
+        describe_by_arn={
+            smoke1_arn: _make_describe_response(role="smoke"),
+            weekly_arn: _make_describe_response(role="weekly"),
+            smoke2_arn: _make_describe_response(role="smoke"),
+        },
+    )
+    run = read_pipeline_state(SATURDAY_ARN, role_filter={"weekly"}, client=client)
+    assert run.execution_arn == weekly_arn
+    assert run.pipeline_role == "weekly"
+
+
+def test_read_pipeline_state_with_role_filter_no_match_raises():
+    """Three smoke executions, filter to 'weekly' — raises
+    SFNNoExecutions naming the filter so the caller can render an
+    operator-actionable banner."""
+    client = _make_multi_execution_mock(
+        executions=[
+            {"executionArn": EXECUTION_ARN + f"-{i}", "name": f"smoke-{i}"}
+            for i in range(3)
+        ],
+        describe_by_arn={
+            EXECUTION_ARN + f"-{i}": _make_describe_response(role="smoke")
+            for i in range(3)
+        },
+    )
+    with pytest.raises(SFNNoExecutions) as exc_info:
+        read_pipeline_state(
+            SATURDAY_ARN, role_filter={"weekly"}, search_limit=10, client=client
+        )
+    assert "weekly" in str(exc_info.value)
+
+
+def test_read_pipeline_state_with_role_filter_treats_missing_role_as_no_match():
+    """Pre-Option-D executions lack pipeline_role; role_filter must NOT
+    match those (otherwise the filter is no filter at all). The walk
+    keeps going until an explicitly-tagged execution turns up."""
+    untagged_arn = EXECUTION_ARN + "-untagged"
+    weekly_arn = EXECUTION_ARN + "-weekly"
+    client = _make_multi_execution_mock(
+        executions=[
+            {"executionArn": untagged_arn, "name": "old-pre-option-d"},
+            {"executionArn": weekly_arn, "name": "weekly-20260524T090000"},
+        ],
+        describe_by_arn={
+            untagged_arn: _make_describe_response(role=None),
+            weekly_arn: _make_describe_response(role="weekly"),
+        },
+    )
+    run = read_pipeline_state(SATURDAY_ARN, role_filter={"weekly"}, client=client)
+    assert run.execution_arn == weekly_arn
+
+
+def test_read_pipeline_state_with_execution_arn_fetches_specific_execution():
+    """Dropdown-click path: when execution_arn is set, the function fetches
+    that specific execution directly (bypasses ListExecutions). role_filter
+    and search_limit are ignored on this path."""
+    target_arn = EXECUTION_ARN + "-specific"
+    client = _make_multi_execution_mock(
+        executions=[],  # ListExecutions intentionally empty — proves it's not called
+        describe_by_arn={target_arn: _make_describe_response(role="smoke")},
+    )
+    run = read_pipeline_state(SATURDAY_ARN, execution_arn=target_arn, client=client)
+    assert run.execution_arn == target_arn
+    assert run.pipeline_role == "smoke"
+    # ListExecutions must NOT have been called on the execution_arn path.
+    client.list_executions.assert_not_called()
+
+
+def test_read_pipeline_state_carries_pipeline_role_to_returned_run():
+    """The pipeline_role field on PipelineRun is populated from input JSON
+    even when no role_filter is applied (default path) — the dashboard's
+    section header shows it regardless of how the execution was picked."""
+    client = _make_sfn_mock(
+        describe_response=_make_describe_response(role="weekly"),
+    )
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+    assert run.pipeline_role == "weekly"
+
+
+def test_read_pipeline_state_pipeline_role_none_when_input_lacks_role():
+    """No pipeline_role in input → PipelineRun.pipeline_role is None
+    (rendered as 'role: unknown' on the dashboard)."""
+    client = _make_sfn_mock(
+        describe_response=_make_describe_response(role=None),
+    )
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+    assert run.pipeline_role is None
+
+
+# ── list_recent_pipeline_runs ─────────────────────────────────────────────
+
+
+def test_list_recent_pipeline_runs_returns_summaries_with_roles():
+    """Returns last N executions, each carrying its pipeline_role for the
+    operator dropdown's at-a-glance smoke-vs-weekly distinction."""
+    arns = [EXECUTION_ARN + f"-{i}" for i in range(5)]
+    roles = ["smoke", "weekly", "smoke", "weekly", "recovery"]
+    client = _make_multi_execution_mock(
+        executions=[
+            {"executionArn": a, "name": f"exec-{i}"} for i, a in enumerate(arns)
+        ],
+        describe_by_arn={a: _make_describe_response(role=r) for a, r in zip(arns, roles)},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=5, client=client)
+    assert len(summaries) == 5
+    assert all(isinstance(s, PipelineExecutionSummary) for s in summaries)
+    assert [s.pipeline_role for s in summaries] == roles
+
+
+def test_list_recent_pipeline_runs_role_filter_pre_filters():
+    """When role_filter is set, only matching executions are returned —
+    the operator's "show me weekly runs only" view."""
+    arns = [EXECUTION_ARN + f"-{i}" for i in range(6)]
+    roles = ["smoke", "weekly", "smoke", "weekly", "recovery", "weekly"]
+    client = _make_multi_execution_mock(
+        executions=[
+            {"executionArn": a, "name": f"exec-{i}"} for i, a in enumerate(arns)
+        ],
+        describe_by_arn={a: _make_describe_response(role=r) for a, r in zip(arns, roles)},
+    )
+    summaries = list_recent_pipeline_runs(
+        SATURDAY_ARN, limit=10, role_filter={"weekly"}, client=client
+    )
+    assert len(summaries) == 3
+    assert all(s.pipeline_role == "weekly" for s in summaries)
+
+
+def test_list_recent_pipeline_runs_empty_returns_empty_list():
+    """Zero executions → empty list (NOT SFNNoExecutions). The dropdown
+    just renders 'no executions yet' inline; the page-25 section banner
+    is the load-bearing error surface, not this lighter-weight API."""
+    client = MagicMock()
+    client.list_executions.return_value = {"executions": []}
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=5, client=client)
+    assert summaries == []

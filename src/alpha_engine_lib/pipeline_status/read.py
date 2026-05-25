@@ -31,6 +31,7 @@ red banner always names a specific cause.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -194,6 +195,39 @@ class PipelineRun(BaseModel):
     tasks: list[TaskRow] = Field(default_factory=list)
     failing_state: Optional[str] = None  # populated only when status == FAILED
     failure_cause: Optional[str] = None  # populated only when status == FAILED
+    # The ``pipeline_role`` carried on this execution's input JSON
+    # (e.g. "weekly" / "daily" / "eod" / "smoke" / "recovery" /
+    # "shell-run" / "backfill" / "operator-replay"). None when the input
+    # JSON doesn't carry the field — typical of pre-Option-D executions
+    # and ad-hoc operator launches that haven't adopted the convention.
+    # The dashboard exposes this in the section header so the operator
+    # always knows whether they're looking at the canonical cadence run
+    # or a smoke / recovery overlay.
+    pipeline_role: Optional[str] = None
+
+
+class PipelineExecutionSummary(BaseModel):
+    """Lightweight per-execution summary for the operator dropdown.
+
+    Returned by :func:`list_recent_pipeline_runs`. Does NOT carry the
+    full per-state task table (that lives on :class:`PipelineRun`) — the
+    dropdown's job is to let the operator pick one execution to inspect
+    in detail, at which point :func:`read_pipeline_state` returns the
+    full run for the chosen ARN.
+
+    ``pipeline_role`` is parsed from the execution's input JSON via the
+    DescribeExecution call; None when the input lacks the field.
+    """
+
+    model_config = _STRICT_CONFIG
+
+    execution_arn: str
+    name: str
+    status: RunStatus
+    start_utc: datetime
+    end_utc: Optional[datetime] = None
+    duration_sec: Optional[float] = None
+    pipeline_role: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -418,80 +452,79 @@ def _failing_state_from_history(history_events: list[dict]) -> Optional[str]:
     return None
 
 
-# ── Public entry point ────────────────────────────────────────────────────
+# ── Role-filter helpers (Option-D execution-picker substrate) ─────────────
 
 
-def read_pipeline_state(
+# Bounds the ListExecutions walk when a role filter is set — we page
+# backwards through history looking for the first execution whose
+# input.pipeline_role matches the filter. 50 is enough to span ~6 months
+# of weekly cadence even if every intervening execution is a smoke /
+# recovery overlay; raise it only if smoke-density is genuinely that high.
+_DEFAULT_ROLE_SEARCH_LIMIT = 50
+
+# ListExecutions page size — boto3 caps at 1000 but we keep pages small
+# so a typical "find the most-recent weekly within the last 50" walk only
+# hits the API once or twice.
+_LIST_EXECUTIONS_PAGE_SIZE = 25
+
+
+def _extract_pipeline_role(describe_resp: dict) -> Optional[str]:
+    """Parse ``input.pipeline_role`` from a DescribeExecution response.
+
+    DescribeExecution returns ``input`` as a JSON-encoded string. The
+    Option-D convention is that all cron-triggered executions carry a
+    ``pipeline_role`` field at top level (``{"pipeline_role": "weekly",
+    ...}``) and ad-hoc operator launches set it explicitly (smoke /
+    recovery / operator-replay / etc).
+
+    Returns None on:
+    - missing ``input`` field
+    - malformed JSON (logged at WARN; the page renders "role: unknown")
+    - JSON parses but ``pipeline_role`` is absent
+
+    Permissive on parse failures (warn + return None rather than raise)
+    because input-shape is operator-controlled and we'd rather show the
+    execution with role=None than blackhole the whole page on a malformed
+    input JSON. Per ``feedback_no_silent_fails`` the WARN log is the
+    recording surface.
+    """
+    raw_input = describe_resp.get("input")
+    if not raw_input or not isinstance(raw_input, str):
+        return None
+    try:
+        parsed = json.loads(raw_input)
+    except (ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not parse SF execution input JSON; pipeline_role=None: %s", exc
+        )
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    role = parsed.get("pipeline_role")
+    return role if isinstance(role, str) and role else None
+
+
+def _build_pipeline_run_from_execution_arn(
+    execution_arn: str,
     state_machine_arn: str,
     *,
-    client: Optional["SFNClient"] = None,
+    client: "SFNClient",
 ) -> PipelineRun:
-    """Project the most-recent execution of ``state_machine_arn`` onto a
-    typed :class:`PipelineRun`.
+    """Project a known execution ARN onto a typed :class:`PipelineRun`.
 
-    Calls (in order):
+    Helper that holds the DescribeExecution + GetExecutionHistory +
+    materialize-tasks pipeline. Callers responsible for the execution
+    name (passed in via the ARN — derived if not supplied separately).
 
-    1. ``states:ListExecutions(stateMachineArn=..., maxResults=1)`` — finds
-       the latest execution arn. If the SF has zero executions, raises
-       :class:`SFNNoExecutions`.
-    2. ``states:DescribeExecution(executionArn=...)`` — top-level status +
-       start/stop + failure cause.
-    3. ``states:GetExecutionHistory(executionArn=..., maxResults=1000)`` —
-       per-state events for the Task row table.
-
-    Parameters
-    ----------
-    state_machine_arn:
-        Full SF ARN, e.g. ``arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-saturday-pipeline``.
-    client:
-        Optional boto3 ``stepfunctions`` client. Tests pass a mock here;
-        production passes None and gets a fresh client per call (cheap;
-        boto3 caches under the hood).
-
-    Returns
-    -------
-    PipelineRun
-        Fully populated except when ``status == NOT_RUN`` (only
-        ``state_machine_arn`` + ``pretty_label`` + ``status`` set).
-
-    Raises
-    ------
-    SFNAccessDenied
-        IAM denial on any of the three required actions.
-    SFNThrottled
-        Rate-limit on any of the three.
-    SFNNoExecutions
-        SF exists but has zero executions ever.
-    PipelineStatusError
-        Any other unexpected error path — the caller renders a red banner.
+    Used by :func:`read_pipeline_state` after the role-filter walk picks
+    the target execution, AND directly when an operator clicks a specific
+    execution in the dropdown.
     """
-    if client is None:  # pragma: no cover — production path
-        import boto3
-
-        client = boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn))
-
     label = _label_for_arn(state_machine_arn)
+    # Derive execution_name from ARN — the ARN tail is
+    # ``execution:<sm-name>:<execution-name>``.
+    execution_name = execution_arn.rsplit(":", 1)[-1] if execution_arn else None
 
-    # 1. ListExecutions
-    try:
-        list_resp = client.list_executions(
-            stateMachineArn=state_machine_arn,
-            maxResults=1,
-        )
-    except Exception as exc:  # noqa: BLE001 — narrow + re-raise
-        _raise_for_boto_error(exc, "ListExecutions")
-
-    executions = list_resp.get("executions") or []
-    if not executions:
-        raise SFNNoExecutions(
-            f"State machine {state_machine_arn} has no executions yet."
-        )
-
-    latest = executions[0]
-    execution_arn = latest.get("executionArn")
-    execution_name = latest.get("name")
-
-    # 2. DescribeExecution
     try:
         describe_resp = client.describe_execution(executionArn=execution_arn)
     except Exception as exc:  # noqa: BLE001 — narrow + re-raise
@@ -501,8 +534,6 @@ def read_pipeline_state(
     try:
         run_status = RunStatus(status_str)
     except ValueError:
-        # Unknown status string from boto3 (forward-compatibility) — fail
-        # loud rather than silently mis-render.
         raise PipelineStatusError(
             f"Unknown SF execution status {status_str!r} from boto3 for {execution_arn}"
         )
@@ -516,8 +547,8 @@ def read_pipeline_state(
     failure_cause = (
         _failure_cause_from(describe_resp) if run_status == RunStatus.FAILED else None
     )
+    pipeline_role = _extract_pipeline_role(describe_resp)
 
-    # 3. GetExecutionHistory
     try:
         history_resp = client.get_execution_history(
             executionArn=execution_arn,
@@ -545,7 +576,286 @@ def read_pipeline_state(
         tasks=tasks,
         failing_state=failing_state,
         failure_cause=failure_cause,
+        pipeline_role=pipeline_role,
     )
+
+
+def _find_execution_matching_role(
+    state_machine_arn: str,
+    role_filter: set[str],
+    *,
+    client: "SFNClient",
+    search_limit: int,
+) -> Optional[tuple[str, Optional[str]]]:
+    """Walk ListExecutions pages until finding an execution whose
+    ``input.pipeline_role`` ∈ ``role_filter``, or until ``search_limit``
+    executions have been inspected.
+
+    Returns ``(execution_arn, role)`` on hit, ``None`` on exhaustion.
+    The N+1 DescribeExecution calls are the cost of the role filter;
+    typical cron-cadence SFs find a match within the first 1-3 executions
+    so the cost is bounded in practice. Smoke-heavy windows pay more but
+    the ``search_limit`` cap bounds worst case.
+
+    Caller is responsible for translating None into the right outcome —
+    either SFNNoExecutions (when ListExecutions was empty in the first
+    page) or a "no execution matches filter" fallback signal.
+    """
+    inspected = 0
+    next_token: Optional[str] = None
+    while inspected < search_limit:
+        kwargs: dict[str, Any] = {
+            "stateMachineArn": state_machine_arn,
+            "maxResults": min(_LIST_EXECUTIONS_PAGE_SIZE, search_limit - inspected),
+        }
+        if next_token:
+            kwargs["nextToken"] = next_token
+        try:
+            list_resp = client.list_executions(**kwargs)
+        except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+            _raise_for_boto_error(exc, "ListExecutions")
+
+        executions = list_resp.get("executions") or []
+        if not executions:
+            return None
+        for ex in executions:
+            inspected += 1
+            execution_arn = ex.get("executionArn")
+            if not execution_arn:
+                continue
+            try:
+                describe_resp = client.describe_execution(executionArn=execution_arn)
+            except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+                _raise_for_boto_error(exc, "DescribeExecution")
+            role = _extract_pipeline_role(describe_resp)
+            if role is not None and role in role_filter:
+                return execution_arn, role
+
+        next_token = list_resp.get("nextToken")
+        if not next_token:
+            return None
+
+    return None
+
+
+# ── Public entry point ────────────────────────────────────────────────────
+
+
+def read_pipeline_state(
+    state_machine_arn: str,
+    *,
+    role_filter: Optional[set[str]] = None,
+    search_limit: int = _DEFAULT_ROLE_SEARCH_LIMIT,
+    execution_arn: Optional[str] = None,
+    client: Optional["SFNClient"] = None,
+) -> PipelineRun:
+    """Project the chosen execution of ``state_machine_arn`` onto a typed
+    :class:`PipelineRun`.
+
+    Default behavior (no ``role_filter``, no ``execution_arn``) is
+    backwards-compatible: returns the most-recent execution per
+    ``ListExecutions maxResults=1``, same as pre-Option-D.
+
+    Option-D execution-picker semantics:
+
+    - When ``execution_arn`` is set, fetches that specific execution
+      directly (bypasses ListExecutions). Used by the dashboard's
+      dropdown "click a row to inspect this execution" path.
+    - When ``role_filter`` is set, walks ListExecutions pages until
+      finding the most-recent execution whose ``input.pipeline_role``
+      is in the filter set. If none match within ``search_limit``
+      executions, raises :class:`SFNNoExecutions` with a message naming
+      the filter — the caller (page 25) renders a banner like "No
+      'weekly' execution in the last 50 runs; click 'View other recent
+      executions' to inspect what's actually been running."
+
+    Parameters
+    ----------
+    state_machine_arn:
+        Full SF ARN.
+    role_filter:
+        Optional set of ``pipeline_role`` values to filter executions by
+        (e.g. ``{"weekly"}`` for the Saturday-SF cadence run, ``{"daily"}``
+        for the Weekday-SF cadence run). ``None`` = no filter (most-recent
+        regardless of role — current behavior).
+    search_limit:
+        Bounds the role-filter walk. Default 50 — see
+        :data:`_DEFAULT_ROLE_SEARCH_LIMIT`. Ignored when ``role_filter``
+        is None.
+    execution_arn:
+        Optional specific execution ARN to fetch. When set, both
+        ``role_filter`` and ``search_limit`` are ignored.
+    client:
+        Optional boto3 ``stepfunctions`` client. Tests pass a mock here;
+        production passes None.
+
+    Raises
+    ------
+    SFNAccessDenied
+        IAM denial on any of the three required actions.
+    SFNThrottled
+        Rate-limit on any of the three.
+    SFNNoExecutions
+        SF has zero executions, OR ``role_filter`` is set and no
+        execution within the search window matches.
+    PipelineStatusError
+        Any other unexpected error path.
+    """
+    if client is None:  # pragma: no cover — production path
+        import boto3
+
+        client = boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn))
+
+    # Path 1: explicit execution_arn — fetch directly.
+    if execution_arn is not None:
+        return _build_pipeline_run_from_execution_arn(
+            execution_arn, state_machine_arn, client=client
+        )
+
+    # Path 2: role_filter — walk ListExecutions until match.
+    if role_filter:
+        match = _find_execution_matching_role(
+            state_machine_arn, role_filter, client=client, search_limit=search_limit
+        )
+        if match is None:
+            raise SFNNoExecutions(
+                f"No execution with pipeline_role in {sorted(role_filter)!r} "
+                f"found within last {search_limit} executions of {state_machine_arn}."
+            )
+        matched_arn, _matched_role = match
+        return _build_pipeline_run_from_execution_arn(
+            matched_arn, state_machine_arn, client=client
+        )
+
+    # Path 3 (default): most-recent execution regardless of role —
+    # backwards-compatible with pre-Option-D callers.
+    try:
+        list_resp = client.list_executions(
+            stateMachineArn=state_machine_arn,
+            maxResults=1,
+        )
+    except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+        _raise_for_boto_error(exc, "ListExecutions")
+
+    executions = list_resp.get("executions") or []
+    if not executions:
+        raise SFNNoExecutions(
+            f"State machine {state_machine_arn} has no executions yet."
+        )
+
+    latest = executions[0]
+    return _build_pipeline_run_from_execution_arn(
+        latest.get("executionArn"), state_machine_arn, client=client
+    )
+
+
+def list_recent_pipeline_runs(
+    state_machine_arn: str,
+    *,
+    limit: int = 10,
+    role_filter: Optional[set[str]] = None,
+    client: Optional["SFNClient"] = None,
+) -> list[PipelineExecutionSummary]:
+    """Return lightweight summaries of the most-recent N executions.
+
+    Backs the page-25 "View other recent executions" disclosure: shows
+    the operator what's been running on this SF, ranked most-recent
+    first, with the ``pipeline_role`` of each so smoke vs. weekly vs.
+    recovery is visible at a glance.
+
+    Each summary requires one ``DescribeExecution`` call (to extract
+    ``pipeline_role`` from the input JSON) on top of one
+    ``ListExecutions`` call, so this is O(limit) API calls. Default
+    ``limit=10`` puts the dashboard's "show me last N" view at ~11
+    SF API calls per page render — well within the 25-TPS soft limit
+    states:DescribeExecution applies.
+
+    Parameters
+    ----------
+    state_machine_arn:
+        Full SF ARN.
+    limit:
+        Max number of executions to return. Default 10.
+    role_filter:
+        Optional pre-filter (returns only executions whose
+        ``pipeline_role`` ∈ ``role_filter``). When set, the API call
+        budget grows because we may have to walk past role-mismatched
+        executions; bounded by an internal walk cap of ``limit * 5``.
+    client:
+        Optional boto3 ``stepfunctions`` client.
+    """
+    if client is None:  # pragma: no cover — production path
+        import boto3
+
+        client = boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn))
+
+    walk_cap = limit if role_filter is None else min(limit * 5, _DEFAULT_ROLE_SEARCH_LIMIT)
+    summaries: list[PipelineExecutionSummary] = []
+    inspected = 0
+    next_token: Optional[str] = None
+
+    while len(summaries) < limit and inspected < walk_cap:
+        kwargs: dict[str, Any] = {
+            "stateMachineArn": state_machine_arn,
+            "maxResults": min(_LIST_EXECUTIONS_PAGE_SIZE, walk_cap - inspected),
+        }
+        if next_token:
+            kwargs["nextToken"] = next_token
+        try:
+            list_resp = client.list_executions(**kwargs)
+        except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+            _raise_for_boto_error(exc, "ListExecutions")
+
+        executions = list_resp.get("executions") or []
+        if not executions:
+            break
+        for ex in executions:
+            inspected += 1
+            execution_arn = ex.get("executionArn")
+            if not execution_arn:
+                continue
+            try:
+                describe_resp = client.describe_execution(executionArn=execution_arn)
+            except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+                _raise_for_boto_error(exc, "DescribeExecution")
+            role = _extract_pipeline_role(describe_resp)
+            if role_filter is not None and role not in role_filter:
+                continue
+            status_str = describe_resp.get("status", "RUNNING")
+            try:
+                status = RunStatus(status_str)
+            except ValueError:
+                raise PipelineStatusError(
+                    f"Unknown SF execution status {status_str!r} from boto3 for {execution_arn}"
+                )
+            start_utc = _parse_ts(describe_resp.get("startDate"))
+            end_utc = _parse_ts(describe_resp.get("stopDate"))
+            duration: Optional[float] = None
+            if start_utc is not None and end_utc is not None:
+                duration = (end_utc - start_utc).total_seconds()
+            if start_utc is None:
+                # An execution without a start time is degenerate; skip
+                # rather than fail the whole list.
+                continue
+            summaries.append(
+                PipelineExecutionSummary(
+                    execution_arn=execution_arn,
+                    name=ex.get("name") or execution_arn.rsplit(":", 1)[-1],
+                    status=status,
+                    start_utc=start_utc,
+                    end_utc=end_utc,
+                    duration_sec=duration,
+                    pipeline_role=role,
+                )
+            )
+            if len(summaries) >= limit:
+                break
+
+        next_token = list_resp.get("nextToken")
+        if not next_token:
+            break
+
+    return summaries
 
 
 def _raise_for_boto_error(exc: Exception, action: str) -> None:

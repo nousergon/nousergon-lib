@@ -31,6 +31,7 @@ on first build, not after the second consumer arrives.
 from __future__ import annotations
 
 from .read import (
+    PipelineExecutionSummary,
     PipelineRun,
     RunStatus,
     SFNAccessDenied,
@@ -38,6 +39,7 @@ from .read import (
     SFNThrottled,
     TaskRow,
     TaskStatus,
+    list_recent_pipeline_runs,
     read_pipeline_state,
 )
 from .registry import (
@@ -54,6 +56,7 @@ __all__ = [
     "ArchivePageRef",
     "ArtifactReason",
     "PIPELINE_LABELS",
+    "PipelineExecutionSummary",
     "PipelineRun",
     "RunStatus",
     "SFNAccessDenied",
@@ -66,5 +69,6 @@ __all__ = [
     "WAIT_GROUPING",
     "format_failure_message",
     "format_success_message",
+    "list_recent_pipeline_runs",
     "read_pipeline_state",
 ]
