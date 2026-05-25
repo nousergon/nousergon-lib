@@ -47,3 +47,27 @@ cards:
     output_per_1m: 25.00
     cache_read_per_1m: 0.50
     cache_create_per_1m: 6.25
+
+# Server-side tool fees (Anthropic ``Message.usage.server_tool_use``).
+# Billed as flat per-request fees, independent of which model invoked
+# the tool. Rates published by Anthropic as USD per 1,000 requests.
+#
+# Schema (per fee):
+#   tool_name:              Server-tool identifier (matches the field name
+#                           in ``anthropic.types.ServerToolUsage``).
+#   effective_from:         ISO date when this rate became active.
+#   per_1k_requests_usd:    USD per 1,000 requests.
+#
+# **Fees for the same tool MUST be sorted ascending by effective_from.**
+#
+# web_fetch is currently free per Anthropic's pricing page (no separate
+# per-request fee) — kept in the table at 0.00 so request counts still
+# flow through the pricing pipeline; bump the rate here if/when Anthropic
+# introduces a fee.
+tool_fees:
+  - tool_name: web_search
+    effective_from: 2026-01-01
+    per_1k_requests_usd: 10.00
+  - tool_name: web_fetch
+    effective_from: 2026-01-01
+    per_1k_requests_usd: 0.00

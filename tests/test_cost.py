@@ -17,9 +17,13 @@ from alpha_engine_lib.cost import (
     PriceCardLookupError,
     PriceTable,
     PriceTableLoadError,
+    ToolFee,
+    ToolFeeTable,
     compute_cost,
     load_default_pricing,
+    load_default_tool_fees,
     load_pricing,
+    load_tool_fees,
     metadata_from_anthropic_message,
     recompute_cost,
 )
@@ -358,6 +362,14 @@ class TestLoadDefaultPricing:
 # ── metadata_from_anthropic_message (SDK adapter) ─────────────────────────
 
 
+class _FakeServerToolUsage:
+    """Duck-typed stand-in for ``anthropic.types.ServerToolUsage``."""
+
+    def __init__(self, *, web_search_requests: int = 0, web_fetch_requests: int = 0):
+        self.web_search_requests = web_search_requests
+        self.web_fetch_requests = web_fetch_requests
+
+
 class _FakeUsage:
     """Duck-typed stand-in for ``anthropic.types.Usage``."""
 
@@ -368,11 +380,13 @@ class _FakeUsage:
         output_tokens: int,
         cache_read_input_tokens: int | None = None,
         cache_creation_input_tokens: int | None = None,
+        server_tool_use: _FakeServerToolUsage | None = None,
     ):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.cache_read_input_tokens = cache_read_input_tokens
         self.cache_creation_input_tokens = cache_creation_input_tokens
+        self.server_tool_use = server_tool_use
 
 
 class _FakeMessage:
@@ -449,4 +463,281 @@ class TestMetadataFromAnthropicMessage:
         # 1M Sonnet input tokens @ $3/M = $3.00.
         assert cost == pytest.approx(3.0)
         assert m.cost_usd == pytest.approx(3.0)
+
+    def test_captures_server_tool_use_when_present(self):
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(
+                input_tokens=100,
+                output_tokens=200,
+                server_tool_use=_FakeServerToolUsage(
+                    web_search_requests=10, web_fetch_requests=3,
+                ),
+            ),
+        )
+        m = metadata_from_anthropic_message(msg)
+        assert m.web_search_requests == 10
+        assert m.web_fetch_requests == 3
+
+    def test_server_tool_use_absent_zero_default(self):
+        # Most messages have no server-tool use; SDK leaves the field None.
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(input_tokens=100, output_tokens=200),
+        )
+        m = metadata_from_anthropic_message(msg)
+        assert m.web_search_requests == 0
+        assert m.web_fetch_requests == 0
+
+
+# ── ToolFee ───────────────────────────────────────────────────────────────
+
+
+def _fee(tool_name: str, year: int, month: int, day: int, *, rate: float = 10.0) -> ToolFee:
+    return ToolFee(
+        tool_name=tool_name,
+        effective_from=date(year, month, day),
+        per_1k_requests_usd=rate,
+    )
+
+
+class TestToolFee:
+    def test_minimal(self):
+        f = _fee("web_search", 2026, 1, 1, rate=10.0)
+        assert f.per_1k_requests_usd == 10.0
+
+    def test_negative_rate_rejected(self):
+        with pytest.raises(ValueError):
+            ToolFee(
+                tool_name="web_search",
+                effective_from=date(2026, 1, 1),
+                per_1k_requests_usd=-1.0,
+            )
+
+    def test_extra_field_rejected(self):
+        with pytest.raises(ValueError):
+            ToolFee(
+                tool_name="x",
+                effective_from=date(2026, 1, 1),
+                per_1k_requests_usd=1.0,
+                undocumented="oops",
+            )
+
+
+class TestToolFeeTableValidation:
+    def test_unsorted_rejected(self):
+        with pytest.raises(PriceTableLoadError, match="not.*sorted"):
+            ToolFeeTable(fees=[
+                _fee("web_search", 2026, 6, 1),
+                _fee("web_search", 2026, 1, 1),
+            ])
+
+    def test_duplicate_effective_from_rejected(self):
+        with pytest.raises(PriceTableLoadError, match="duplicate effective_from"):
+            ToolFeeTable(fees=[
+                _fee("web_search", 2026, 1, 1, rate=10.0),
+                _fee("web_search", 2026, 1, 1, rate=12.0),
+            ])
+
+    def test_multiple_tools_independent(self):
+        t = ToolFeeTable(fees=[
+            _fee("web_search", 2026, 1, 1, rate=10.0),
+            _fee("web_fetch", 2026, 1, 1, rate=0.0),
+        ])
+        assert len(t.fees) == 2
+
+
+class TestToolFeeTableLookup:
+    def setup_method(self):
+        self.table = ToolFeeTable(fees=[
+            _fee("web_search", 2026, 1, 1, rate=10.0),
+            _fee("web_search", 2026, 6, 1, rate=8.0),
+            _fee("web_fetch", 2026, 1, 1, rate=0.0),
+        ])
+
+    def test_returns_active_fee_for_query_date(self):
+        f = self.table.get("web_search", date(2026, 3, 15))
+        assert f.per_1k_requests_usd == 10.0
+
+    def test_returns_later_fee_after_effective(self):
+        f = self.table.get("web_search", date(2026, 7, 1))
+        assert f.per_1k_requests_usd == 8.0
+
+    def test_unknown_tool_hard_fails(self):
+        with pytest.raises(PriceCardLookupError, match="code_execution"):
+            self.table.get("code_execution", date(2026, 3, 15))
+
+
+# ── load_default_tool_fees ────────────────────────────────────────────────
+
+
+class TestLoadDefaultToolFees:
+    def test_returns_table_with_known_tools(self):
+        table = load_default_tool_fees()
+        names = {f.tool_name for f in table.fees}
+        assert "web_search" in names
+        assert "web_fetch" in names
+
+    def test_web_search_lookup_returns_published_rate(self):
+        table = load_default_tool_fees()
+        fee = table.get("web_search", date(2026, 5, 25))
+        # Published Anthropic rate is $10/1k web_search requests.
+        assert fee.per_1k_requests_usd == pytest.approx(10.0)
+
+
+# ── load_tool_fees (external path) ────────────────────────────────────────
+
+
+class TestLoadToolFees:
+    def test_loads_valid_yaml(self, tmp_path):
+        yaml_path = tmp_path / "pricing.yaml"
+        yaml_path.write_text(
+            "tool_fees:\n"
+            "  - tool_name: web_search\n"
+            "    effective_from: 2026-01-01\n"
+            "    per_1k_requests_usd: 10.0\n"
+        )
+        t = load_tool_fees(yaml_path)
+        assert len(t.fees) == 1
+
+    def test_missing_tool_fees_key_rejected(self, tmp_path):
+        yaml_path = tmp_path / "bad.yaml"
+        yaml_path.write_text("cards: []\n")  # has cards but not tool_fees
+        with pytest.raises(PriceTableLoadError, match="tool_fees"):
+            load_tool_fees(yaml_path)
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_tool_fees(tmp_path / "nope.yaml")
+
+
+# ── compute_cost + tool fees ──────────────────────────────────────────────
+
+
+class TestComputeCostWithToolFees:
+    def test_tokens_plus_tool_requests(self):
+        card = _card("sonnet", 2026, 1, 1, in_p=3.0)
+        web_search_fee = _fee("web_search", 2026, 1, 1, rate=10.0)
+        # 1M input × $3/M = $3.00; 100 web_search × $10/1k = $1.00.
+        cost = compute_cost(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            cache_read_tokens=0,
+            cache_create_tokens=0,
+            card=card,
+            tool_requests={"web_search": 100},
+            tool_fees={"web_search": web_search_fee},
+        )
+        assert cost == pytest.approx(4.0)
+
+    def test_zero_tool_requests_no_fee_required(self):
+        # Zero count short-circuits; tool_fees not required.
+        card = _card("sonnet", 2026, 1, 1, in_p=3.0)
+        cost = compute_cost(
+            input_tokens=1_000_000,
+            output_tokens=0,
+            cache_read_tokens=0,
+            cache_create_tokens=0,
+            card=card,
+            tool_requests={"web_search": 0},
+            tool_fees=None,
+        )
+        assert cost == pytest.approx(3.0)
+
+    def test_nonzero_count_without_fee_hard_fails(self):
+        card = _card("sonnet", 2026, 1, 1, in_p=3.0)
+        with pytest.raises(PriceCardLookupError, match="web_search"):
+            compute_cost(
+                input_tokens=0,
+                output_tokens=0,
+                cache_read_tokens=0,
+                cache_create_tokens=0,
+                card=card,
+                tool_requests={"web_search": 5},
+                tool_fees=None,
+            )
+
+
+# ── recompute_cost + tool fees ────────────────────────────────────────────
+
+
+class TestRecomputeCostWithToolFees:
+    def setup_method(self):
+        self.price_table = PriceTable(cards=[
+            _card("sonnet", 2026, 1, 1, in_p=3.0),
+        ])
+        self.tool_fees = ToolFeeTable(fees=[
+            _fee("web_search", 2026, 1, 1, rate=10.0),
+            _fee("web_fetch", 2026, 1, 1, rate=0.0),
+        ])
+
+    def test_with_web_search_requests(self):
+        m = ModelMetadata(
+            model_name="sonnet",
+            input_tokens=1_000_000,
+            web_search_requests=50,
+        )
+        # 1M input × $3/M = $3.00; 50 × $10/1k = $0.50.
+        cost = recompute_cost(
+            m, self.price_table,
+            tool_fee_table=self.tool_fees,
+            at=date(2026, 5, 25),
+        )
+        assert cost == pytest.approx(3.5)
+        assert m.cost_usd == pytest.approx(3.5)
+
+    def test_web_fetch_priced_at_zero_still_works(self):
+        # web_fetch is currently free; non-zero count + zero rate = zero fee.
+        m = ModelMetadata(
+            model_name="sonnet",
+            input_tokens=0,
+            web_fetch_requests=100,
+        )
+        cost = recompute_cost(
+            m, self.price_table,
+            tool_fee_table=self.tool_fees,
+            at=date(2026, 5, 25),
+        )
+        assert cost == pytest.approx(0.0)
+
+    def test_missing_tool_fee_table_hard_fails(self):
+        # Non-zero tool requests + no tool_fee_table → loud failure.
+        m = ModelMetadata(
+            model_name="sonnet",
+            input_tokens=0,
+            web_search_requests=5,
+        )
+        with pytest.raises(PriceCardLookupError, match="server-tool"):
+            recompute_cost(m, self.price_table, at=date(2026, 5, 25))
+
+    def test_zero_tool_requests_skips_tool_fee_lookup(self):
+        # Pure-LLM call (no server-tool use) doesn't need tool_fee_table.
+        m = ModelMetadata(
+            model_name="sonnet",
+            input_tokens=1_000_000,
+        )
+        cost = recompute_cost(m, self.price_table, at=date(2026, 5, 25))
+        assert cost == pytest.approx(3.0)
+
+    def test_full_e2e_anthropic_message_with_web_search(self):
+        # End-to-end: Anthropic SDK message → ModelMetadata → recompute
+        # against packaged defaults. Locks the seam any raw-SDK consumer
+        # that uses web_search will exercise.
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(
+                input_tokens=1_000_000,
+                output_tokens=0,
+                server_tool_use=_FakeServerToolUsage(web_search_requests=10),
+            ),
+        )
+        m = metadata_from_anthropic_message(msg)
+        cost = recompute_cost(
+            m,
+            load_default_pricing(),
+            tool_fee_table=load_default_tool_fees(),
+            at=date(2026, 5, 25),
+        )
+        # 1M Sonnet input @ $3/M + 10 web_search @ $10/1k = $3.10.
+        assert cost == pytest.approx(3.10)
 

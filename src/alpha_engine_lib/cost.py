@@ -30,17 +30,27 @@ overlap or unsorted input per ``feedback_no_silent_fails``.
 
 - :class:`PriceCard` — one (model_name, effective_from) → per-1M-token rate row.
 - :class:`PriceTable` — wraps a list of cards with effective-date lookup.
-- :func:`load_pricing` — reads ``model_pricing.yaml`` into a ``PriceTable``.
-- :func:`load_default_pricing` — loads the packaged-default rate card for
-  consumers that don't maintain their own external YAML.
-- :func:`compute_cost` — pure math from token counts + price card.
+- :class:`ToolFee` — one (tool_name, effective_from) → per-1K-request rate row,
+  for Anthropic server-side tools billed as flat per-request fees
+  (``web_search``, ``web_fetch``).
+- :class:`ToolFeeTable` — wraps a list of tool fees with effective-date
+  lookup (mirror of :class:`PriceTable`).
+- :func:`load_pricing` / :func:`load_tool_fees` — read external pricing
+  YAML into the respective table.
+- :func:`load_default_pricing` / :func:`load_default_tool_fees` — load
+  the packaged-default tables for consumers without an external YAML.
+- :func:`compute_cost` — pure math from token counts + price card +
+  optional server-tool request counts + matching tool fees.
 - :func:`recompute_cost` — recompute and overwrite ``cost_usd`` on a
-  ``ModelMetadata`` from a ``PriceTable`` and a query date.
+  ``ModelMetadata`` from a ``PriceTable``, optional ``ToolFeeTable``,
+  and a query date.
 - :func:`metadata_from_anthropic_message` — raw-Anthropic-SDK adapter;
-  maps a ``Message.usage`` onto a ``ModelMetadata`` for consumers using
-  the SDK directly (no LangChain).
+  maps a ``Message.usage`` (including ``server_tool_use`` request counts)
+  onto a ``ModelMetadata`` for consumers using the SDK directly (no
+  LangChain).
 - :exc:`PriceCardLookupError` — raised when no card matches a (model, date)
-  query (do not swallow).
+  query OR a non-zero tool-request count has no matching fee (do not
+  swallow).
 
 Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708
 ("Per-run LLM cost telemetry as code artifact").
@@ -178,6 +188,78 @@ class PriceTable(BaseModel):
         return max(candidates, key=lambda c: c.effective_from)
 
 
+# ── Tool fee table ────────────────────────────────────────────────────────
+
+
+class ToolFee(BaseModel):
+    """One row of the tool-fee table — per-tool, per-effective-date rate.
+
+    Anthropic's server-side tools (web_search, web_fetch) are billed as
+    flat per-request fees, independent of which model invoked them. That
+    pricing dimension is conceptually separate from the per-token
+    :class:`PriceCard` rate, so it gets its own table to avoid duplicating
+    a global fee across every (model × effective_from) row.
+
+    Future server-side tools that adopt a per-request fee (e.g. anything
+    Anthropic adds to ``Message.usage.server_tool_use``) plug in here by
+    name, no schema change required.
+
+    Rate is published as USD per 1,000 requests to mirror Anthropic's
+    quoting convention ("$10 per 1,000 web search requests").
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    effective_from: date
+    per_1k_requests_usd: float = Field(ge=0.0)
+
+
+class ToolFeeTable(BaseModel):
+    """Ordered collection of :class:`ToolFee` rows with effective-date lookup.
+
+    Mirrors :class:`PriceTable` semantics: cards-per-tool are sorted
+    ascending by ``effective_from``; :meth:`get` returns the latest active
+    card for a (tool_name, query_date). Raises :exc:`PriceCardLookupError`
+    on missing-tool or query-before-first-card per ``feedback_no_silent_fails``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fees: list[ToolFee]
+
+    @model_validator(mode="after")
+    def _validate_fee_ordering(self) -> "ToolFeeTable":
+        seen_dates: dict[str, list[date]] = {}
+        for fee in self.fees:
+            seen_dates.setdefault(fee.tool_name, []).append(fee.effective_from)
+        for tool_name, dates in seen_dates.items():
+            if len(set(dates)) != len(dates):
+                raise PriceTableLoadError(
+                    f"ToolFeeTable: duplicate effective_from date for tool "
+                    f"{tool_name!r}: {dates}"
+                )
+            if dates != sorted(dates):
+                raise PriceTableLoadError(
+                    f"ToolFeeTable: fees for tool {tool_name!r} are not "
+                    f"sorted ascending by effective_from: {dates}"
+                )
+        return self
+
+    def get(self, tool_name: str, at: datetime | date) -> ToolFee:
+        """Return the active :class:`ToolFee` for ``tool_name`` at ``at``."""
+        query_date = at.date() if isinstance(at, datetime) else at
+        candidates = [
+            f for f in self.fees
+            if f.tool_name == tool_name and f.effective_from <= query_date
+        ]
+        if not candidates:
+            raise PriceCardLookupError(
+                f"No tool fee for tool {tool_name!r} active on {query_date}"
+            )
+        return max(candidates, key=lambda f: f.effective_from)
+
+
 # ── YAML loader ───────────────────────────────────────────────────────────
 
 
@@ -215,6 +297,77 @@ def load_default_pricing() -> PriceTable:
 
     cards = [PriceCard.model_validate(entry) for entry in raw["cards"]]
     return PriceTable(cards=cards)
+
+
+def load_default_tool_fees() -> ToolFeeTable:
+    """Load the :class:`ToolFeeTable` shipped inside this package.
+
+    Reads the ``tool_fees`` section of the packaged ``model_pricing.yaml``.
+    Hard-fails if the section is absent (per ``feedback_no_silent_fails``);
+    a caller wiring tool-fee accounting should never silently get an empty
+    table.
+
+    Companion to :func:`load_default_pricing`; both load from the same
+    YAML so a single packaged file covers both pricing dimensions.
+    """
+    with resources.files("alpha_engine_lib").joinpath(
+        _DEFAULT_PRICING_RESOURCE
+    ).open() as fh:
+        raw: Any = yaml.safe_load(fh)
+
+    if not isinstance(raw, dict) or "tool_fees" not in raw:
+        raise PriceTableLoadError(
+            f"Packaged {_DEFAULT_PRICING_RESOURCE}: expected top-level "
+            f"mapping with 'tool_fees' key; got {type(raw).__name__}"
+        )
+    if not isinstance(raw["tool_fees"], list):
+        raise PriceTableLoadError(
+            f"Packaged {_DEFAULT_PRICING_RESOURCE}: 'tool_fees' must be a "
+            f"list; got {type(raw['tool_fees']).__name__}"
+        )
+
+    fees = [ToolFee.model_validate(entry) for entry in raw["tool_fees"]]
+    return ToolFeeTable(fees=fees)
+
+
+def load_tool_fees(path: Path | str) -> ToolFeeTable:
+    """Load the ``tool_fees`` section of an external pricing YAML.
+
+    External-path counterpart of :func:`load_default_tool_fees` — same
+    contract, sourced from an operator-managed YAML. Used by
+    alpha-engine-research and any other consumer that needs to override
+    the packaged defaults (e.g. price change before next lib bump).
+
+    Expected YAML shape::
+
+        tool_fees:
+          - tool_name: web_search
+            effective_from: 2026-01-01
+            per_1k_requests_usd: 10.00
+          - tool_name: web_fetch
+            effective_from: 2026-01-01
+            per_1k_requests_usd: 0.00
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"pricing YAML not found at {path}")
+
+    with path.open() as fh:
+        raw: Any = yaml.safe_load(fh)
+
+    if not isinstance(raw, dict) or "tool_fees" not in raw:
+        raise PriceTableLoadError(
+            f"{path}: expected top-level mapping with 'tool_fees' key; "
+            f"got {type(raw).__name__}"
+        )
+    if not isinstance(raw["tool_fees"], list):
+        raise PriceTableLoadError(
+            f"{path}: 'tool_fees' must be a list; got "
+            f"{type(raw['tool_fees']).__name__}"
+        )
+
+    fees = [ToolFee.model_validate(entry) for entry in raw["tool_fees"]]
+    return ToolFeeTable(fees=fees)
 
 
 def load_pricing(path: Path | str) -> PriceTable:
@@ -272,6 +425,9 @@ def load_pricing(path: Path | str) -> PriceTable:
 _TOKENS_PER_PRICE_UNIT = 1_000_000
 
 
+_REQUESTS_PER_FEE_UNIT = 1_000
+
+
 def compute_cost(
     *,
     input_tokens: int,
@@ -279,26 +435,69 @@ def compute_cost(
     cache_read_tokens: int,
     cache_create_tokens: int,
     card: PriceCard,
+    tool_requests: dict[str, int] | None = None,
+    tool_fees: dict[str, ToolFee] | None = None,
 ) -> float:
-    """Compute USD cost from token counts and a single :class:`PriceCard`.
+    """Compute USD cost from token counts, a :class:`PriceCard`, and
+    optional server-tool request counts + their resolved :class:`ToolFee`
+    rows.
 
     Pure math; no I/O. Caller is responsible for selecting the correct
-    card via :meth:`PriceTable.get` (which knows about effective dates).
+    cards via :meth:`PriceTable.get` and :meth:`ToolFeeTable.get` (both
+    know about effective dates).
 
-    Each token class is billed at its per-1M-token rate, summed.
+    Each token class is billed at its per-1M-token rate, summed; each
+    tool-request class is billed at its per-1K-request rate. Tool keys
+    must align between ``tool_requests`` and ``tool_fees`` — if a tool
+    has a non-zero request count but no matching fee, :exc:`PriceCardLookupError`
+    is raised (per ``feedback_no_silent_fails`` — a silent zero would
+    bury a real cost slice).
     """
-    return (
+    cost = (
         input_tokens * card.input_per_1m
         + output_tokens * card.output_per_1m
         + cache_read_tokens * card.cache_read_per_1m
         + cache_create_tokens * card.cache_create_per_1m
     ) / _TOKENS_PER_PRICE_UNIT
 
+    if tool_requests:
+        for tool_name, count in tool_requests.items():
+            if count <= 0:
+                continue
+            if tool_fees is None or tool_name not in tool_fees:
+                raise PriceCardLookupError(
+                    f"{count} {tool_name} requests recorded but no matching "
+                    f"ToolFee provided to compute_cost. Pass tool_fees={{...}}."
+                )
+            cost += (
+                count * tool_fees[tool_name].per_1k_requests_usd
+                / _REQUESTS_PER_FEE_UNIT
+            )
+    return cost
+
+
+def _tool_request_counts(metadata: ModelMetadata) -> dict[str, int]:
+    """Pull non-zero server-tool request counts off a ``ModelMetadata``.
+
+    Centralizes the mapping between ``ModelMetadata`` field names and
+    Anthropic tool names. Add new server tools here when the SDK adds
+    them to ``Usage.server_tool_use`` (and to ``ModelMetadata``).
+    """
+    return {
+        name: count
+        for name, count in (
+            ("web_search", metadata.web_search_requests),
+            ("web_fetch", metadata.web_fetch_requests),
+        )
+        if count > 0
+    }
+
 
 def recompute_cost(
     metadata: ModelMetadata,
     table: PriceTable,
     *,
+    tool_fee_table: ToolFeeTable | None = None,
     at: datetime | date | None = None,
     overwrite: bool = True,
 ) -> float:
@@ -323,21 +522,51 @@ def recompute_cost(
         If ``True`` (default), assigns the result to ``metadata.cost_usd``
         before returning. Set to ``False`` for read-only repricing.
 
+    Parameters
+    ----------
+    tool_fee_table
+        Optional :class:`ToolFeeTable` for pricing server-tool requests
+        captured on ``metadata`` (``web_search_requests``,
+        ``web_fetch_requests``). Required if any non-zero request count
+        is present — :exc:`PriceCardLookupError` is raised otherwise (per
+        ``feedback_no_silent_fails``: silently dropping a real fee slice
+        would bury cost regressions). Pure-LLM consumers with no
+        server-tool usage can omit it.
+
     Raises
     ------
     PriceCardLookupError
         If ``table`` has no card for ``metadata.model_name`` active at
-        ``at``. Per ``feedback_no_silent_fails`` — silent zero-pricing
-        on a missing model would bury cost regressions.
+        ``at``; or if a non-zero server-tool request count is recorded
+        without a matching :class:`ToolFee` in ``tool_fee_table``. Per
+        ``feedback_no_silent_fails`` — silent zero-pricing on a missing
+        model or tool would bury cost regressions.
     """
     when = at if at is not None else datetime.now(timezone.utc)
     card = table.get(metadata.model_name, when)
+
+    tool_requests = _tool_request_counts(metadata)
+    tool_fees: dict[str, ToolFee] | None = None
+    if tool_requests:
+        if tool_fee_table is None:
+            raise PriceCardLookupError(
+                f"ModelMetadata has non-zero server-tool requests "
+                f"({tool_requests}) but no tool_fee_table was passed to "
+                f"recompute_cost. Pass tool_fee_table=... or zero the "
+                f"request counts."
+            )
+        tool_fees = {
+            name: tool_fee_table.get(name, when) for name in tool_requests
+        }
+
     cost = compute_cost(
         input_tokens=metadata.input_tokens,
         output_tokens=metadata.output_tokens,
         cache_read_tokens=metadata.cache_read_tokens,
         cache_create_tokens=metadata.cache_create_tokens,
         card=card,
+        tool_requests=tool_requests or None,
+        tool_fees=tool_fees,
     )
     if overwrite:
         metadata.cost_usd = cost
@@ -345,6 +574,13 @@ def recompute_cost(
 
 
 # ── Anthropic SDK adapter ─────────────────────────────────────────────────
+
+
+class _AnthropicServerToolUsageLike(Protocol):
+    """Structural type for ``anthropic.types.ServerToolUsage``."""
+
+    web_search_requests: int
+    web_fetch_requests: int
 
 
 class _AnthropicUsageLike(Protocol):
@@ -361,6 +597,7 @@ class _AnthropicUsageLike(Protocol):
     output_tokens: int
     cache_read_input_tokens: int | None
     cache_creation_input_tokens: int | None
+    server_tool_use: _AnthropicServerToolUsageLike | None
 
 
 class _AnthropicMessageLike(Protocol):
@@ -407,19 +644,22 @@ def metadata_from_anthropic_message(
 
     Notes
     -----
-    Server-tool-use counts (e.g. ``usage.server_tool_use.web_search_requests``)
-    are NOT folded into ``ModelMetadata`` here — they would inflate token
-    cost using a token-based rate when the actual billing is a flat fee
-    per request. A dedicated web-search-fee surface is a planned follow-up
-    once a second consumer materializes (the per-request-fee primitive is
-    a different shape from the per-1M-token primitive this module
-    handles).
+    Server-tool request counts (``usage.server_tool_use.web_search_requests``
+    and ``.web_fetch_requests``) ARE captured into ``ModelMetadata``.
+    They are flat per-request fees, billed via :class:`ToolFee` rather
+    than the per-1M-token rates on :class:`PriceCard`. Pass a
+    :class:`ToolFeeTable` to :func:`recompute_cost` to price them.
     """
     u = msg.usage
+    stu = getattr(u, "server_tool_use", None)
     return ModelMetadata(
         model_name=model_name if model_name is not None else msg.model,
         input_tokens=u.input_tokens,
         output_tokens=u.output_tokens,
         cache_read_tokens=getattr(u, "cache_read_input_tokens", None) or 0,
         cache_create_tokens=getattr(u, "cache_creation_input_tokens", None) or 0,
+        web_search_requests=(getattr(stu, "web_search_requests", 0) or 0)
+            if stu is not None else 0,
+        web_fetch_requests=(getattr(stu, "web_fetch_requests", 0) or 0)
+            if stu is not None else 0,
     )
