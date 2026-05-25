@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alpha-engine-lib"
-version = "0.31.0"
+version = "0.32.0"
 description = "Shared utilities for Alpha Engine modules — preflight, logging, ArcticDB, dates, calendar, decision capture, cost tracking, RAG, agent output schemas, transparency-substrate health checks, SSM-backed secrets, universe-membership filtering, Telegram push notifications, failure-surveillance fan-out (SNS + Telegram with CLI for Bash callers + dedup-key/dedup-window-min S3-marker idempotency), data-source Protocols + shapes (NewsArticle / AnalystSnapshot / FilingDocument), pillar-decomposed attractiveness scoring shapes (PILLARS / MoatAssessment / PillarSubscore / QualitativePillarAssessment / CompositeBreakdown), SSM-step log-capture chokepoint (Python CLI replacement for the inline bash trap + tee pattern that broke under ASL States.Array escape semantics), EC2 spot-launch capacity-resilience chokepoint (Python CLI that rotates instance-type × subnet on InsufficientInstanceCapacity instead of failing the launcher), trading-day-aware freshness predicates (expected_last_close / trading_days_stale / is_fresh_in_trading_days — NYSE-calendar holiday-aware chokepoint replacing the calendar-day arithmetic that broke every post-Saturday SF redrive), and Step-Functions execution-state projection (read_pipeline_state + PipelineRun + TaskRow + STATE_TO_ARCHIVE_PAGE registry + format_success_message/format_failure_message — lib substrate for the pipeline-reporting-revamp arc consuming states:ListExecutions/DescribeExecution/GetExecutionHistory)"
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -19,6 +19,13 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "requests>=2.31",
+    # Pydantic V2 evaluates field annotations at class-construction time
+    # via get_type_hints, which on Python 3.9 cannot eval PEP 604 union
+    # syntax (``str | None``) even when guarded by
+    # ``from __future__ import annotations``. eval_type_backport is the
+    # backport Pydantic's own error message points to. 3.10+ has the
+    # syntax natively, so the dep is conditional on 3.9.
+    "eval_type_backport>=0.2.0; python_version < '3.10'",
 ]
 
 [project.optional-dependencies]
