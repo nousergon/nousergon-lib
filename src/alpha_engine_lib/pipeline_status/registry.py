@@ -27,8 +27,9 @@ how the two stay in sync without a runtime coupling.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Final, Optional
+from typing import Annotated, Final, Literal, Optional, Union
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Substantive-state filtering (§3.2 of the plan doc) ────────────────────
@@ -100,8 +101,7 @@ PIPELINE_LABELS: Final[dict[str, str]] = {
 # ── Artifact registry types ───────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class ArchivePageRef:
+class ArchivePageRef(BaseModel):
     """Deep-link target for a substantive Task state that produces an
     operator-readable artifact.
 
@@ -116,14 +116,19 @@ class ArchivePageRef:
 
     ``artifact_label`` is the human-readable label for the deep-link cell
     on page 25 — e.g. "Morning briefing" rather than the bare page slug.
+
+    ``kind`` is the discriminator field for the tagged-union round-trip
+    in :class:`alpha_engine_lib.pipeline_status.read.TaskRow.archive`.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["archive_page_ref"] = "archive_page_ref"
     page: str
     artifact_label: str
 
 
-@dataclass(frozen=True)
-class ArtifactReason:
+class ArtifactReason(BaseModel):
     """Explicit non-generic reason a substantive Task state has no archive
     page deep-link.
 
@@ -131,13 +136,26 @@ class ArtifactReason:
     a specific reason ("Substrate refresh; no per-run artifact"), never
     a generic "no artifact" placeholder. The reason text is what the
     page 25 cell renders.
+
+    ``kind`` is the discriminator field for the tagged-union round-trip
+    in :class:`alpha_engine_lib.pipeline_status.read.TaskRow.archive`.
     """
 
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["artifact_reason"] = "artifact_reason"
     reason: str
 
 
-# Type alias for the registry value — either a deep-link or an explicit reason.
-RegistryEntry = "ArchivePageRef | ArtifactReason"
+# Discriminated union for :class:`TaskRow.archive` — Pydantic V2 routes
+# dict input to the right variant via the ``kind`` tag, so
+# ``model_dump(mode="json")`` → ``model_validate`` round-trips reconstruct
+# the typed instance (instead of leaving the dict raw, which the page-25
+# ``isinstance`` checks would mis-classify as registry drift).
+RegistryEntry = Annotated[
+    Union[ArchivePageRef, ArtifactReason],
+    Field(discriminator="kind"),
+]
 
 
 # ── The registry ──────────────────────────────────────────────────────────
@@ -151,19 +169,29 @@ RegistryEntry = "ArchivePageRef | ArtifactReason"
 # (Saturday 89 / Weekday 36 / EOD 21 total states; nested Parallel branches
 # walked). Reviewed against ROADMAP L3050 + the post-2026-05-15
 # artifact-archive pages (dashboard #86: pages 16-22).
-STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
-    # ── Saturday SF (23 substantive Task steps) ──────────────────────────
+STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] = {
+    # ── Saturday SF (24 substantive Task steps) ──────────────────────────
     "MorningEnrich": ArtifactReason(
-        "Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
+        reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
         "no per-run rendered artifact — substrate for downstream stages."
     ),
     "DataPhase1": ArtifactReason(
-        "Bulk weekly write to predictor/price_cache/, archive/macro/, "
+        reason="Bulk weekly write to predictor/price_cache/, archive/macro/, "
         "ArcticDB universe library; no per-run rendered artifact — "
         "substrate refresh."
     ),
+    "Scanner": ArtifactReason(
+        reason="Standalone scanner Lambda (ROADMAP L1995 Phase 1-2, "
+        "alpha-engine-research #235): writes candidates.json for the "
+        "run_date as observe-only output, gated by "
+        "$.enable_standalone_scanner. No consumer reads it today (Phase "
+        "4 will flip RAG to read it; Phase 5 will flip Research). "
+        "Failure is non-blocking — the SF Catch routes forward to "
+        "CheckSkipRAGIngestion. Once Phase 4/5 lands, swap this entry "
+        "for an ArchivePageRef pointing at the scanner-candidates page."
+    ),
     "RAGIngestion": ArtifactReason(
-        "SEC/8-K/earnings/theses corpus refresh in rag/corpus/; "
+        reason="SEC/8-K/earnings/theses corpus refresh in rag/corpus/; "
         "substrate-only — consumed at Research time."
     ),
     "RegimeSubstrate": ArchivePageRef(
@@ -179,7 +207,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Morning research briefing",
     ),
     "DataPhase2": ArtifactReason(
-        "Alt-data + fundamentals refresh; substrate-only, no per-run "
+        reason="Alt-data + fundamentals refresh; substrate-only, no per-run "
         "rendered artifact."
     ),
     "EvalJudgeSubmitFirstSaturday": ArchivePageRef(
@@ -191,7 +219,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Eval judge (weekly batch)",
     ),
     "EvalJudgePoll": ArtifactReason(
-        "Polling state for the EvalJudge batch job; no per-run artifact — "
+        reason="Polling state for the EvalJudge batch job; no per-run artifact — "
         "see EvalJudgeProcess for the materialized rubric output."
     ),
     "EvalJudgeProcess": ArchivePageRef(
@@ -203,15 +231,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Eval 4-week rolling mean",
     ),
     "RationaleClustering": ArtifactReason(
-        "Rationale cluster artifact written to S3; no dedicated page yet "
+        reason="Rationale cluster artifact written to S3; no dedicated page yet "
         "(P3 follow-up — backlog)."
     ),
     "ReplayConcordance": ArtifactReason(
-        "Concordance metric written to backtest/{date}/; surfaced inline "
+        reason="Concordance metric written to backtest/{date}/; surfaced inline "
         "in Backtester evaluator report (page 21)."
     ),
     "Counterfactual": ArtifactReason(
-        "Counterfactual artifact written to backtest/{date}/; surfaced "
+        reason="Counterfactual artifact written to backtest/{date}/; surfaced "
         "inline in Backtester evaluator report (page 21)."
     ),
     "PredictorTraining": ArchivePageRef(
@@ -243,19 +271,19 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Weekly substrate health check",
     ),
     "NotifyComplete": ArtifactReason(
-        "Terminal success SNS publish to alpha-engine-alerts; "
+        reason="Terminal success SNS publish to alpha-engine-alerts; "
         "no persisted artifact (the email IS the surface)."
     ),
     "NotifyShellRunComplete": ArtifactReason(
-        "Friday-PM shell-run dry-pass terminal SNS publish; "
+        reason="Friday-PM shell-run dry-pass terminal SNS publish; "
         "no persisted artifact (the email IS the surface)."
     ),
     "HandleFailure": ArtifactReason(
-        "Terminal failure SNS publish to alpha-engine-alerts; "
+        reason="Terminal failure SNS publish to alpha-engine-alerts; "
         "no persisted artifact (the email IS the surface)."
     ),
     "PublishResearchFailureImmediate": ArtifactReason(
-        "Early-signal SNS publish fired the moment the Research branch "
+        reason="Early-signal SNS publish fired the moment the Research branch "
         "fails inside ResearchPredictorParallel — BEFORE the sibling "
         "PredictorTraining branch completes its work and the parallel "
         "aggregation joins. No persisted artifact (the email IS the "
@@ -264,7 +292,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         "CheckBranchOutcomes."
     ),
     "PublishPredictorFailureImmediate": ArtifactReason(
-        "Early-signal SNS publish fired the moment the PredictorTraining "
+        reason="Early-signal SNS publish fired the moment the PredictorTraining "
         "branch fails inside ResearchPredictorParallel — BEFORE the "
         "sibling Research branch's eval-judge / RollingMean / "
         "Counterfactual chain completes. No persisted artifact (the "
@@ -278,27 +306,27 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Deploy-drift assertions",
     ),
     "StartExecutorEC2": ArtifactReason(
-        "EC2 startInstances on the trading instance; no artifact — "
+        reason="EC2 startInstances on the trading instance; no artifact — "
         "operational only."
     ),
     "DescribeInstanceInfo": ArtifactReason(
-        "Boot diagnostic call against the trading instance; "
+        reason="Boot diagnostic call against the trading instance; "
         "no artifact — operational only."
     ),
     "CheckTradingDay": ArtifactReason(
-        "NYSE-holiday gate via SSM command; no artifact — gate outcome "
+        reason="NYSE-holiday gate via SSM command; no artifact — gate outcome "
         "is encoded in the SF branch taken."
     ),
     "NotifyHolidaySkip": ArtifactReason(
-        "Holiday-skip SNS publish; no persisted artifact (the email IS "
+        reason="Holiday-skip SNS publish; no persisted artifact (the email IS "
         "the surface)."
     ),
     "StopExecutorOnHoliday": ArtifactReason(
-        "EC2 stopInstances on the trading instance after a holiday-skip; "
+        reason="EC2 stopInstances on the trading instance after a holiday-skip; "
         "no artifact — operational only."
     ),
     "TradingDayCheckFailed": ArtifactReason(
-        "SF Pass state recording a holiday-skip outcome; no artifact."
+        reason="SF Pass state recording a holiday-skip outcome; no artifact."
     ),
     # MorningEnrich (weekday) — same state name as Saturday; same entry above wins.
     "PredictorInference": ArchivePageRef(
@@ -306,15 +334,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Predictor morning briefing",
     ),
     "CheckPredictorCoverage": ArtifactReason(
-        "Coverage-gate Lambda; outcome encoded in the SF branch taken — "
+        reason="Coverage-gate Lambda; outcome encoded in the SF branch taken — "
         "see PredictorHealthCheck for any persisted health JSON."
     ),
     "ReinvokePredictor": ArtifactReason(
-        "Re-invocation Lambda when CheckPredictorCoverage finds a gap; "
+        reason="Re-invocation Lambda when CheckPredictorCoverage finds a gap; "
         "no per-run artifact — replaces the PredictorInference output."
     ),
     "RecheckCoverage": ArtifactReason(
-        "Second coverage-gate Lambda after ReinvokePredictor; outcome "
+        reason="Second coverage-gate Lambda after ReinvokePredictor; outcome "
         "encoded in the SF branch taken."
     ),
     "PredictorHealthCheck": ArchivePageRef(
@@ -331,7 +359,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
     ),
     # ── EOD SF (5 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
-        "Polygon T+1 daily aggregate write to predictor/daily_closes/; "
+        reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
         "substrate-only — consumed by EODReconcile."
     ),
     "CaptureSnapshot": ArchivePageRef(
@@ -347,17 +375,17 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, "ArchivePageRef | ArtifactReason"]] = {
         artifact_label="Daily substrate health check",
     ),
     "StopTradingInstance": ArtifactReason(
-        "EC2 stopInstances on the trading instance; no artifact — "
+        reason="EC2 stopInstances on the trading instance; no artifact — "
         "operational only."
     ),
     "ForceStopInstance": ArtifactReason(
-        "EC2 stopInstances fallback on a non-graceful EOD; no artifact — "
+        reason="EC2 stopInstances fallback on a non-graceful EOD; no artifact — "
         "operational only."
     ),
 }
 
 
-def lookup_registry(state_name: str) -> Optional["ArchivePageRef | ArtifactReason"]:
+def lookup_registry(state_name: str) -> Optional[Union[ArchivePageRef, ArtifactReason]]:
     """Return the registry entry for ``state_name`` (None if absent).
 
     ``None`` here signals "this state is not in the registry" — distinct

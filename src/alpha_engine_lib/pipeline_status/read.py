@@ -35,7 +35,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -160,7 +160,21 @@ class TaskRow(BaseModel):
     # substrate-only reason). ``None`` here means "state name not in the
     # registry" and is a CI-time bug — the consumer should treat it as a
     # registry-drift signal, not a renderable placeholder.
-    archive: Optional[Any] = None  # ArchivePageRef | ArtifactReason | None
+    #
+    # The Annotated[Union[...], Field(discriminator="kind")] form is the
+    # SOTA tagged-union pattern for Pydantic V2: ``model_dump(mode="json")``
+    # serializes the ``kind`` field on each variant, and ``model_validate``
+    # routes dict input to the right class via that tag. Prior to this
+    # tagging, ``archive`` was typed ``Optional[Any]``, so a JSON round-trip
+    # left it as a plain dict — page-25's ``isinstance`` checks then
+    # misfired and rendered "Registry drift" for every state, even those
+    # with valid registry entries.
+    archive: Optional[
+        Annotated[
+            Union[ArchivePageRef, ArtifactReason],
+            Field(discriminator="kind"),
+        ]
+    ] = None
     failure_cause: Optional[str] = None  # populated only when status == FAILED
 
 

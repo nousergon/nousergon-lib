@@ -462,3 +462,76 @@ def test_region_from_arn_returns_none_for_malformed():
     assert _region_from_arn("not-an-arn") is None
     assert _region_from_arn("arn:aws:states") is None
     assert _region_from_arn("arn:aws:states::123:stateMachine:x") is None
+
+
+# ── Archive-union JSON round-trip (regression for "registry drift" false positive) ──
+
+
+def _entered_and_succeeded(name: str, t0: datetime, t1: datetime) -> list[dict]:
+    return [
+        _entered(name, t0),
+        {
+            "type": "TaskStateExited",
+            "timestamp": t1,
+            "stateExitedEventDetails": {"name": name},
+        },
+    ]
+
+
+def test_task_row_archive_round_trips_through_json_for_archive_page_ref():
+    """The dashboard's st.cache_data wraps read_pipeline_state by doing
+    ``model_dump(mode="json")`` → cache → ``model_validate(dict)``. Before
+    this regression-guard, ``TaskRow.archive`` was typed ``Optional[Any]``,
+    so the JSON round-trip flattened ArchivePageRef instances to plain
+    dicts; page-25's ``isinstance(archive, ArchivePageRef)`` then misfired
+    and rendered ``⚠️ Registry drift`` for every state with a valid
+    registry entry. The discriminated-union typing
+    (``Annotated[Union[...], Field(discriminator='kind')]``) reconstructs
+    the typed instance on validate; this test guards the contract."""
+    t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 5, 24, 9, 5, tzinfo=timezone.utc)
+    client = _make_sfn_mock(
+        history_response={"events": _entered_and_succeeded("Research", t0, t1)}
+    )
+
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+    research_task = next(t for t in run.tasks if t.state_name == "Research")
+    assert isinstance(research_task.archive, ArchivePageRef)
+
+    # The actual code path that broke production: JSON round-trip.
+    round_tripped = PipelineRun.model_validate(run.model_dump(mode="json"))
+    round_tripped_task = next(
+        t for t in round_tripped.tasks if t.state_name == "Research"
+    )
+    assert isinstance(round_tripped_task.archive, ArchivePageRef), (
+        "TaskRow.archive must reconstruct as ArchivePageRef on JSON "
+        "round-trip — otherwise page 25's isinstance check falls through "
+        "to the registry-drift sentinel for every state."
+    )
+    assert round_tripped_task.archive.page == "17_Research_Briefing_Archive"
+
+
+def test_task_row_archive_round_trips_through_json_for_artifact_reason():
+    """Mirrors the ArchivePageRef round-trip but for the ArtifactReason
+    variant (substrate-only states like NotifyComplete + Scanner). Both
+    variants must reconstruct correctly on JSON round-trip; the
+    discriminated union differentiates them via the ``kind`` field."""
+    t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 5, 24, 9, 0, 1, tzinfo=timezone.utc)
+    client = _make_sfn_mock(
+        history_response={"events": _entered_and_succeeded("NotifyComplete", t0, t1)}
+    )
+
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+    notify_task = next(t for t in run.tasks if t.state_name == "NotifyComplete")
+    assert isinstance(notify_task.archive, ArtifactReason)
+
+    round_tripped = PipelineRun.model_validate(run.model_dump(mode="json"))
+    round_tripped_task = next(
+        t for t in round_tripped.tasks if t.state_name == "NotifyComplete"
+    )
+    assert isinstance(round_tripped_task.archive, ArtifactReason), (
+        "TaskRow.archive must reconstruct as ArtifactReason on JSON "
+        "round-trip — same regression class as the ArchivePageRef test."
+    )
+    assert "Terminal success" in round_tripped_task.archive.reason

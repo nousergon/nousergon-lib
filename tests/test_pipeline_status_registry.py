@@ -104,6 +104,7 @@ def test_registry_covers_known_saturday_substantive_states():
     required = {
         "MorningEnrich",
         "DataPhase1",
+        "Scanner",
         "RAGIngestion",
         "RegimeSubstrate",
         "Research",
@@ -116,6 +117,7 @@ def test_registry_covers_known_saturday_substantive_states():
         "Parity",
         "Evaluator",
         "DriftDetection",
+        "SaturdayHealthCheck",
         "WeeklySubstrateHealthCheck",
         "NotifyComplete",
         "HandleFailure",
@@ -166,15 +168,23 @@ def test_lookup_registry_returns_entry_for_known_state():
 
 
 def test_archive_page_ref_is_frozen():
-    """ArchivePageRef + ArtifactReason are frozen dataclasses — mutation
-    is forbidden so consumers can rely on registry stability across
-    a process lifetime."""
+    """ArchivePageRef + ArtifactReason are frozen Pydantic models —
+    mutation is forbidden so consumers can rely on registry stability
+    across a process lifetime. Pydantic V2 raises ValidationError with
+    ``type='frozen_instance'`` on attribute set; older stdlib-dataclass
+    consumers would have seen TypeError / FrozenInstanceError, both
+    accepted here so the test survives the dataclass → BaseModel
+    transition without spurious churn."""
+    from pydantic import ValidationError
+
     ref = registry.ArchivePageRef(page="x", artifact_label="y")
-    with pytest.raises((TypeError, AttributeError)):
+    with pytest.raises((TypeError, AttributeError, ValidationError)):
         ref.page = "z"  # type: ignore[misc]
 
 
 def test_artifact_reason_is_frozen():
+    from pydantic import ValidationError
+
     reason = registry.ArtifactReason(reason="x")
-    with pytest.raises((TypeError, AttributeError)):
+    with pytest.raises((TypeError, AttributeError, ValidationError)):
         reason.reason = "y"  # type: ignore[misc]
