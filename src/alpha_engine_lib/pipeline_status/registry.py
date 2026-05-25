@@ -242,6 +242,10 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         reason="Counterfactual artifact written to backtest/{date}/; surfaced "
         "inline in Backtester evaluator report (page 21)."
     ),
+    "AggregateCosts": ArchivePageRef(
+        page="23_LLM_Cost",
+        artifact_label="LLM cost telemetry (daily aggregate)",
+    ),
     "PredictorTraining": ArchivePageRef(
         page="20_Predictor_Training_Archive",
         artifact_label="Predictor training summary",
