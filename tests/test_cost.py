@@ -25,6 +25,7 @@ from alpha_engine_lib.cost import (
     load_pricing,
     load_tool_fees,
     metadata_from_anthropic_message,
+    record_anthropic_call,
     recompute_cost,
 )
 from alpha_engine_lib.decision_capture import ModelMetadata
@@ -740,4 +741,119 @@ class TestRecomputeCostWithToolFees:
         )
         # 1M Sonnet input @ $3/M + 10 web_search @ $10/1k = $3.10.
         assert cost == pytest.approx(3.10)
+
+
+# ── record_anthropic_call (capture chokepoint, v0.33.0) ───────────────────
+
+
+class TestRecordAnthropicCall:
+    """Lock down the lifted capture primitive that morning-signal,
+    alpha-engine-data, and alpha-engine (executor) all consume in their
+    raw-SDK call sites."""
+
+    def test_returns_priced_jsonl_ready_record(self):
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(input_tokens=1000, output_tokens=200),
+        )
+        record = record_anthropic_call(msg)
+        # Token cost: (1000 * 1.0 + 200 * 5.0) / 1M = 0.002
+        assert record["cost_usd"] == pytest.approx(0.002, abs=1e-6)
+        assert record["model"] == "claude-haiku-4-5"
+        assert record["input_tokens"] == 1000
+        assert record["output_tokens"] == 200
+        assert record["cache_read_tokens"] == 0
+        assert record["cache_create_tokens"] == 0
+        assert record["web_search_requests"] == 0
+        assert record["web_fetch_requests"] == 0
+        # Timestamp is ISO-8601 round-trippable.
+        from datetime import datetime
+        datetime.fromisoformat(record["ts"])
+
+    def test_includes_tool_fee_pricing(self):
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(
+                input_tokens=1000, output_tokens=200,
+                server_tool_use=_FakeServerToolUsage(web_search_requests=50),
+            ),
+        )
+        record = record_anthropic_call(msg)
+        # Tokens 0.002 + 50 × $10/1k = 0.5 → 0.502
+        assert record["cost_usd"] == pytest.approx(0.502, abs=1e-6)
+        assert record["web_search_requests"] == 50
+
+    def test_extra_fields_merged(self):
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(input_tokens=10, output_tokens=5),
+        )
+        record = record_anthropic_call(msg, extra_fields={
+            "run_id": "2026-05-25",
+            "agent_id": "data:news_event_extraction",
+            "fingerprint": "abc123",
+        })
+        assert record["run_id"] == "2026-05-25"
+        assert record["agent_id"] == "data:news_event_extraction"
+        assert record["fingerprint"] == "abc123"
+        # Standard fields preserved alongside extras.
+        assert record["model"] == "claude-haiku-4-5"
+
+    def test_extra_fields_can_override_standard_fields(self):
+        """Caller-owned keys take precedence — the consumer is the
+        authority on what a record should look like in its sink."""
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(input_tokens=10, output_tokens=5),
+        )
+        custom_ts = "2026-05-25T17:30:00+00:00"
+        record = record_anthropic_call(msg, extra_fields={"ts": custom_ts})
+        assert record["ts"] == custom_ts
+
+    def test_model_name_override_propagates(self):
+        msg = _FakeMessage(
+            model="claude-haiku-4-5-20251001",
+            usage=_FakeUsage(input_tokens=10, output_tokens=5),
+        )
+        record = record_anthropic_call(msg, model_name="claude-haiku-4-5")
+        assert record["model"] == "claude-haiku-4-5"
+
+    def test_uses_default_pricing_when_none_passed(self):
+        """Caller without operator-managed pricing gets packaged defaults."""
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(input_tokens=1_000_000, output_tokens=0),
+        )
+        record = record_anthropic_call(msg)
+        # 1M Sonnet input @ $3/M = $3.00 against packaged default rate card.
+        assert record["cost_usd"] == pytest.approx(3.0)
+
+    def test_explicit_pricing_table_used(self):
+        """Operator-managed pricing wins over defaults when passed."""
+        custom_table = PriceTable(cards=[PriceCard(
+            model_name="claude-sonnet-4-6",
+            effective_from=date(2026, 1, 1),
+            input_per_1m=99.0,
+            output_per_1m=99.0,
+            cache_read_per_1m=99.0,
+            cache_create_per_1m=99.0,
+        )])
+        msg = _FakeMessage(
+            model="claude-sonnet-4-6",
+            usage=_FakeUsage(input_tokens=1_000_000, output_tokens=0),
+        )
+        record = record_anthropic_call(msg, pricing=custom_table)
+        assert record["cost_usd"] == pytest.approx(99.0)
+
+    def test_at_kwarg_threads_to_recompute(self):
+        """Historical recompute path: caller passes capture timestamp."""
+        msg = _FakeMessage(
+            model="claude-haiku-4-5",
+            usage=_FakeUsage(input_tokens=1000, output_tokens=0),
+        )
+        record = record_anthropic_call(msg, at=date(2026, 5, 25))
+        # Whatever the at= date evaluates to, no PriceCardLookupError raised
+        # is the load-bearing assertion — we have a packaged-default card
+        # effective 2026-01-01.
+        assert record["cost_usd"] > 0
 

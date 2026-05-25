@@ -663,3 +663,96 @@ def metadata_from_anthropic_message(
         web_fetch_requests=(getattr(stu, "web_fetch_requests", 0) or 0)
             if stu is not None else 0,
     )
+
+
+# ── Capture chokepoint (v0.33.0) ──────────────────────────────────────────
+
+
+def record_anthropic_call(
+    msg: _AnthropicMessageLike,
+    *,
+    model_name: str | None = None,
+    pricing: PriceTable | None = None,
+    tool_fees: ToolFeeTable | None = None,
+    at: datetime | date | None = None,
+    extra_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Map an Anthropic SDK ``Message`` → priced JSONL-ready cost record.
+
+    Single chokepoint for raw-SDK consumers (morning-signal, alpha-engine
+    /executor, alpha-engine-data, et al.). Returns a flat dict ready for
+    ``json.dumps``; the caller chooses the sink (local file / S3 /
+    CloudWatch). No I/O performed here — pure mapper.
+
+    Per ``[[feedback_lift_invariants_to_chokepoint_after_second_recurrence]]``
+    — extracted from morning-signal v0.32.0's ``cost_telemetry.record_call_cost``
+    after data + executor became the 2nd + 3rd consumers needing the same
+    shape. Composes with :func:`metadata_from_anthropic_message` (token-count
+    extraction) + :func:`recompute_cost` (USD pricing) into the single call
+    a typical consumer wants.
+
+    Parameters
+    ----------
+    msg
+        Anthropic SDK ``Message`` (or anything matching
+        :class:`_AnthropicMessageLike`). Forwarded to
+        :func:`metadata_from_anthropic_message`.
+    model_name
+        Override for ``ModelMetadata.model_name``. Defaults to ``msg.model``.
+    pricing
+        :class:`PriceTable` for USD recompute. Defaults to
+        :func:`load_default_pricing` when ``None`` (packaged Anthropic rate
+        card). Pass an explicit table for operator-managed pricing.
+    tool_fees
+        :class:`ToolFeeTable` for server-tool fee recompute. Defaults to
+        :func:`load_default_tool_fees`. Pass an explicit table for
+        operator-managed fees.
+    at
+        Wall-clock date for price-card / tool-fee lookup. Defaults to
+        ``datetime.now(timezone.utc)``. Pass the original capture
+        timestamp for historical recompute.
+    extra_fields
+        Optional dict merged into the returned record AFTER the standard
+        fields. Consumers attach run-context (``run_id``, ``agent_id``,
+        ``sector_team_id``, ``edition``, ``date``, ...) here so the
+        JSONL row is self-describing without out-of-band metadata.
+
+    Returns
+    -------
+    dict
+        Flat dict with: ``ts`` (ISO-8601 UTC capture time), ``model``,
+        ``input_tokens``, ``output_tokens``, ``cache_read_tokens``,
+        ``cache_create_tokens``, ``web_search_requests``,
+        ``web_fetch_requests``, ``cost_usd`` (priced via
+        ``recompute_cost``), plus any ``extra_fields`` merged in.
+        Caller-owned field names take precedence over the standard set
+        when keys collide.
+
+    Raises
+    ------
+    PriceCardLookupError
+        Propagated from :func:`recompute_cost` if no price card matches
+        ``model_name`` at ``at``, or if the message records non-zero
+        server-tool requests with no matching :class:`ToolFee` in the
+        active table. Per ``[[feedback_no_silent_fails]]`` — a missing
+        card on a real call is a load-bearing error worth surfacing.
+    """
+    metadata = metadata_from_anthropic_message(msg, model_name=model_name)
+    table = pricing if pricing is not None else load_default_pricing()
+    fees = tool_fees if tool_fees is not None else load_default_tool_fees()
+    recompute_cost(metadata, table, tool_fee_table=fees, at=at)
+
+    record: dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "model": metadata.model_name,
+        "input_tokens": metadata.input_tokens,
+        "output_tokens": metadata.output_tokens,
+        "cache_read_tokens": metadata.cache_read_tokens,
+        "cache_create_tokens": metadata.cache_create_tokens,
+        "web_search_requests": metadata.web_search_requests,
+        "web_fetch_requests": metadata.web_fetch_requests,
+        "cost_usd": metadata.cost_usd,
+    }
+    if extra_fields:
+        record.update(extra_fields)
+    return record
