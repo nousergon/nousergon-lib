@@ -37,6 +37,7 @@ from alpha_engine_lib.pipeline_status.read import (
     _failure_cause_from,
     _materialize_tasks,
     _parse_ts,
+    _region_from_arn,
 )
 from alpha_engine_lib.pipeline_status.registry import (
     ArchivePageRef,
@@ -440,3 +441,24 @@ def test_pretty_label_falls_back_to_arn_suffix_for_unknown_sf():
     arn = "arn:aws:states:us-east-1:711398986525:stateMachine:future-pipeline-name"
     run = read_pipeline_state(arn, client=client)
     assert run.pretty_label == "future-pipeline-name"
+
+
+# ── Region extraction ─────────────────────────────────────────────────────
+
+
+def test_region_from_arn_extracts_us_east_1():
+    assert _region_from_arn(SATURDAY_ARN) == "us-east-1"
+
+
+def test_region_from_arn_extracts_non_us_east_1():
+    arn = "arn:aws:states:eu-west-2:123456789012:stateMachine:some-pipeline"
+    assert _region_from_arn(arn) == "eu-west-2"
+
+
+def test_region_from_arn_returns_none_for_malformed():
+    """Permissive on bad input — boto3 will raise NoRegionError downstream,
+    which surfaces as a typed PipelineStatusError per _raise_for_boto_error."""
+    assert _region_from_arn("") is None
+    assert _region_from_arn("not-an-arn") is None
+    assert _region_from_arn("arn:aws:states") is None
+    assert _region_from_arn("arn:aws:states::123:stateMachine:x") is None
