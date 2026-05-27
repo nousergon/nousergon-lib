@@ -89,10 +89,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Final, Optional
 
 logger = logging.getLogger(__name__)
@@ -122,9 +124,102 @@ DEFAULT_POLL_INTERVAL_SECONDS: Final[float] = 5.0
 # configured S3 output prefix.
 SSM_INLINE_OUTPUT_CAP_BYTES: Final[int] = 24 * 1024
 
+# Stdout/stderr tail length captured in the diagnostics JSON written on
+# terminal non-Success. Chosen at 4KB to mirror the typical pre-lift bash
+# diagnostic posture (operators want enough tail to grep the failure
+# signature without consuming the full SSM inline cap); the full log
+# lives in --output-bucket when configured.
+DIAGNOSTICS_TAIL_BYTES: Final[int] = 4 * 1024
+
 
 class SsmDispatchError(Exception):
     """Non-recoverable SSM send-command / poll failure."""
+
+
+def _tail_bytes(text: str, max_bytes: int = DIAGNOSTICS_TAIL_BYTES) -> str:
+    """Return the last ``max_bytes`` of ``text``, snapping to a line boundary.
+
+    Used to bound the size of stdout/stderr payloads embedded in the
+    diagnostics JSON. Snap to a newline so the tail starts at a clean
+    line break rather than mid-line — operators grepping for a failure
+    signature get a coherent prefix instead of a truncated token. If no
+    newline exists in the window, the raw byte tail is returned.
+    """
+    if not text:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    tail = encoded[-max_bytes:].decode("utf-8", errors="replace")
+    nl = tail.find("\n")
+    if nl != -1 and nl < len(tail) - 1:
+        return tail[nl + 1 :]
+    return tail
+
+
+def _ship_diagnostics(
+    *,
+    bucket: str,
+    prefix: str,
+    status: str,
+    command_id: str,
+    description: str,
+    exit_window_utc: str,
+    stdout_tail: str,
+    stderr_tail: str,
+    instance_id: str,
+    boto3_client=None,
+    stderr_stream=None,
+) -> tuple[bool, str]:
+    """Write the terminal-non-Success diagnostics JSON to S3.
+
+    Returns ``(ok, detail)``. **Never raises** — mirrors the failure-mode
+    posture of ``alpha_engine_lib.ssm_log_capture._ship_log_to_s3``. Any
+    S3 upload failure (NoCredentialsError, AccessDenied, transient
+    network) is logged to ``stderr_stream`` + swallowed; the inner
+    dispatcher exit code is preserved.
+
+    Key shape: ``s3://{bucket}/{prefix}/{YYYY-MM-DD}.json``. The date
+    component is the UTC date at exit-window time. The current spec
+    permits one diagnostics file per ``{prefix}`` per UTC day; consumer
+    dispatchers that need multi-failure-per-day discrimination should
+    incorporate the repo or stage name into ``--diagnostics-prefix``.
+    """
+    err = stderr_stream if stderr_stream is not None else sys.stderr
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    key = f"{prefix.rstrip('/')}/{date_str}.json"
+    payload = {
+        "status": status,
+        "command_id": command_id,
+        "description": description,
+        "exit_window_utc": exit_window_utc,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "instance_id": instance_id,
+    }
+    try:
+        if boto3_client is None:
+            import boto3
+
+            s3 = boto3.client("s3")
+        else:
+            s3 = boto3_client
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json.dumps(payload, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+        return True, f"s3://{bucket}/{key}"
+    except Exception as exc:
+        msg = (
+            f"ssm_dispatcher: diagnostics-write to s3://{bucket}/{key} "
+            f"failed (swallowed; inner exit preserved): "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+        err.write(msg)
+        err.flush()
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def _encode_command_payload(script: str) -> str:
@@ -150,11 +245,14 @@ def run(
     output_key_prefix: Optional[str] = None,
     region: str = "us-east-1",
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+    diagnostics_bucket: Optional[str] = None,
+    diagnostics_prefix: Optional[str] = None,
     stdout_stream=None,
     stderr_stream=None,
     sleep=time.sleep,
     monotonic=time.monotonic,
     boto3_client=None,
+    s3_client=None,
 ) -> int:
     """Send ``script`` to ``instance_id`` via SSM, poll until terminal, stream stdout.
 
@@ -170,6 +268,15 @@ def run(
         output_key_prefix: S3 key prefix for the SSM output bucket.
         region: AWS region.
         poll_interval_seconds: gap between get-command-invocation polls.
+        diagnostics_bucket: S3 bucket for the terminal-non-Success
+            diagnostics JSON (L369). When both ``diagnostics_bucket`` and
+            ``diagnostics_prefix`` are set, every terminal non-Success
+            outcome writes ``{prefix}/{YYYY-MM-DD}.json`` with status +
+            command_id + description + exit_window + stdout/stderr tails
+            + instance_id. Best-effort; S3 failure is swallowed so the
+            inner exit code is preserved.
+        diagnostics_prefix: S3 key prefix for diagnostics JSON. Typical
+            shape from consumer dispatchers: ``_spot_diagnostics/{repo}``.
         stdout_stream: destination for streamed inner stdout (default:
             ``sys.stdout``).
         stderr_stream: destination for the terminal-failure stderr dump
@@ -177,6 +284,9 @@ def run(
         sleep / monotonic: time hooks (overridable for tests).
         boto3_client: optional boto3 ``ssm`` client (for tests). When
             ``None``, constructed via ``boto3.client('ssm', region_name=region)``.
+        s3_client: optional boto3 ``s3`` client used only for the
+            diagnostics-write path. When ``None`` and a diagnostics-write
+            is triggered, constructed via ``boto3.client('s3')``.
 
     Returns:
         ``0`` on terminal Success.
@@ -321,6 +431,28 @@ def run(
                 if not std_err.endswith("\n"):
                     err.write("\n")
             err.flush()
+            if diagnostics_bucket and diagnostics_prefix:
+                exit_window_utc = datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                )
+                ok, detail = _ship_diagnostics(
+                    bucket=diagnostics_bucket,
+                    prefix=diagnostics_prefix,
+                    status=status,
+                    command_id=command_id,
+                    description=description,
+                    exit_window_utc=exit_window_utc,
+                    stdout_tail=_tail_bytes(std_out),
+                    stderr_tail=_tail_bytes(std_err),
+                    instance_id=instance_id,
+                    boto3_client=s3_client,
+                    stderr_stream=err,
+                )
+                if ok:
+                    err.write(
+                        f"    [ssm {description}] diagnostics → {detail}\n"
+                    )
+                    err.flush()
             return 1
         if status not in PENDING_STATUSES:
             # Unknown status — treat as a hard failure, log it.
@@ -424,6 +556,26 @@ def main(argv: list[str] | None = None) -> int:
             f"{DEFAULT_POLL_INTERVAL_SECONDS:g})."
         ),
     )
+    run_p.add_argument(
+        "--diagnostics-bucket",
+        default=None,
+        help=(
+            "S3 bucket for the terminal-non-Success diagnostics JSON (L369). "
+            "When set together with --diagnostics-prefix, every terminal "
+            "non-Success outcome writes a JSON record with status + "
+            "command_id + stdout/stderr tails + instance_id. Best-effort; "
+            "S3 failure is swallowed (never masks the inner exit code)."
+        ),
+    )
+    run_p.add_argument(
+        "--diagnostics-prefix",
+        default=None,
+        help=(
+            "S3 key prefix for diagnostics JSON. Typical shape from "
+            "consumer dispatchers: '_spot_diagnostics/{repo}'. Key: "
+            "'{prefix}/{YYYY-MM-DD}.json'."
+        ),
+    )
     script_grp = run_p.add_mutually_exclusive_group(required=True)
     script_grp.add_argument(
         "--script-file",
@@ -456,6 +608,8 @@ def main(argv: list[str] | None = None) -> int:
         output_key_prefix=args.output_key_prefix,
         region=args.region,
         poll_interval_seconds=args.poll_interval,
+        diagnostics_bucket=args.diagnostics_bucket,
+        diagnostics_prefix=args.diagnostics_prefix,
     )
 
 

@@ -654,3 +654,368 @@ class TestModuleEntrypoint:
 
     def test_module_exposes_run(self):
         assert callable(ssm_dispatcher.run)
+
+
+# ---------------------------------------------------------------------------
+# L369 — diagnostics-write on terminal non-Success
+# ---------------------------------------------------------------------------
+
+
+class TestTailBytes:
+    """``_tail_bytes`` bounds operator-facing stdout/stderr tails to a
+    grep-friendly window — snaps to a line boundary so the operator
+    isn't reading mid-token noise."""
+
+    def test_short_text_returned_unchanged(self):
+        assert ssm_dispatcher._tail_bytes("short\n") == "short\n"
+
+    def test_tail_capped_at_max_bytes(self):
+        text = "a" * 5000
+        out = ssm_dispatcher._tail_bytes(text, max_bytes=1024)
+        assert len(out.encode("utf-8")) <= 1024
+
+    def test_tail_snaps_to_newline_boundary(self):
+        # Build a payload where the byte cutoff lands mid-line; the helper
+        # should drop the partial line so the tail starts cleanly.
+        lines = [f"line-{i:04d}\n" for i in range(500)]
+        text = "".join(lines)
+        out = ssm_dispatcher._tail_bytes(text, max_bytes=200)
+        assert "\n" not in out[:1]  # never starts on a bare newline
+        # Every returned line is intact (no leading partial fragment)
+        for piece in out.split("\n"):
+            if piece:
+                assert piece.startswith("line-"), (
+                    f"tail returned a partial line {piece!r}"
+                )
+
+    def test_tail_returns_raw_when_no_newline_in_window(self):
+        text = "x" * 5000
+        out = ssm_dispatcher._tail_bytes(text, max_bytes=128)
+        # All x's — no newline to snap to → raw byte-tail returned
+        assert out == "x" * 128
+
+    def test_default_cap_is_4kb(self):
+        assert ssm_dispatcher.DIAGNOSTICS_TAIL_BYTES == 4 * 1024
+
+
+class TestShipDiagnostics:
+    """``_ship_diagnostics`` writes the failure-record JSON to S3.
+
+    Failure-mode posture matches the sibling
+    ``alpha_engine_lib.ssm_log_capture._ship_log_to_s3``: never raises,
+    returns ``(ok, detail)``. The inner SSM exit code must always be
+    preserved regardless of S3 outcome."""
+
+    def _common_kwargs(self):
+        return dict(
+            bucket="alpha-engine-research",
+            prefix="_spot_diagnostics/ae-data",
+            status="Failed",
+            command_id="cmd-abc",
+            description="morning-enrich",
+            exit_window_utc="2026-05-27T17:55:00+00:00",
+            stdout_tail="last 4KB of stdout\n",
+            stderr_tail="last 4KB of stderr\n",
+            instance_id="i-09b539c844515d549",
+        )
+
+    def test_writes_json_under_date_keyed_path(self):
+        s3 = MagicMock()
+        err = io.StringIO()
+        ok, detail = ssm_dispatcher._ship_diagnostics(
+            **self._common_kwargs(),
+            boto3_client=s3,
+            stderr_stream=err,
+        )
+        assert ok is True
+        assert detail.startswith("s3://alpha-engine-research/_spot_diagnostics/ae-data/")
+        assert detail.endswith(".json")
+        s3.put_object.assert_called_once()
+        call = s3.put_object.call_args.kwargs
+        assert call["Bucket"] == "alpha-engine-research"
+        # Key shape: {prefix}/{YYYY-MM-DD}.json
+        assert call["Key"].startswith("_spot_diagnostics/ae-data/")
+        assert call["Key"].endswith(".json")
+        assert call["ContentType"] == "application/json"
+        # Body parses to the full payload schema
+        import json as _json
+        payload = _json.loads(call["Body"].decode("utf-8"))
+        assert payload["status"] == "Failed"
+        assert payload["command_id"] == "cmd-abc"
+        assert payload["description"] == "morning-enrich"
+        assert payload["exit_window_utc"] == "2026-05-27T17:55:00+00:00"
+        assert payload["stdout_tail"] == "last 4KB of stdout\n"
+        assert payload["stderr_tail"] == "last 4KB of stderr\n"
+        assert payload["instance_id"] == "i-09b539c844515d549"
+
+    def test_strips_trailing_slash_on_prefix(self):
+        s3 = MagicMock()
+        kwargs = self._common_kwargs()
+        kwargs["prefix"] = "_spot_diagnostics/ae-data/"  # operator-passed
+        ok, detail = ssm_dispatcher._ship_diagnostics(
+            **kwargs, boto3_client=s3, stderr_stream=io.StringIO()
+        )
+        assert ok is True
+        call = s3.put_object.call_args.kwargs
+        # No double slash in the key
+        assert "//" not in call["Key"], call["Key"]
+
+    def test_s3_failure_is_swallowed_and_reported(self):
+        """The whole point of best-effort: S3 outage cannot mask the inner exit."""
+        s3 = MagicMock()
+        s3.put_object.side_effect = RuntimeError("NoCredentialsError: blah")
+        err = io.StringIO()
+        ok, detail = ssm_dispatcher._ship_diagnostics(
+            **self._common_kwargs(),
+            boto3_client=s3,
+            stderr_stream=err,
+        )
+        assert ok is False
+        assert "RuntimeError" in detail
+        # Operator-visible note on stderr explaining the swallow
+        captured = err.getvalue()
+        assert "diagnostics-write" in captured
+        assert "swallowed" in captured
+        assert "inner exit preserved" in captured
+
+
+class TestRunWritesDiagnosticsOnTerminalFailure:
+    """End-to-end: a Failed terminal status triggers the diagnostics-write
+    when both ``diagnostics_bucket`` AND ``diagnostics_prefix`` are set."""
+
+    def test_failed_status_writes_diagnostics_and_returns_one(self):
+        ssm = _fake_ssm(
+            poll_sequence=[
+                {
+                    "Status": "Failed",
+                    "StandardOutputContent": "started\n... lots ...\n",
+                    "StandardErrorContent": "boom: something\n",
+                }
+            ]
+        )
+        s3 = MagicMock()
+        rc = ssm_dispatcher.run(
+            "i-018eb3307a21329bf",
+            "morning-enrich",
+            "echo started; exit 1",
+            output_bucket="bkt",
+            output_key_prefix="pfx",
+            diagnostics_bucket="alpha-engine-research",
+            diagnostics_prefix="_spot_diagnostics/ae-data",
+            stdout_stream=io.StringIO(),
+            stderr_stream=io.StringIO(),
+            sleep=lambda s: None,
+            boto3_client=ssm,
+            s3_client=s3,
+        )
+        assert rc == 1, "Failed terminal status must propagate exit 1"
+        s3.put_object.assert_called_once()
+        call = s3.put_object.call_args.kwargs
+        import json as _json
+        payload = _json.loads(call["Body"].decode("utf-8"))
+        assert payload["status"] == "Failed"
+        assert payload["command_id"] == "cmd-abc"
+        assert payload["description"] == "morning-enrich"
+        assert payload["instance_id"] == "i-018eb3307a21329bf"
+        assert "boom" in payload["stderr_tail"]
+        assert "started" in payload["stdout_tail"]
+        # exit_window_utc is an ISO-formatted UTC timestamp
+        assert payload["exit_window_utc"].endswith("+00:00")
+
+    def test_success_does_not_write_diagnostics(self):
+        """Diagnostics are failure-only — success path never writes."""
+        ssm = _fake_ssm(
+            poll_sequence=[
+                {"Status": "Success", "StandardOutputContent": "ok\n"}
+            ]
+        )
+        s3 = MagicMock()
+        rc = ssm_dispatcher.run(
+            "i-abc",
+            "bootstrap",
+            "echo ok",
+            diagnostics_bucket="alpha-engine-research",
+            diagnostics_prefix="_spot_diagnostics/ae-data",
+            stdout_stream=io.StringIO(),
+            stderr_stream=io.StringIO(),
+            sleep=lambda s: None,
+            boto3_client=ssm,
+            s3_client=s3,
+        )
+        assert rc == 0
+        s3.put_object.assert_not_called()
+
+    def test_failed_without_diagnostics_config_does_not_call_s3(self):
+        """Both flags must be set to trigger the write — backward-compat."""
+        ssm = _fake_ssm(
+            poll_sequence=[
+                {
+                    "Status": "Failed",
+                    "StandardOutputContent": "",
+                    "StandardErrorContent": "fail\n",
+                }
+            ]
+        )
+        s3 = MagicMock()
+        rc = ssm_dispatcher.run(
+            "i-abc",
+            "bootstrap",
+            "exit 1",
+            # diagnostics_bucket + diagnostics_prefix both None
+            stdout_stream=io.StringIO(),
+            stderr_stream=io.StringIO(),
+            sleep=lambda s: None,
+            boto3_client=ssm,
+            s3_client=s3,
+        )
+        assert rc == 1
+        s3.put_object.assert_not_called()
+
+    def test_partial_diagnostics_config_does_not_write(self):
+        """If only one of bucket/prefix is set, no write (require both)."""
+        ssm = _fake_ssm(
+            poll_sequence=[
+                {
+                    "Status": "Failed",
+                    "StandardOutputContent": "",
+                    "StandardErrorContent": "fail\n",
+                }
+            ]
+        )
+        s3 = MagicMock()
+        rc = ssm_dispatcher.run(
+            "i-abc",
+            "bootstrap",
+            "exit 1",
+            diagnostics_bucket="alpha-engine-research",
+            diagnostics_prefix=None,
+            stdout_stream=io.StringIO(),
+            stderr_stream=io.StringIO(),
+            sleep=lambda s: None,
+            boto3_client=ssm,
+            s3_client=s3,
+        )
+        assert rc == 1
+        s3.put_object.assert_not_called()
+
+    def test_diagnostics_s3_failure_does_not_mask_inner_exit(self):
+        """S3 outage on diagnostics-write must NOT promote 1 → 0."""
+        ssm = _fake_ssm(
+            poll_sequence=[
+                {
+                    "Status": "TimedOut",
+                    "StandardOutputContent": "",
+                    "StandardErrorContent": "timeout\n",
+                }
+            ]
+        )
+        s3 = MagicMock()
+        s3.put_object.side_effect = RuntimeError("AccessDenied")
+        err = io.StringIO()
+        rc = ssm_dispatcher.run(
+            "i-abc",
+            "bootstrap",
+            "sleep 9999",
+            diagnostics_bucket="alpha-engine-research",
+            diagnostics_prefix="_spot_diagnostics/ae-predictor",
+            stdout_stream=io.StringIO(),
+            stderr_stream=err,
+            sleep=lambda s: None,
+            boto3_client=ssm,
+            s3_client=s3,
+        )
+        assert rc == 1, (
+            "TimedOut + diagnostics-write S3 failure must still exit 1; "
+            "swallowing S3 failure to promote 1→0 would be the worst possible "
+            "behavior (silently turns a real failure into a green run)"
+        )
+        # Operator-visible record of the diagnostics-write failure
+        assert "swallowed" in err.getvalue()
+
+    def test_diagnostics_tail_truncates_large_payloads(self):
+        """A 100KB stdout should be trimmed to ≤ DIAGNOSTICS_TAIL_BYTES."""
+        big_stdout = "\n".join(f"line-{i:06d}" for i in range(10000)) + "\n"
+        big_stderr = "\n".join(f"err-{i:06d}" for i in range(10000)) + "\n"
+        ssm = _fake_ssm(
+            poll_sequence=[
+                {
+                    "Status": "Failed",
+                    "StandardOutputContent": big_stdout,
+                    "StandardErrorContent": big_stderr,
+                }
+            ]
+        )
+        s3 = MagicMock()
+        rc = ssm_dispatcher.run(
+            "i-abc",
+            "bootstrap",
+            "echo big",
+            diagnostics_bucket="alpha-engine-research",
+            diagnostics_prefix="_spot_diagnostics/ae-data",
+            stdout_stream=io.StringIO(),
+            stderr_stream=io.StringIO(),
+            sleep=lambda s: None,
+            boto3_client=ssm,
+            s3_client=s3,
+        )
+        assert rc == 1
+        import json as _json
+        payload = _json.loads(
+            s3.put_object.call_args.kwargs["Body"].decode("utf-8")
+        )
+        # Both tails respect the configured cap
+        assert len(payload["stdout_tail"].encode("utf-8")) <= ssm_dispatcher.DIAGNOSTICS_TAIL_BYTES
+        assert len(payload["stderr_tail"].encode("utf-8")) <= ssm_dispatcher.DIAGNOSTICS_TAIL_BYTES
+        # Both tails preserve the LATEST lines (operator wants failure tail,
+        # not arbitrary middle slice)
+        assert "line-009999" in payload["stdout_tail"]
+        assert "err-009999" in payload["stderr_tail"]
+
+
+class TestCliDiagnosticsFlags:
+    """The two new CLI flags thread through to ``run()``."""
+
+    def test_flags_default_to_none(self, monkeypatch, capsys):
+        """Without --diagnostics-* flags, the run() kwargs default None."""
+        captured = {}
+
+        def _fake_run(*args, **kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(ssm_dispatcher, "run", _fake_run)
+        monkeypatch.setattr(sys, "stdin", io.StringIO("echo ok\n"))
+        rc = ssm_dispatcher.main(
+            [
+                "run",
+                "--instance-id", "i-abc",
+                "--description", "smoke",
+                "--script-stdin",
+            ]
+        )
+        assert rc == 0
+        assert captured["diagnostics_bucket"] is None
+        assert captured["diagnostics_prefix"] is None
+
+    def test_flags_thread_through_to_run(self, monkeypatch):
+        captured = {}
+
+        def _fake_run(*args, **kwargs):
+            captured.update(kwargs)
+            return 0
+
+        monkeypatch.setattr(ssm_dispatcher, "run", _fake_run)
+        monkeypatch.setattr(sys, "stdin", io.StringIO("echo ok\n"))
+        rc = ssm_dispatcher.main(
+            [
+                "run",
+                "--instance-id", "i-abc",
+                "--description", "smoke",
+                "--diagnostics-bucket", "alpha-engine-research",
+                "--diagnostics-prefix", "_spot_diagnostics/ae-data",
+                "--script-stdin",
+            ]
+        )
+        assert rc == 0
+        assert captured["diagnostics_bucket"] == "alpha-engine-research"
+        assert captured["diagnostics_prefix"] == "_spot_diagnostics/ae-data"
