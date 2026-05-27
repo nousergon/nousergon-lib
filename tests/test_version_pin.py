@@ -56,3 +56,40 @@ def test_init_version_matches_pyproject():
         f"pyproject-only bump on 2026-05-08 (v0.5.6) that left __init__.py "
         f"saying 0.5.5 for ~one day."
     )
+
+
+# PyPI core-metadata spec caps the ``summary`` field (sourced from
+# pyproject.toml::project.description) at 512 characters. Twine accepts
+# longer values locally + at build time; PyPI rejects the upload with
+# HTTP 400 only after the auto-tag has already cut the git tag.
+# Regression: 2026-05-27 v0.38.0 — description grew to 550 chars when
+# the locks submodule was added; auto-tag.yml succeeded (tagged v0.38.0)
+# but publish.yml failed at the PyPI upload step. The git tag still lets
+# ``git+https://github.com/...@v0.38.0`` consumer pins resolve, but
+# PyPI is out of sync until a fresh patch release.
+# Spec: https://packaging.python.org/specifications/core-metadata/#summary
+_PYPI_SUMMARY_MAX = 512
+
+
+def _pyproject_description() -> str:
+    text = _PYPROJECT.read_text()
+    match = re.search(r'^description\s*=\s*"((?:[^"\\]|\\.)*)"', text, re.MULTILINE)
+    assert match is not None, "description not found in pyproject.toml"
+    return match.group(1)
+
+
+def test_pyproject_description_under_pypi_summary_limit():
+    """``pyproject.toml::project.description`` MUST fit PyPI's 512-char
+    summary limit. Caught at PR time prevents the v0.38.0 recurrence
+    (tag cut, PyPI publish failed, git+https pins work but PyPI is
+    out of sync)."""
+    desc = _pyproject_description()
+    assert len(desc) <= _PYPI_SUMMARY_MAX, (
+        f"pyproject.toml::description is {len(desc)} characters; "
+        f"PyPI's core-metadata 'summary' field caps at {_PYPI_SUMMARY_MAX}. "
+        f"Trim before merging — auto-tag.yml will cut the git tag BEFORE "
+        f"publish.yml hits PyPI, so a too-long description ships an "
+        f"orphan tag that consumer git+https pins resolve but PyPI does "
+        f"not have. See https://packaging.python.org/specifications/"
+        f"core-metadata/#summary"
+    )
