@@ -20,6 +20,7 @@ The lib's job is to keep the same code from being maintained six times.
 | ArcticDB read/write helpers + symbol enumeration | [`src/alpha_engine_lib/arcticdb.py`](src/alpha_engine_lib/arcticdb.py) |
 | Trading-day arithmetic — `now_dual()`, `session_for_timestamp()`, `add_trading_days()` | [`src/alpha_engine_lib/dates.py`](src/alpha_engine_lib/dates.py) |
 | Pure-Python NYSE calendar (through 2030) | [`src/alpha_engine_lib/trading_calendar.py`](src/alpha_engine_lib/trading_calendar.py) |
+| Artifact-freshness substrate — `ArtifactSpec`, `check_freshness`, `resolve_dedup_key` | [`src/alpha_engine_lib/artifact_freshness.py`](src/alpha_engine_lib/artifact_freshness.py) |
 | Decision-artifact schema + capture wrapper | [`src/alpha_engine_lib/decision_capture.py`](src/alpha_engine_lib/decision_capture.py) |
 | LLM cost tracking — token-aware, cache-hit-aware | [`src/alpha_engine_lib/cost.py`](src/alpha_engine_lib/cost.py) |
 | Canonical LLM-output Pydantic schemas (14 classes) + `resolve_schema_for_agent` dispatch | [`src/alpha_engine_lib/agent_schemas.py`](src/alpha_engine_lib/agent_schemas.py) |
@@ -46,6 +47,7 @@ The lib's job is to keep the same code from being maintained six times.
 | ArcticDB helpers | [`tests/test_arcticdb.py`](tests/test_arcticdb.py) |
 | Trading-day arithmetic | [`tests/test_dates.py`](tests/test_dates.py) |
 | NYSE calendar | [`tests/test_trading_calendar.py`](tests/test_trading_calendar.py) |
+| Artifact-freshness substrate (spec validation + cycle resolution + 5 check branches) | [`tests/test_artifact_freshness.py`](tests/test_artifact_freshness.py) |
 | Decision-capture schema + S3 round-trip (moto) | [`tests/test_decision_capture.py`](tests/test_decision_capture.py) |
 | Cost tracking (cache-hit semantics) | [`tests/test_cost.py`](tests/test_cost.py) |
 | Agent-output schema validators + dispatch | [`tests/test_agent_schemas.py`](tests/test_agent_schemas.py) |

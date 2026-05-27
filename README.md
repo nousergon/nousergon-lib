@@ -84,6 +84,40 @@ Wrappers around the ArcticDB Python client. Standardizes the URI format, library
 
 Pure-Python NYSE calendar through 2030. No `pandas-market-calendars` dependency.
 
+### `artifact_freshness` — absence-driven S3 artifact monitoring substrate
+
+The lib-side piece of the artifact-freshness-monitor arc closing the silent absence-of-artifact bug class. SF Catch, flow-doctor, and substrate-health-check are all event-driven (failure → alert); this module is the substrate for the absence-driven complement (silence → alert).
+
+```python
+from datetime import datetime, date, timezone
+from alpha_engine_lib.artifact_freshness import (
+    ArtifactSpec, check_freshness, resolve_dedup_key,
+)
+from alpha_engine_lib.alerts import publish
+
+spec = ArtifactSpec(
+    artifact_id="backtest_pit_parity",
+    s3_bucket="alpha-engine-research",
+    s3_key_template="backtest/{date}/pit_parity.json",
+    cadence="saturday_sf",
+    sla_minutes_after_cron=180,
+    severity="warning",
+    owner_repo="alpha-engine-backtester",
+    created_at=date(2026, 5, 27),
+)
+result = check_freshness(s3_client, spec, datetime.now(timezone.utc))
+if result.state in ("missing", "stale", "probe_failed"):
+    publish(
+        f"[{result.state}] {spec.artifact_id}: {result.reason}",
+        severity=spec.severity,
+        dedup_key=resolve_dedup_key(spec, datetime.now(timezone.utc)),
+    )
+```
+
+Pure function — `check_freshness(s3_client, spec, now)` returns a `CheckResult` with no side effects beyond the injected `s3_client.head_object`. NYSE-holiday-aware (Memorial Day Monday weekday-SF cron returns `state="fresh"` with a holiday reason). Recovery-substitution-aware (canonical 404 + recovery-key fresh ⇒ `state="fresh"` with `recovery_substituted=True`). Grace-period gate for newly-onboarded specs (default 2 cycles).
+
+The freshness-monitor Lambda (`alpha-engine-data/lambdas/freshness_monitor/`, ships in a follow-up PR) walks the `alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml` SoT, calls this substrate per row, and routes via `alpha_engine_lib.alerts.publish` with the resolved dedup key.
+
 ### `decision_capture` — agent decision audit logger
 
 Captures every agent decision as a structured artifact: prompt metadata (id + version), input snapshot, agent output, and cost. Each decision becomes replayable, auditable, and attributable to a specific prompt revision. Backbone of the Phase 2 measurement substrate.
