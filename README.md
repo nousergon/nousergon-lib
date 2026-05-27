@@ -181,6 +181,10 @@ Pairs with `ssm_dispatcher` on the SSM target side. The dispatcher script tells 
 
 Rotates across `(instance_type × subnet)` combinations on `InsufficientInstanceCapacity` / `InsufficientHostCapacity` / `Unsupported` / `InvalidAvailabilityZone` / `SpotMaxPriceTooLow`; non-capacity errors raise immediately. CLI exit 64 distinguishes capacity exhaustion from generic failure. Replaces the hardcoded single-subnet + single-instance-type launch pattern that mirrored across each dispatcher; landed 2026-05-22 after the third-recurrence-in-a-month spot-launch fragility.
 
+### `locks` — producer-side writer locks via S3 conditional PUT
+
+`universe_writer_lock(writer_id, ttl_seconds=3600)` context manager that uses `PutObject(IfNoneMatch="*")` to claim a single-writer lease on `s3://alpha-engine-research/locks/universe-writer.lock`. The first writer's conditional PUT succeeds; subsequent writers get `LockHeldByAnotherWriterError` carrying the live `LockHolder` body (writer_id + started_at + ttl_epoch + hostname + pid) for operator diagnostics. Soft-TTL self-recovery deletes-and-re-acquires when the on-disk lock's `ttl_epoch` has elapsed; the operator-side S3 lifecycle on `locks/` (expires-after-days=1) is the hard backstop. Release on context exit is best-effort and never masks an inner exception. Closes the producer-side half of the same single-writer-per-resource invariant the SF MutualExclusionGuard (DynamoDB-side) covers at the Step Function entry point; the lib lift is the chokepoint that picks up the third adopter for free (predictor weight-promote, backfill loops, etc.).
+
 ## How it's used
 
 All six Nous Ergon module repos depend on this lib:
