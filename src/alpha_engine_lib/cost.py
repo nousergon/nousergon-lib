@@ -58,6 +58,7 @@ Workstream design: ``alpha-engine-config/private-docs/ROADMAP.md`` line ~1708
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -67,6 +68,17 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from alpha_engine_lib.decision_capture import ModelMetadata
+
+# Anthropic SDK model IDs come in two forms: the family alias
+# (e.g. ``claude-haiku-4-5``) and the dated snapshot form
+# (e.g. ``claude-haiku-4-5-20251001``). ``Message.model`` returns the dated
+# form even when the caller requested the alias, but our pricing YAML is
+# keyed on the alias so a new snapshot date doesn't require a card refresh.
+_DATED_SNAPSHOT_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _strip_dated_snapshot_suffix(model_name: str) -> str:
+    return _DATED_SNAPSHOT_SUFFIX_RE.sub("", model_name)
 
 if TYPE_CHECKING:
     # Structural Protocol below describes the only attributes we touch on
@@ -172,14 +184,27 @@ class PriceTable(BaseModel):
         component is used for lookup) or a ``date``. The returned card is
         the one whose ``effective_from`` is the latest among cards ≤ ``at``.
 
-        Raises :exc:`PriceCardLookupError` if the model has no cards or
-        every card's ``effective_from`` is later than ``at``.
+        Lookup tries the model name as-given first; on miss, retries with
+        any trailing ``-YYYYMMDD`` snapshot suffix stripped. This lets the
+        YAML stay keyed on family aliases (``claude-haiku-4-5``) while
+        accepting the dated form (``claude-haiku-4-5-20251001``) that the
+        Anthropic SDK returns in ``Message.model``.
+
+        Raises :exc:`PriceCardLookupError` if neither form matches.
         """
         query_date = at.date() if isinstance(at, datetime) else at
-        candidates = [
-            c for c in self.cards
-            if c.model_name == model_name and c.effective_from <= query_date
-        ]
+
+        def _candidates_for(name: str) -> list[PriceCard]:
+            return [
+                c for c in self.cards
+                if c.model_name == name and c.effective_from <= query_date
+            ]
+
+        candidates = _candidates_for(model_name)
+        if not candidates:
+            alias = _strip_dated_snapshot_suffix(model_name)
+            if alias != model_name:
+                candidates = _candidates_for(alias)
         if not candidates:
             raise PriceCardLookupError(
                 f"No price card for model {model_name!r} active on {query_date}"

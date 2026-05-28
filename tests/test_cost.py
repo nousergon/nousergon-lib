@@ -155,6 +155,47 @@ class TestPriceTableLookup:
             self.table.get("haiku", date(2025, 12, 31))
 
 
+class TestPriceTableLookupDatedSnapshotSuffix:
+    """Anthropic SDK returns ``Message.model`` in the dated snapshot form
+    (e.g. ``claude-haiku-4-5-20251001``) even when the caller requested
+    the alias; the YAML is keyed on the alias. Lookup must accept both.
+    """
+
+    def setup_method(self):
+        self.table = PriceTable(cards=[
+            _card("claude-haiku-4-5", 2026, 1, 1, in_p=1.0),
+            _card("claude-sonnet-4-6", 2026, 1, 1, in_p=3.0),
+        ])
+
+    def test_dated_suffix_falls_back_to_alias(self):
+        c = self.table.get("claude-haiku-4-5-20251001", date(2026, 5, 28))
+        assert c.input_per_1m == 1.0
+
+    def test_alias_lookup_unchanged(self):
+        c = self.table.get("claude-haiku-4-5", date(2026, 5, 28))
+        assert c.input_per_1m == 1.0
+
+    def test_exact_dated_match_wins_over_alias_fallback(self):
+        # If someone adds a dated card explicitly, it takes precedence.
+        table = PriceTable(cards=[
+            _card("claude-haiku-4-5", 2026, 1, 1, in_p=1.0),
+            _card("claude-haiku-4-5-20251001", 2026, 1, 1, in_p=9.99),
+        ])
+        c = table.get("claude-haiku-4-5-20251001", date(2026, 5, 28))
+        assert c.input_per_1m == 9.99
+
+    def test_unknown_alias_with_dated_suffix_still_hard_fails(self):
+        with pytest.raises(
+            PriceCardLookupError, match="claude-foo-9-9-20251001"
+        ):
+            self.table.get("claude-foo-9-9-20251001", date(2026, 5, 28))
+
+    def test_non_dated_suffix_is_not_stripped(self):
+        # Bare 8-digit substring without leading dash → no normalization.
+        with pytest.raises(PriceCardLookupError):
+            self.table.get("claude-haiku-4-5.20251001", date(2026, 5, 28))
+
+
 # ── compute_cost ──────────────────────────────────────────────────────────
 
 
