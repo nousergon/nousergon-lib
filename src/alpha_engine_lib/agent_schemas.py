@@ -50,10 +50,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # ── Literals ─────────────────────────────────────────────────────────────
 
 
-RegimeLiteral = Literal["bull", "neutral", "bear", "caution"]
+RegimeLiteral = Literal["bull", "neutral", "bear"]
 """Macro market regime — output of the macro_economist agent and the
 macro critic. Drives sector_modifiers downstream and the executor's
-graduated drawdown gate."""
+graduated drawdown gate.
+
+3-class Ang-Bekaert taxonomy. The legacy 4th value ``"caution"`` was
+retired in v0.42.0 (plan: caution-regime-retirement-260528.md): the
+rule-based caution override at the macro-agent layer double-counted
+signals already weighted into the continuous ``regime_intensity_z``
+META_FEATURE. Portfolio-protective drawdown state is now a separate
+axis (``drawdown_tier: Literal["risk_on","caution","risk_off"]``)
+emitted by the predictor's drawdown leg; consumers compose the two
+axes via most-protective override at decision time."""
 
 
 CIORawDecisionLiteral = Literal["ADVANCE", "REJECT", "NO_ADVANCE_DEADLOCK"]

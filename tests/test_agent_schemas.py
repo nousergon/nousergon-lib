@@ -325,6 +325,33 @@ class TestMacroEconomistRawOutput:
         with pytest.raises(ValidationError):
             MacroEconomistRawOutput(market_regime="exuberant")
 
+    def test_regime_literal_is_3class_caution_rejected(self):
+        # v0.42.0 retired "caution" from the macro market_regime taxonomy
+        # per caution-regime-retirement-260528.md. The 3-class Ang-Bekaert
+        # taxonomy (bull/neutral/bear) is the institutional baseline; the
+        # rule-based caution override at the macro-agent layer was double-
+        # counted by the continuous regime_intensity_z META_FEATURE.
+        # Portfolio-protective hysteresis (risk_on/caution/risk_off) is a
+        # separate axis emitted by the predictor drawdown leg.
+        from alpha_engine_lib.agent_schemas import (
+            MacroCriticOutput,
+            MacroEconomistRawOutput,
+        )
+
+        with pytest.raises(ValidationError):
+            MacroEconomistRawOutput(market_regime="caution")
+        with pytest.raises(ValidationError):
+            MacroCriticOutput(
+                action="revise", critique="elevated stress", suggested_regime="caution",
+            )
+
+    def test_regime_literal_accepts_all_3_classes(self):
+        from alpha_engine_lib.agent_schemas import MacroEconomistRawOutput
+
+        for regime in ("bull", "neutral", "bear"):
+            out = MacroEconomistRawOutput(market_regime=regime)
+            assert out.market_regime == regime
+
 
 class TestMacroCriticOutput:
     def test_accept_action(self):
