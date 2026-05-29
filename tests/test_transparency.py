@@ -955,3 +955,112 @@ def test_format_report_lists_actions_for_failed_rows():
     out = format_report(results)
     assert "ACTIONS NEEDED" in out
     assert "b: missing column" in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — degraded (non-fatal) status: non_fatal_statuses + non_fatal row
+# ---------------------------------------------------------------------------
+
+
+def _s3_json_row(extra_src=None):
+    src = {
+        "kind": "s3_json",
+        "bucket": "b",
+        "key": "k.json",
+        "max_age_days": 4,
+        "assert": [{"path": "coverage_pct", "op": "gte", "value": 99}],
+    }
+    if extra_src:
+        src.update(extra_src)
+    return {
+        "version": 1,
+        "inventory": [{
+            "id": "agent_decisions", "cadence": "daily",
+            "effective_date": "2026-01-01", "description": "x",
+            "sources": [src],
+        }],
+    }
+
+
+def test_s3_json_non_fatal_status_degrades_not_fails():
+    """A present artifact carrying a benign producer status (no_recent_sf_run)
+    degrades — it is NOT a coverage failure and NOT a missing diagnostic."""
+    inv = _s3_json_row({"non_fatal_statuses": ["no_recent_sf_run"]})
+    s3 = StubS3()
+    s3.put("b", "k.json", json.dumps(
+        {"status": "no_recent_sf_run", "coverage_pct": 0.0}).encode())
+    res = check_inventory("daily", today=date(2026, 6, 1), inventory=inv, s3_client=s3)
+    assert res[0].status == "degraded"
+    assert "no_recent_sf_run" in res[0].detail
+
+
+def test_s3_json_non_fatal_status_ok_passes_normally():
+    """status=ok + coverage passing → ok (non_fatal_statuses doesn't interfere)."""
+    inv = _s3_json_row({"non_fatal_statuses": ["no_recent_sf_run"]})
+    s3 = StubS3()
+    s3.put("b", "k.json", json.dumps(
+        {"status": "ok", "coverage_pct": 100.0}).encode())
+    res = check_inventory("daily", today=date(2026, 6, 1), inventory=inv, s3_client=s3)
+    assert res[0].status == "ok"
+
+
+def test_s3_json_status_not_in_non_fatal_set_still_fails():
+    """A failing status NOT in non_fatal_statuses (here: low coverage) still
+    fails — only the listed benign statuses degrade."""
+    inv = _s3_json_row({"non_fatal_statuses": ["no_recent_sf_run"]})
+    s3 = StubS3()
+    s3.put("b", "k.json", json.dumps(
+        {"status": "ok", "coverage_pct": 50.0}).encode())
+    res = check_inventory("daily", today=date(2026, 6, 1), inventory=inv, s3_client=s3)
+    assert res[0].status == "fail"
+
+
+def test_missing_artifact_still_fails_even_with_non_fatal_statuses():
+    """Absence is a real failure: always-emit (producer) means a missing
+    object = diagnostic never ran, distinct from a benign present status."""
+    inv = _s3_json_row({"non_fatal_statuses": ["no_recent_sf_run"]})
+    s3 = StubS3()  # nothing put
+    res = check_inventory("daily", today=date(2026, 6, 1), inventory=inv, s3_client=s3)
+    assert res[0].status == "fail"
+
+
+def test_row_non_fatal_degrades_on_source_failure():
+    """A row marked non_fatal: true degrades instead of failing when its
+    source fails (Phase 1c: pipeline_execution success_rate is a diagnostic)."""
+    inv = _s3_json_row()
+    inv["inventory"][0]["non_fatal"] = True
+    inv["inventory"][0]["id"] = "pipeline_execution"
+    s3 = StubS3()
+    s3.put("b", "k.json", json.dumps({"coverage_pct": 10.0}).encode())
+    res = check_inventory("daily", today=date(2026, 6, 1), inventory=inv, s3_client=s3)
+    assert res[0].status == "degraded"
+
+
+def test_format_report_separates_degraded_from_actions():
+    from alpha_engine_lib.transparency import CheckResult, format_report
+    results = [
+        CheckResult("ok_row", "daily", "ok", "fine", "2026-01-01"),
+        CheckResult("bad_row", "daily", "fail", "broke", "2026-01-01"),
+        CheckResult("degr_row", "daily", "degraded", "no upstream data", "2026-01-01"),
+    ]
+    report = format_report(results)
+    assert "Degraded: 1" in report
+    assert "[DEGR] degr_row" in report
+    # degraded must NOT appear under ACTIONS NEEDED
+    actions = report.split("ACTIONS NEEDED:")[1].split("DEGRADED")[0]
+    assert "degr_row" not in actions
+    assert "bad_row" in actions
+    assert "DEGRADED (non-fatal" in report
+
+
+def test_real_inventory_pipeline_execution_is_non_fatal():
+    inv = load_inventory()
+    row = next(r for r in inv["inventory"] if r["id"] == "pipeline_execution")
+    assert row.get("non_fatal") is True
+
+
+def test_real_inventory_agent_decisions_degrades_on_no_recent_sf_run():
+    inv = load_inventory()
+    row = next(r for r in inv["inventory"] if r["id"] == "agent_decisions")
+    src = next(s for s in row["sources"] if s["kind"] == "s3_json")
+    assert "no_recent_sf_run" in src.get("non_fatal_statuses", [])

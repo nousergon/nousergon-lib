@@ -64,7 +64,13 @@ class CheckResult:
 
     row_id: str
     cadence: str
-    status: str  # "ok" | "fail" | "not_yet_effective" | "error"
+    # "ok" | "fail" | "degraded" | "not_yet_effective" | "error"
+    # "degraded" = non-fatal: either a diagnostic row (non_fatal: true, e.g.
+    # pipeline_execution success_rate — observability, not a gate) or a present
+    # artifact carrying a benign producer status (non_fatal_statuses, e.g.
+    # no_recent_sf_run = no upstream data this cycle, not a missing diagnostic).
+    # Degraded does NOT count as a failure: no SNS alert, exit 0, CW value 1.0.
+    status: str
     detail: str
     effective_date: str
     artifact: str | None = None
@@ -157,13 +163,16 @@ def _check_row(
 
     sub: list[str] = []
     artifact_hint: str | None = None
+    degraded_detail: str | None = None
     for src in row["sources"]:
         try:
-            ok, detail, artifact = _check_source(
+            ok, detail, artifact, status_hint = _check_source(
                 src, today, s3_client, cloudwatch_client
             )
         except Exception as exc:  # pragma: no cover — defensive
-            ok, detail, artifact = False, f"checker error: {exc!r}", None
+            ok, detail, artifact, status_hint = (
+                False, f"checker error: {exc!r}", None, None
+            )
         if artifact and artifact_hint is None:
             artifact_hint = artifact
         if ok:
@@ -175,7 +184,27 @@ def _check_row(
                 effective_date=str(eff),
                 artifact=artifact_hint,
             )
+        if status_hint == "degraded" and degraded_detail is None:
+            degraded_detail = detail
         sub.append(detail)
+
+    # All sources failed. Classify non-fatal degradation vs hard fail:
+    #  - row-level ``non_fatal: true`` → diagnostic/observability row demoted
+    #    from a gate (Phase 1c: pipeline_execution success_rate).
+    #  - any source signalled "degraded" → present artifact carrying a benign
+    #    producer status (Phase 1a: e.g. no_recent_sf_run = no upstream data
+    #    this cycle, not a missing diagnostic).
+    # Either way the cycle isn't "broken" — surface it without failing the gate.
+    if row.get("non_fatal") or degraded_detail is not None:
+        return CheckResult(
+            row_id=row["id"],
+            cadence=row["cadence"],
+            status="degraded",
+            detail=degraded_detail or "; ".join(sub),
+            effective_date=str(eff),
+            artifact=artifact_hint,
+            sub_failures=sub,
+        )
 
     return CheckResult(
         row_id=row["id"],
@@ -198,12 +227,22 @@ def _check_source(
     today: date,
     s3_client: Any,
     cloudwatch_client: Any,
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None, str | None]:
+    """Run a source handler, normalized to ``(ok, detail, artifact, status_hint)``.
+
+    Handlers may return a 3-tuple (the common case) or a 4-tuple whose 4th
+    element is a ``status_hint`` ("degraded") used to mark a non-fatal
+    non-pass. Normalizing here keeps handlers that don't care unchanged.
+    """
     kind = src["kind"]
     handler = _SOURCE_HANDLERS.get(kind)
     if handler is None:
-        return False, f"unsupported source kind: {kind}", None
-    return handler(src, today, s3_client, cloudwatch_client)
+        return False, f"unsupported source kind: {kind}", None, None
+    result = handler(src, today, s3_client, cloudwatch_client)
+    if len(result) == 4:
+        return result
+    ok, detail, artifact = result
+    return ok, detail, artifact, None
 
 
 def _resolve_key(src: dict, today: date) -> tuple[str, str]:
@@ -293,7 +332,7 @@ def _resolve_and_age(
 
 def _check_s3_json(
     src: dict, today: date, s3_client: Any, _cw: Any
-) -> tuple[bool, str, str | None]:
+) -> tuple[bool, str, str | None] | tuple[bool, str, str | None, str | None]:
     bucket = src.get("bucket", DEFAULT_BUCKET)
     key, age, status = _resolve_and_age(src, today, s3_client)
     if key is None:
@@ -321,6 +360,22 @@ def _check_s3_json(
         payload = json.loads(body)
     except Exception as exc:
         return False, f"json parse error on s3://{bucket}/{key}: {exc!r}", key
+
+    # Phase 1a: a present artifact carrying a benign producer status is a
+    # legitimate cycle state (no upstream data), NOT a missing diagnostic and
+    # NOT a hard failure. Short-circuit BEFORE evaluating asserts so we don't
+    # report a misleading "coverage 0% < 99". Always-emit (producer side) is
+    # what makes this distinguishable from absence.
+    non_fatal_statuses = src.get("non_fatal_statuses", [])
+    prod_status = payload.get("status") if isinstance(payload, dict) else None
+    if non_fatal_statuses and prod_status in non_fatal_statuses:
+        return (
+            False,
+            f"degraded: producer status='{prod_status}' — no upstream data "
+            f"this cycle (s3://{bucket}/{key})",
+            key,
+            "degraded",
+        )
 
     failures: list[str] = []
     for required in src.get("assert_keys_present", []):
@@ -636,8 +691,9 @@ def emit_cloudwatch_metrics(results: list[CheckResult], cloudwatch_client: Any =
 
     metric_data = []
     for r in results:
-        # 1 = ok or not_yet_effective (counts as healthy), 0 = fail
-        value = 1.0 if r.status in ("ok", "not_yet_effective") else 0.0
+        # 1 = ok / not_yet_effective / degraded (all non-failing), 0 = fail.
+        # Degraded is non-fatal so it must not trip the SubstrateRowOK alarm.
+        value = 1.0 if r.status in ("ok", "not_yet_effective", "degraded") else 0.0
         metric_data.append({
             "MetricName": "SubstrateRowOK",
             "Dimensions": [{"Name": "RowID", "Value": r.row_id}],
@@ -646,10 +702,12 @@ def emit_cloudwatch_metrics(results: list[CheckResult], cloudwatch_client: Any =
         })
     n_ok = sum(1 for r in results if r.status == "ok")
     n_fail = sum(1 for r in results if r.status == "fail")
+    n_degraded = sum(1 for r in results if r.status == "degraded")
     n_pending = sum(1 for r in results if r.status == "not_yet_effective")
     metric_data.extend([
         {"MetricName": "SubstrateChecksOK", "Value": float(n_ok), "Unit": "Count"},
         {"MetricName": "SubstrateChecksFailed", "Value": float(n_fail), "Unit": "Count"},
+        {"MetricName": "SubstrateChecksDegraded", "Value": float(n_degraded), "Unit": "Count"},
         {"MetricName": "SubstrateChecksPending", "Value": float(n_pending), "Unit": "Count"},
     ])
 
@@ -664,15 +722,22 @@ def format_report(results: list[CheckResult]) -> str:
     lines = ["Substrate Health Report", "=" * 50]
     n_ok = sum(1 for r in results if r.status == "ok")
     n_fail = sum(1 for r in results if r.status == "fail")
+    n_degraded = sum(1 for r in results if r.status == "degraded")
     n_pending = sum(1 for r in results if r.status == "not_yet_effective")
     n_total = len(results)
-    pct = (100.0 * n_ok / max(1, n_total - n_pending)) if n_total > n_pending else 0.0
+    # Gating denominator excludes pending (not yet effective) AND degraded
+    # (non-fatal, can't be scored pass/fail this cycle).
+    n_gating = n_total - n_pending - n_degraded
+    pct = (100.0 * n_ok / n_gating) if n_gating > 0 else 100.0
     lines.append(
-        f"OK: {n_ok}  Failed: {n_fail}  Pending: {n_pending}  "
-        f"({pct:.1f}% of effective rows passing)"
+        f"OK: {n_ok}  Failed: {n_fail}  Degraded: {n_degraded}  "
+        f"Pending: {n_pending}  ({pct:.1f}% of gating rows passing)"
     )
     lines.append("")
-    icon = {"ok": "OK ", "fail": "FAIL", "not_yet_effective": "PEND", "error": "ERR "}
+    icon = {
+        "ok": "OK ", "fail": "FAIL", "degraded": "DEGR",
+        "not_yet_effective": "PEND", "error": "ERR ",
+    }
     for r in results:
         lines.append(f"  [{icon.get(r.status, '?')}] {r.row_id:30s} {r.detail}")
     failures = [r for r in results if r.status == "fail"]
@@ -680,6 +745,12 @@ def format_report(results: list[CheckResult]) -> str:
         lines.append("")
         lines.append("ACTIONS NEEDED:")
         for r in failures:
+            lines.append(f"  - {r.row_id}: {r.detail}")
+    degraded = [r for r in results if r.status == "degraded"]
+    if degraded:
+        lines.append("")
+        lines.append("DEGRADED (non-fatal — observability, no action gate):")
+        for r in degraded:
             lines.append(f"  - {r.row_id}: {r.detail}")
     return "\n".join(lines)
 

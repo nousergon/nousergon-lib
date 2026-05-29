@@ -24,9 +24,23 @@ inventory:
   - id: pipeline_execution
     cadence: weekly
     effective_date: 2026-04-01
+    # non_fatal (Phase 1c, 2026-05-29): raw CloudWatch SF success_rate is a
+    # FIRST-PASS / OPERATOR-TOIL diagnostic, NOT a health gate. On a young,
+    # recovery-stitched system a cycle that needs N executions (1 scheduled
+    # fail + recovery reruns) to produce a complete, valid artifact set is a
+    # healthy cycle with an efficiency cost — counting every manual recovery /
+    # smoke / postfix run against a 99% SLA produces false alarms (Sat 40% /
+    # weekday 71% on 2026-05-29, both already-recovered incidents). Cycle
+    # health is judged by the per-artifact deliverable rows below (the
+    # asset-based / data-contract gate); this row stays for visibility but a
+    # low success_rate degrades, it does not fail. See
+    # private-docs/artifact-completion-monitoring-design-260529.md (Move 1) +
+    # feedback_judge_recovery_sf_by_artifact_union_not_execution_status.
+    non_fatal: true
     description: >-
-      SF success rate ≥ 99% across Saturday + weekday + EOD pipelines,
-      with per-stage durations recorded.
+      First-pass SF success rate across Saturday + weekday + EOD pipelines
+      (operator-toil diagnostic, NOT a gate — recovery-stitched cycles are
+      healthy; deliverable rows below are authoritative).
     sources:
       - kind: cloudwatch
         namespace: AWS/States
@@ -64,6 +78,17 @@ inventory:
         # The most recent date's artifact is the authoritative one.
         key_pattern: backtest/{date}/decision_capture_coverage.json
         max_age_days: 8
+        # non_fatal_statuses (Phase 1a, 2026-05-29): the backtester always
+        # emits this artifact now (alpha-engine-backtester #265), so absence
+        # means the diagnostic never ran (a real failure), while a present
+        # artifact with status=no_recent_sf_run means the upstream Saturday SF
+        # produced no agent captures this cycle (research failed / recovery
+        # was predictor-only) — a legitimate recovery-stitched state, not a
+        # coverage regression. Degrade rather than fail; a genuinely dead
+        # research pipeline is caught independently by the research_signals
+        # freshness row. See artifact-completion-monitoring-design-260529.md.
+        non_fatal_statuses:
+          - no_recent_sf_run
         assert:
           - path: coverage_pct
             op: gte
