@@ -71,6 +71,7 @@ ships the freshness-monitor Lambda that wires the two together.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Final, Literal
@@ -596,3 +597,159 @@ def _cycle_length_seconds(spec: ArtifactSpec) -> float:
         assert spec.interval_minutes is not None
         return spec.interval_minutes * 60
     raise ValueError(f"unknown cadence {spec.cadence!r}")
+
+
+# ── Per-cycle completion rollup ───────────────────────────────────────────────
+
+
+CycleState = Literal["complete", "incomplete", "indeterminate"]
+
+
+@dataclass
+class CycleCompletion:
+    """Per-cycle completion verdict — the artifact-union judgment.
+
+    Aggregates the per-artifact :class:`CheckResult` rows for one
+    execution cycle into a single verdict over the *required* set
+    (the ``severity="critical"`` rows). Answers the question the
+    raw orchestrator status cannot on a recovery-stitched run: *did
+    this cycle actually deliver every load-bearing artifact?*
+
+    Recovery substitution is already folded in upstream — a
+    canonical-missing artifact rescued by its ``recovery_key_template``
+    arrives here as ``state="fresh"``. So this rollup judges the
+    execution UNION without re-HEADing anything.
+
+    Attributes:
+        state: ``"complete"`` ⇒ every required artifact is present +
+            valid (``fresh``, or suppressed by ``grace_period``).
+            ``"incomplete"`` ⇒ at least one required artifact is
+            ``missing`` / ``stale`` (a real delivery gap).
+            ``"indeterminate"`` ⇒ no real gap, but at least one probe
+            ``probe_failed`` (the monitor itself is broken, so the
+            cycle can't be confirmed). A real gap outranks an
+            indeterminate probe.
+        complete: ``True`` iff ``state == "complete"``.
+        cycle_label: The cycle's window label (e.g. ``"2026-W22"``),
+            for reporting. Informational — the caller passes it.
+        n_required: Count of ``severity="critical"`` artifacts judged.
+        n_satisfied: Count present + valid (``fresh`` + ``grace_period``).
+        missing / stale / probe_failed / grace_period: ``artifact_id``
+            localization lists — which artifacts landed in each state.
+        reason: Human-readable summary; routed to the report surface.
+    """
+
+    state: CycleState
+    complete: bool
+    cycle_label: str | None = None
+    n_required: int = 0
+    n_satisfied: int = 0
+    missing: list[str] = field(default_factory=list)
+    stale: list[str] = field(default_factory=list)
+    probe_failed: list[str] = field(default_factory=list)
+    grace_period: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+def cycle_completion(
+    spec_results: Iterable[tuple[ArtifactSpec, CheckResult]],
+    *,
+    cycle_label: str | None = None,
+) -> CycleCompletion:
+    """Roll per-artifact freshness results up into one cycle verdict.
+
+    ``cycle_completion(C) = ∀ required artifact a: present(a@C) ∧ valid(a@C)``
+    over the execution UNION, where the required set is the
+    ``severity="critical"`` rows. Non-critical (``warning``) artifacts
+    are excluded — they inform per-artifact alerting but never gate the
+    cycle verdict.
+
+    Pure: consumes already-computed :class:`CheckResult` rows (as
+    ``(spec, result)`` pairs so there's no positional-pairing hazard)
+    and performs no I/O. Recovery substitution and the calendar-holiday
+    short-circuit are already reflected in each ``result.state`` by
+    :func:`check_freshness`, so a holiday cycle or a recovery-rescued
+    artifact both count as satisfied here.
+
+    State precedence: a real delivery gap (``missing`` / ``stale``)
+    outranks a broken probe (``probe_failed``) — a confirmed miss is
+    more actionable than an unconfirmable one. ``grace_period`` counts
+    as satisfied (the producer is newly onboarded; suppressed by design)
+    but is surfaced in its own list so the caller can see it.
+
+    An empty required set returns ``state="complete"`` (vacuous truth) —
+    a cycle with no critical artifacts cannot be incomplete.
+    """
+    required = [(s, r) for s, r in spec_results if s.severity == "critical"]
+
+    missing: list[str] = []
+    stale: list[str] = []
+    probe_failed: list[str] = []
+    grace_period: list[str] = []
+    satisfied = 0
+
+    for spec, res in required:
+        if res.state == "fresh":
+            satisfied += 1
+        elif res.state == "grace_period":
+            satisfied += 1
+            grace_period.append(spec.artifact_id)
+        elif res.state == "stale":
+            stale.append(spec.artifact_id)
+        elif res.state == "missing":
+            missing.append(spec.artifact_id)
+        elif res.state == "probe_failed":
+            probe_failed.append(spec.artifact_id)
+
+    n_required = len(required)
+
+    if missing or stale:
+        gaps = []
+        if missing:
+            gaps.append(f"missing={missing}")
+        if stale:
+            gaps.append(f"stale={stale}")
+        return CycleCompletion(
+            state="incomplete",
+            complete=False,
+            cycle_label=cycle_label,
+            n_required=n_required,
+            n_satisfied=satisfied,
+            missing=missing,
+            stale=stale,
+            probe_failed=probe_failed,
+            grace_period=grace_period,
+            reason=(
+                f"cycle incomplete: {satisfied}/{n_required} critical artifacts "
+                f"present+valid; " + "; ".join(gaps)
+            ),
+        )
+
+    if probe_failed:
+        return CycleCompletion(
+            state="indeterminate",
+            complete=False,
+            cycle_label=cycle_label,
+            n_required=n_required,
+            n_satisfied=satisfied,
+            probe_failed=probe_failed,
+            grace_period=grace_period,
+            reason=(
+                f"cycle indeterminate: monitor probe failed for {probe_failed} — "
+                f"cannot confirm cycle ({satisfied}/{n_required} confirmed fresh)"
+            ),
+        )
+
+    grace_note = f" ({len(grace_period)} in grace period)" if grace_period else ""
+    return CycleCompletion(
+        state="complete",
+        complete=True,
+        cycle_label=cycle_label,
+        n_required=n_required,
+        n_satisfied=satisfied,
+        grace_period=grace_period,
+        reason=(
+            f"cycle complete: all {n_required} critical artifacts present+valid"
+            + grace_note
+        ),
+    )

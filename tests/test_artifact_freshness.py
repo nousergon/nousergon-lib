@@ -41,7 +41,9 @@ from alpha_engine_lib.artifact_freshness import (
     ArtifactSpec,
     CADENCE_SYMBOLS,
     CheckResult,
+    CycleCompletion,
     check_freshness,
+    cycle_completion,
     resolve_current_cycle,
     resolve_dedup_key,
 )
@@ -510,3 +512,114 @@ def test_cadence_symbols_match_documented_set():
     assert CADENCE_SYMBOLS == frozenset(
         {"saturday_sf", "weekday_sf", "eod_sf", "continuous"}
     )
+
+
+# ── Per-cycle completion rollup (Phase 1b) ──────────────────────────────────
+
+
+def _critical(artifact_id: str) -> ArtifactSpec:
+    return _spec(artifact_id=artifact_id, severity="critical")
+
+
+def _warning(artifact_id: str) -> ArtifactSpec:
+    return _spec(artifact_id=artifact_id, severity="warning")
+
+
+def _res(state: str) -> CheckResult:
+    return CheckResult(state=state, reason=f"test {state}")
+
+
+class TestCycleCompletion:
+    def test_all_critical_fresh_is_complete(self):
+        pairs = [
+            (_critical("a"), _res("fresh")),
+            (_critical("b"), _res("fresh")),
+            (_critical("c"), _res("fresh")),
+        ]
+        v = cycle_completion(pairs, cycle_label="2026-W22")
+        assert isinstance(v, CycleCompletion)
+        assert v.state == "complete"
+        assert v.complete is True
+        assert v.n_required == 3
+        assert v.n_satisfied == 3
+        assert v.cycle_label == "2026-W22"
+
+    def test_one_missing_is_incomplete(self):
+        v = cycle_completion([
+            (_critical("a"), _res("fresh")),
+            (_critical("b"), _res("missing")),
+        ])
+        assert v.state == "incomplete"
+        assert v.complete is False
+        assert v.missing == ["b"]
+        assert v.n_satisfied == 1
+
+    def test_one_stale_is_incomplete(self):
+        v = cycle_completion([
+            (_critical("a"), _res("fresh")),
+            (_critical("b"), _res("stale")),
+        ])
+        assert v.state == "incomplete"
+        assert v.stale == ["b"]
+
+    def test_probe_failed_only_is_indeterminate(self):
+        v = cycle_completion([
+            (_critical("a"), _res("fresh")),
+            (_critical("b"), _res("probe_failed")),
+        ])
+        assert v.state == "indeterminate"
+        assert v.complete is False
+        assert v.probe_failed == ["b"]
+
+    def test_real_gap_outranks_probe_failure(self):
+        """A confirmed miss is more actionable than an unconfirmable probe."""
+        v = cycle_completion([
+            (_critical("a"), _res("missing")),
+            (_critical("b"), _res("probe_failed")),
+        ])
+        assert v.state == "incomplete"
+        assert v.missing == ["a"]
+        assert v.probe_failed == ["b"]  # still localized, but doesn't set the verdict
+
+    def test_grace_period_counts_as_satisfied(self):
+        v = cycle_completion([
+            (_critical("a"), _res("fresh")),
+            (_critical("b"), _res("grace_period")),
+        ])
+        assert v.state == "complete"
+        assert v.complete is True
+        assert v.n_satisfied == 2
+        assert v.grace_period == ["b"]
+
+    def test_warning_severity_excluded_from_required_set(self):
+        """A missing WARNING artifact must not fail the cycle — only
+        critical rows gate the completion verdict."""
+        v = cycle_completion([
+            (_critical("a"), _res("fresh")),
+            (_warning("b"), _res("missing")),
+        ])
+        assert v.state == "complete"
+        assert v.n_required == 1
+        assert v.missing == []
+
+    def test_empty_required_set_is_vacuously_complete(self):
+        v = cycle_completion([(_warning("a"), _res("missing"))])
+        assert v.state == "complete"
+        assert v.complete is True
+        assert v.n_required == 0
+
+    def test_mixed_states_incomplete_localizes_all_gaps(self):
+        v = cycle_completion([
+            (_critical("a"), _res("fresh")),
+            (_critical("b"), _res("grace_period")),
+            (_critical("c"), _res("missing")),
+            (_critical("d"), _res("stale")),
+            (_critical("e"), _res("probe_failed")),
+        ])
+        assert v.state == "incomplete"
+        assert v.n_required == 5
+        assert v.n_satisfied == 2  # fresh + grace_period
+        assert v.missing == ["c"]
+        assert v.stale == ["d"]
+        assert v.probe_failed == ["e"]
+        assert v.grace_period == ["b"]
