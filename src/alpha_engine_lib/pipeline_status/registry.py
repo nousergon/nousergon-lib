@@ -69,6 +69,8 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForRAGIngestion": "RAGIngestion",
     "WaitForPredictorTraining": "PredictorTraining",
     "WaitForBacktester": "Backtester",
+    "WaitForPredictorBacktest": "PredictorBacktest",
+    "WaitForPortfolioOptimizerBacktest": "PortfolioOptimizerBacktest",
     "WaitForParity": "Parity",
     "WaitForEvaluator": "Evaluator",
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
@@ -253,6 +255,18 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     "Backtester": ArchivePageRef(
         page="21_Backtester_Evaluator_Archive",
         artifact_label="Backtester consolidated report",
+    ),
+    # L4472 phase-split (2026-05-31): the monolithic Backtester state was
+    # decomposed into Backtester (simulate) → PredictorBacktest → Portfolio-
+    # OptimizerBacktest. All three write into the same backtest/{date}/ prefix
+    # surfaced on the consolidated evaluator archive page.
+    "PredictorBacktest": ArchivePageRef(
+        page="21_Backtester_Evaluator_Archive",
+        artifact_label="Predictor backtest + Phase 4 report",
+    ),
+    "PortfolioOptimizerBacktest": ArchivePageRef(
+        page="21_Backtester_Evaluator_Archive",
+        artifact_label="Portfolio-optimizer / cov / gamma sweep report",
     ),
     "Parity": ArchivePageRef(
         page="3_Analysis",
