@@ -34,6 +34,11 @@ arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
 # factor-risk module needs numpy; the VaR/CVaR, riskstats, returns, and
 # attribution modules are pure stdlib and import without this extra.
 quant = ["numpy>=1.24"]
+# Cross-sectional (Fama-MacBeth) factor risk model — quant.factor_risk_xs.
+# Needs pandas (always) + scikit-learn (LedoitWolf/OAS shrinkage). Kept
+# separate from [quant] so the numpy-only consumers (e.g. robodashboard)
+# don't pull pandas+sklearn.
+quant-xs = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.0"]
 flow_doctor = ["flow-doctor[diagnosis,s3]>=0.4.0,<0.5.0"]
 rag = [
     "psycopg2-binary>=2.9",
