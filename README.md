@@ -230,6 +230,10 @@ The shared institutional-analytics engine: pure, front-end- and data-source-agno
 - **`quant.returns`** — `xirr` (money-weighted, Newton + bisection), `time_weighted_return` (GIPS), `cumulative_return`, `annualize` (stdlib).
 - **`quant.attribution`** — single-period Brinson-Fachler decomposition (`brinson_fachler`) + multi-period Cariño linking (`link_periods`) (stdlib).
 
+### `http_retry` — bounded-backoff transient-API retry chokepoint
+
+`request_with_retry(url, *, params, session, transient_status, ...)` returns the final `requests.Response` after retrying the transient class — 429 + 5xx responses (honoring `Retry-After`) and `Timeout`/`ConnectionError` network errors — with exponential backoff + full jitter; an exhausted network error raises `HttpRetryError` (api-key-scrubbed), while a persistent transient-status response is returned for the caller to interpret (so a 403, not in the transient set, is handed back for e.g. polygon's `PolygonForbiddenError` conversion). Also exposes the low-level `backoff_delay(attempt, *, base, cap, retry_after)` and `scrub_api_keys(msg)` (masks `api_key=`/`apiKey=` querystring values) for consumers with bespoke loops (the rate-limited `polygon_client` keeps its own loop + 403 + JSON parse and reuses just the delay math + scrubber). Consolidates the four mirrored alpha-engine-data retry sites (FRED fetch, polygon client, preflight reachability, FRED repair) into one policy so they stop drifting (L4499). Stdlib + `requests` only.
+
 ```python
 from alpha_engine_lib.quant.risk_measures import historical_cvar
 from alpha_engine_lib.quant.factor_risk import estimate_factor_model, portfolio_risk
