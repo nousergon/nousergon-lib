@@ -219,6 +219,21 @@ Rotates across `(instance_type × subnet)` combinations on `InsufficientInstance
 
 `universe_writer_lock(writer_id, ttl_seconds=3600)` context manager that uses `PutObject(IfNoneMatch="*")` to claim a single-writer lease on `s3://alpha-engine-research/locks/universe-writer.lock`. The first writer's conditional PUT succeeds; subsequent writers get `LockHeldByAnotherWriterError` carrying the live `LockHolder` body (writer_id + started_at + ttl_epoch + hostname + pid) for operator diagnostics. Soft-TTL self-recovery deletes-and-re-acquires when the on-disk lock's `ttl_epoch` has elapsed; the operator-side S3 lifecycle on `locks/` (expires-after-days=1) is the hard backstop. Release on context exit is best-effort and never masks an inner exception. Closes the producer-side half of the same single-writer-per-resource invariant the SF MutualExclusionGuard (DynamoDB-side) covers at the Step Function entry point; the lib lift is the chokepoint that picks up the third adopter for free (predictor weight-promote, backfill loops, etc.).
 
+### `quant` — portfolio analytics engine (factor risk, VaR/CVaR, attribution, returns)
+
+The shared institutional-analytics engine: pure, front-end- and data-source-agnostic functions that *describe and measure* a portfolio (performance, risk, attribution) with **no advisory logic** — it sits on the "analytics, not advice" side of the line. Lifted from robodashboard's `analytics/` after the 2026-06-03 cross-repo leverage audit, so both the alpha-engine fleet and robodashboard consume one engine instead of parallel reimplementations. Import the submodule you need (the package keeps no eager imports, so the stdlib-only modules import without numpy):
+
+- **`quant.factor_risk`** — statistical factor risk model `Σ = B·F·Bᵀ + D`: `estimate_factor_model` (time-series factor-ETF / Fama-MacBeth loadings), `portfolio_risk` (ex-ante vol + factor/idio split + per-factor variance contribution), `tracking_error`, `benchmark_exposure`, and a numpy-only `ledoit_wolf_cov` (no sklearn). The estimator-agnostic consumption core (`portfolio_risk`/`tracking_error`) consumes any `FactorRiskModel` (B, F, D). **Needs numpy** — `pip install "alpha-engine-lib[quant]"`.
+- **`quant.risk_measures`** — parametric (Gaussian, Acklam inverse-normal, no scipy) + historical VaR & CVaR, as positive loss fractions at a horizon (stdlib).
+- **`quant.riskstats`** — `volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown` (stdlib).
+- **`quant.returns`** — `xirr` (money-weighted, Newton + bisection), `time_weighted_return` (GIPS), `cumulative_return`, `annualize` (stdlib).
+- **`quant.attribution`** — single-period Brinson-Fachler decomposition (`brinson_fachler`) + multi-period Cariño linking (`link_periods`) (stdlib).
+
+```python
+from alpha_engine_lib.quant.risk_measures import historical_cvar
+from alpha_engine_lib.quant.factor_risk import estimate_factor_model, portfolio_risk
+```
+
 ## How it's used
 
 All six Nous Ergon module repos depend on this lib:
