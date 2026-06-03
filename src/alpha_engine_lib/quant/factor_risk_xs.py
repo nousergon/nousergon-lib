@@ -235,8 +235,15 @@ def estimate_factor_covariance(
         return pd.DataFrame(np.full((K, K), np.nan), index=cols, columns=cols)
 
     if shrinkage == "ledoit_wolf":
-        from sklearn.covariance import LedoitWolf
-        F = LedoitWolf().fit(clean.to_numpy()).covariance_
+        # Single shared Ledoit-Wolf estimator (LV1-AE.a, 2026-06-03). The numpy
+        # ``quant.factor_risk.ledoit_wolf_cov`` is numerically identical to
+        # sklearn's ``LedoitWolf`` (max abs diff ~1e-21, validated across
+        # n∈[35,1000]) — both center the data and estimate the same shrinkage
+        # intensity toward a scaled-identity target. Consolidating onto the numpy
+        # impl kills the duplicate reimplementation; sklearn stays a lazy import
+        # for OAS only.
+        from .factor_risk import ledoit_wolf_cov
+        F = ledoit_wolf_cov(clean.to_numpy(), shrinkage="ledoit_wolf")
     elif shrinkage == "oas":
         from sklearn.covariance import OAS
         F = OAS().fit(clean.to_numpy()).covariance_

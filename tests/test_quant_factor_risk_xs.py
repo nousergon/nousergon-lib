@@ -29,6 +29,18 @@ from alpha_engine_lib.quant.factor_risk_xs import (  # noqa: E402  (after import
 )
 
 
+def test_ledoit_wolf_branch_uses_shared_numpy_impl():
+    """LV1-AE.a consolidation contract: estimate_factor_covariance's ledoit_wolf
+    path is the shared numpy quant.factor_risk.ledoit_wolf_cov (one LW impl)."""
+    from alpha_engine_lib.quant.factor_risk import ledoit_wolf_cov
+
+    rng = np.random.RandomState(0)
+    panel = pd.DataFrame(rng.normal(0, 0.01, (200, 4)), columns=["market", "MOM", "VAL", "QUAL"])
+    F = estimate_factor_covariance(panel, shrinkage="ledoit_wolf", min_obs=30)
+    expected = ledoit_wolf_cov(panel.to_numpy(), shrinkage="ledoit_wolf")
+    assert np.allclose(F.to_numpy(), expected, atol=1e-15)
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 
