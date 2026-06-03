@@ -229,6 +229,7 @@ The shared institutional-analytics engine: pure, front-end- and data-source-agno
 - **`quant.riskstats`** — `volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown` (stdlib).
 - **`quant.returns`** — `xirr` (money-weighted, Newton + bisection), `time_weighted_return` (GIPS), `cumulative_return`, `annualize` (stdlib).
 - **`quant.attribution`** — single-period Brinson-Fachler decomposition (`brinson_fachler`) + multi-period Cariño linking (`link_periods`) (stdlib).
+- **`quant.stats`** — strategy/signal-quality evaluation metrics (lifted from the backtester's `analysis/`): `dsr` (Probabilistic + Deflated Sharpe, López de Prado), `information_coefficient` (Spearman rank IC), `expectancy` (hit-rate × win/loss decomposition), `multiple_testing` (Benjamini-Hochberg FDR), `risk_matched_benchmark` (EW-high-vol + beta-matched-SPY baselines + Information Ratio). **Needs pandas + scipy** — `pip install "alpha-engine-lib[quant-stats]"` (scipy is only the IC p-value; numpy fallback otherwise).
 
 ### `http_retry` — bounded-backoff transient-API retry chokepoint
 
