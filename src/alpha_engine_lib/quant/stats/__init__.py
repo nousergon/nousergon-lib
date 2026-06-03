@@ -12,6 +12,7 @@ Modules:
   - ``expectancy``              — hit-rate × win/loss decomposition
   - ``multiple_testing``        — Benjamini-Hochberg FDR correction
   - ``risk_matched_benchmark``  — EW-high-vol + beta-matched-SPY baselines + IR
+  - ``regime_sortino``          — regime-stratified cross-sectional pick-alpha Sortino
 
 Example::
 
