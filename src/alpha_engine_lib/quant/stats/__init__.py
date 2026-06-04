@@ -11,6 +11,7 @@ Modules:
   - ``information_coefficient`` — Spearman rank IC of conviction vs forward return
   - ``expectancy``              — hit-rate × win/loss decomposition
   - ``multiple_testing``        — Benjamini-Hochberg FDR correction
+  - ``intervals``               — bootstrap CI, Newey-West SE, Wilson score interval
   - ``risk_matched_benchmark``  — EW-high-vol + beta-matched-SPY baselines + IR
   - ``regime_sortino``          — regime-stratified cross-sectional pick-alpha Sortino
 
@@ -18,6 +19,7 @@ Example::
 
     from alpha_engine_lib.quant.stats.dsr import compute_dsr
     from alpha_engine_lib.quant.stats.multiple_testing import benjamini_hochberg
+    from alpha_engine_lib.quant.stats.intervals import bootstrap_ci, wilson_score_interval
 """
 
 from __future__ import annotations
