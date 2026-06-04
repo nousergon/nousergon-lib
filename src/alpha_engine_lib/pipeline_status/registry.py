@@ -288,6 +288,10 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         page="4_System_Health",
         artifact_label="Weekly substrate health check",
     ),
+    "ReportCard": ArchivePageRef(
+        page="Report_Card",
+        artifact_label="System Report Card",
+    ),
     "NotifyComplete": ArtifactReason(
         reason="Terminal success SNS publish to alpha-engine-alerts; "
         "no persisted artifact (the email IS the surface)."
