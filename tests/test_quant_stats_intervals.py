@@ -3,6 +3,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from alpha_engine_lib.quant.stats.intervals import (
     bootstrap_ci,
@@ -75,10 +76,13 @@ class TestWilsonScoreInterval:
         assert abs(out["ci_high"] - 0.5962) < 1e-3
 
     def test_bounds_clamped_to_unit_interval(self):
+        # successes=0 → true lower bound is 0 (residual float noise ≈ 1e-17).
         lo = wilson_score_interval(0, 10)
-        assert lo["ci_low"] == 0.0 and 0.0 < lo["ci_high"] < 1.0
+        assert lo["ci_low"] == pytest.approx(0.0, abs=1e-9)
+        assert 0.0 < lo["ci_high"] < 1.0
         hi = wilson_score_interval(10, 10)
-        assert hi["ci_high"] == 1.0 and 0.0 < hi["ci_low"] < 1.0
+        assert hi["ci_high"] == pytest.approx(1.0, abs=1e-9)
+        assert 0.0 < hi["ci_low"] < 1.0
 
     def test_successes_clamped_to_trials(self):
         out = wilson_score_interval(15, 10)
