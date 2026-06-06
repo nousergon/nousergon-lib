@@ -56,6 +56,14 @@ shape we use in the fleet:
 - CLI: ``python -m alpha_engine_lib.ec2_spot launch --types ... --subnets ...``.
   Returns ``InstanceId`` on stdout. Exits non-zero on failure;
   capacity-exhaustion exits 64 (distinguishable from generic failure).
+- :func:`classify_termination` — classify why a (spot) instance terminated:
+  ``reclaim`` (AWS reclaimed → caller should relaunch on a fresh spot),
+  ``other`` (real crash / OOM / timeout → do NOT blind-retry), or ``unknown``.
+  CLI: ``python -m alpha_engine_lib.ec2_spot classify-termination
+  --instance-id <id>`` prints ``classification<TAB>state<TAB>reason_code<TAB>
+  transition_reason``. The fleet-wide chokepoint for the spot-reclaim
+  classification that previously lived (buggy) in ``spot_backtest.sh`` and was
+  absent from ``spot_train.sh`` / the data spot launchers.
 """
 
 from __future__ import annotations
@@ -83,6 +91,27 @@ CAPACITY_ERROR_CODES: Final[frozenset[str]] = frozenset(
 )
 
 CAPACITY_EXIT_CODE: Final[int] = 64
+
+# ── Spot-reclaim classification ──────────────────────────────────────────────
+# A mid-run AWS spot reclaim surfaces to a dispatcher as a generic command
+# failure with no traceback. The authoritative signal is the instance's
+# ``StateReason.Code`` — AWS sets ``Server.SpotInstanceTermination`` (or
+# ``Server.InsufficientInstanceCapacity``) when it reclaims. Earlier, each
+# spot launcher tried to classify this from ``StateTransitionReason`` alone
+# (which only shows the human ``"Service initiated (<ts>)"`` form, NEVER the
+# code) and matched against ``Server.SpotInstanceTermination`` — a field/value
+# mismatch that could never hit, so two real backtester reclaims on 2026-06-06
+# hard-failed instead of relaunching. This chokepoint reads the RIGHT field.
+SPOT_RECLAIM_REASON_CODES: Final[frozenset[str]] = frozenset(
+    {"Server.SpotInstanceTermination", "Server.InsufficientInstanceCapacity"}
+)
+# Belt-and-suspenders: a worker already in one of these states whose
+# StateTransitionReason contains "Service initiated" was torn down by AWS out
+# from under a still-running dispatcher. A genuine in-instance crash/OOM leaves
+# the instance ``running`` until the dispatcher terminates it, so this can never
+# mis-fire on a real bug.
+_RECLAIM_TRANSITION_STATES: Final[frozenset[str]] = frozenset({"shutting-down", "terminated"})
+_RECLAIM_TRANSITION_MARKER: Final[str] = "Service initiated"
 
 
 class SpotLaunchError(Exception):
@@ -240,6 +269,57 @@ def launch(
     )
 
 
+def classify_termination(instance_id: str, *, region: str = "us-east-1") -> dict[str, str]:
+    """Classify why a (spot) instance is terminating/terminated.
+
+    Returns a dict with keys ``classification`` (``"reclaim"`` | ``"other"`` |
+    ``"unknown"``), ``state``, ``reason_code``, ``transition_reason``.
+
+    ``"reclaim"`` means AWS reclaimed the spot — the caller should relaunch on a
+    fresh spot rather than treat the failure as terminal. ``"other"`` is any
+    other terminal cause (real crash / OOM / delivery timeout / user shutdown):
+    the caller must NOT blind-retry it. ``"unknown"`` if the instance cannot be
+    described (it may already be gone).
+
+    Classification is reclaim iff ``StateReason.Code`` is one of
+    :data:`SPOT_RECLAIM_REASON_CODES`, OR the instance is shutting-down/terminated
+    with a "Service initiated" ``StateTransitionReason`` (see module notes).
+    """
+    import boto3
+    from botocore.exceptions import ClientError
+
+    ec2 = boto3.client("ec2", region_name=region)
+    _empty = {"state": "", "reason_code": "", "transition_reason": ""}
+    try:
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+    except ClientError as exc:
+        logger.warning(
+            "ec2_spot: describe-instances failed for %s: %s", instance_id, exc
+        )
+        return {"classification": "unknown", **_empty}
+
+    reservations = resp.get("Reservations") or []
+    instances = reservations[0].get("Instances") if reservations else None
+    if not instances:
+        return {"classification": "unknown", **_empty}
+
+    inst = instances[0]
+    state = (inst.get("State") or {}).get("Name", "") or ""
+    reason_code = (inst.get("StateReason") or {}).get("Code", "") or ""
+    transition_reason = inst.get("StateTransitionReason", "") or ""
+
+    is_reclaim = any(c in reason_code for c in SPOT_RECLAIM_REASON_CODES) or (
+        state in _RECLAIM_TRANSITION_STATES
+        and _RECLAIM_TRANSITION_MARKER in transition_reason
+    )
+    return {
+        "classification": "reclaim" if is_reclaim else "other",
+        "state": state,
+        "reason_code": reason_code,
+        "transition_reason": transition_reason,
+    }
+
+
 def _split_csv(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
 
@@ -325,9 +405,40 @@ def main(argv: list[str] | None = None) -> int:
         help="AWS region (default: $AWS_REGION or us-east-1).",
     )
 
+    classify_p = subparsers.add_parser(
+        "classify-termination",
+        help=(
+            "Classify why a (spot) instance terminated: reclaim | other | "
+            "unknown. Prints TAB-separated 'classification<TAB>state<TAB>"
+            "reason_code<TAB>transition_reason' on stdout for bash callers."
+        ),
+    )
+    classify_p.add_argument("--instance-id", required=True, help="EC2 instance ID.")
+    classify_p.add_argument(
+        "--region",
+        default=os.environ.get("AWS_REGION", "us-east-1"),
+        help="AWS region (default: $AWS_REGION or us-east-1).",
+    )
+
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.WARNING)
+
+    if args.cmd == "classify-termination":
+        result = classify_termination(args.instance_id, region=args.region)
+        # TAB-separated, fixed field order — bash:
+        #   IFS=$'\t' read -r verdict state rcode treason < <(python -m ... )
+        print(
+            "\t".join(
+                (
+                    result["classification"],
+                    result["state"],
+                    result["reason_code"],
+                    result["transition_reason"],
+                )
+            )
+        )
+        return 0
 
     try:
         instance_id = launch(
