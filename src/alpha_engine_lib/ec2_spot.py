@@ -105,6 +105,22 @@ CAPACITY_EXIT_CODE: Final[int] = 64
 SPOT_RECLAIM_REASON_CODES: Final[frozenset[str]] = frozenset(
     {"Server.SpotInstanceTermination", "Server.InsufficientInstanceCapacity"}
 )
+# The MOST authoritative reclaim signal is the Spot Instance Request's
+# Status.Code (queried first below). These are the SIR status codes that mean
+# AWS reclaimed/never-maintained the instance for capacity/price reasons — a
+# strict superset of what spot_data_weekly.sh already classified on, so this
+# chokepoint never regresses the best existing launcher.
+SPOT_RECLAIM_SIR_STATUS_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "instance-terminated-no-capacity",
+        "instance-terminated-by-price",
+        "instance-terminated-capacity-oversubscribed",
+        "instance-stopped-no-capacity",
+        "instance-stopped-by-price",
+        "instance-stopped-capacity-oversubscribed",
+        "marked-for-termination",
+    }
+)
 # Belt-and-suspenders: a worker already in one of these states whose
 # StateTransitionReason contains "Service initiated" was torn down by AWS out
 # from under a still-running dispatcher. A genuine in-instance crash/OOM leaves
@@ -281,43 +297,77 @@ def classify_termination(instance_id: str, *, region: str = "us-east-1") -> dict
     the caller must NOT blind-retry it. ``"unknown"`` if the instance cannot be
     described (it may already be gone).
 
-    Classification is reclaim iff ``StateReason.Code`` is one of
-    :data:`SPOT_RECLAIM_REASON_CODES`, OR the instance is shutting-down/terminated
-    with a "Service initiated" ``StateTransitionReason`` (see module notes).
+    Classification is reclaim iff ANY of (in authority order):
+
+    1. the Spot Instance Request's ``Status.Code`` is one of
+       :data:`SPOT_RECLAIM_SIR_STATUS_CODES` (the most authoritative signal —
+       the ``sir_code`` field in the result), OR
+    2. the instance's ``StateReason.Code`` is one of
+       :data:`SPOT_RECLAIM_REASON_CODES` (the ``reason_code`` field), OR
+    3. the instance is shutting-down/terminated with a "Service initiated"
+       ``StateTransitionReason`` (see module notes — the field-mismatch fix).
     """
     import boto3
     from botocore.exceptions import ClientError
 
     ec2 = boto3.client("ec2", region_name=region)
-    _empty = {"state": "", "reason_code": "", "transition_reason": ""}
+    result = {
+        "classification": "unknown",
+        "state": "",
+        "reason_code": "",
+        "transition_reason": "",
+        "sir_code": "",
+    }
+
+    # 1. Spot Instance Request Status.Code — the authoritative reclaim signal,
+    #    queryable even after the instance is gone. Best-effort: on-demand
+    #    instances have no SIR (empty), and a describe failure just falls
+    #    through to the instance-level checks.
+    try:
+        sir = ec2.describe_spot_instance_requests(
+            Filters=[{"Name": "instance-id", "Values": [instance_id]}]
+        )
+        reqs = sir.get("SpotInstanceRequests") or []
+        if reqs:
+            result["sir_code"] = (reqs[0].get("Status") or {}).get("Code", "") or ""
+    except ClientError as exc:
+        logger.warning(
+            "ec2_spot: describe-spot-instance-requests failed for %s: %s",
+            instance_id,
+            exc,
+        )
+
+    # 2/3. Instance State + StateReason.Code + StateTransitionReason.
+    described = False
     try:
         resp = ec2.describe_instances(InstanceIds=[instance_id])
+        reservations = resp.get("Reservations") or []
+        instances = reservations[0].get("Instances") if reservations else None
+        if instances:
+            described = True
+            inst = instances[0]
+            result["state"] = (inst.get("State") or {}).get("Name", "") or ""
+            result["reason_code"] = (inst.get("StateReason") or {}).get("Code", "") or ""
+            result["transition_reason"] = inst.get("StateTransitionReason", "") or ""
     except ClientError as exc:
         logger.warning(
             "ec2_spot: describe-instances failed for %s: %s", instance_id, exc
         )
-        return {"classification": "unknown", **_empty}
 
-    reservations = resp.get("Reservations") or []
-    instances = reservations[0].get("Instances") if reservations else None
-    if not instances:
-        return {"classification": "unknown", **_empty}
+    # If neither the SIR nor the instance could be read, we genuinely don't know.
+    if not result["sir_code"] and not described:
+        return result  # classification stays "unknown"
 
-    inst = instances[0]
-    state = (inst.get("State") or {}).get("Name", "") or ""
-    reason_code = (inst.get("StateReason") or {}).get("Code", "") or ""
-    transition_reason = inst.get("StateTransitionReason", "") or ""
-
-    is_reclaim = any(c in reason_code for c in SPOT_RECLAIM_REASON_CODES) or (
-        state in _RECLAIM_TRANSITION_STATES
-        and _RECLAIM_TRANSITION_MARKER in transition_reason
+    is_reclaim = (
+        result["sir_code"] in SPOT_RECLAIM_SIR_STATUS_CODES
+        or any(c in result["reason_code"] for c in SPOT_RECLAIM_REASON_CODES)
+        or (
+            result["state"] in _RECLAIM_TRANSITION_STATES
+            and _RECLAIM_TRANSITION_MARKER in result["transition_reason"]
+        )
     )
-    return {
-        "classification": "reclaim" if is_reclaim else "other",
-        "state": state,
-        "reason_code": reason_code,
-        "transition_reason": transition_reason,
-    }
+    result["classification"] = "reclaim" if is_reclaim else "other"
+    return result
 
 
 def _split_csv(s: str) -> list[str]:
@@ -427,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "classify-termination":
         result = classify_termination(args.instance_id, region=args.region)
         # TAB-separated, fixed field order — bash:
-        #   IFS=$'\t' read -r verdict state rcode treason < <(python -m ... )
+        #   IFS=$'\t' read -r verdict state rcode treason sir < <(python -m ... )
         print(
             "\t".join(
                 (
@@ -435,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
                     result["state"],
                     result["reason_code"],
                     result["transition_reason"],
+                    result["sir_code"],
                 )
             )
         )

@@ -450,14 +450,39 @@ class TestClassifyTermination:
     2026-06-06 field-mismatch fix: classify on StateReason.Code, not the
     StateTransitionReason-only string)."""
 
-    def _run(self, fake_boto3, resp=None, raise_exc=None):
+    def _run(self, fake_boto3, resp=None, raise_exc=None, sir_code=None):
         fake, ec2 = fake_boto3
+        # SIR query defaults to "no spot request found" unless a code is given.
+        if sir_code is None:
+            ec2.describe_spot_instance_requests.return_value = {"SpotInstanceRequests": []}
+        else:
+            ec2.describe_spot_instance_requests.return_value = {
+                "SpotInstanceRequests": [{"Status": {"Code": sir_code}}]
+            }
         if raise_exc is not None:
             ec2.describe_instances.side_effect = raise_exc
         else:
-            ec2.describe_instances.return_value = resp
+            ec2.describe_instances.return_value = (
+                resp if resp is not None else {"Reservations": []}
+            )
         with patch.dict("sys.modules", {"boto3": fake}):
             return ec2_spot.classify_termination("i-abc", region="us-east-1")
+
+    def test_sir_status_no_capacity_is_reclaim(self, fake_boto3):
+        # Most authoritative signal — the Spot Instance Request status — even
+        # when the instance is already gone (no Reservations).
+        r = self._run(fake_boto3, {"Reservations": []}, sir_code="instance-terminated-no-capacity")
+        assert r["classification"] == "reclaim"
+        assert r["sir_code"] == "instance-terminated-no-capacity"
+
+    def test_sir_marked_for_termination_is_reclaim(self, fake_boto3):
+        r = self._run(fake_boto3, _describe_resp("running"), sir_code="marked-for-termination")
+        assert r["classification"] == "reclaim"
+
+    def test_sir_fulfilled_running_is_other(self, fake_boto3):
+        # A healthy/fulfilled SIR on a running instance is NOT a reclaim.
+        r = self._run(fake_boto3, _describe_resp("running"), sir_code="fulfilled")
+        assert r["classification"] == "other"
 
     def test_statereason_code_spot_termination_is_reclaim(self, fake_boto3):
         r = self._run(fake_boto3, _describe_resp("shutting-down", reason_code="Server.SpotInstanceTermination"))
@@ -488,16 +513,20 @@ class TestClassifyTermination:
         r = self._run(fake_boto3, _describe_resp("terminated", reason_code="Client.UserInitiatedShutdown", transition_reason="User initiated"))
         assert r["classification"] == "other"
 
-    def test_describe_error_is_unknown(self, fake_boto3):
+    def test_describe_error_with_no_sir_is_unknown(self, fake_boto3):
+        # Neither the SIR nor the instance is readable → genuinely unknown.
         r = self._run(fake_boto3, raise_exc=_other_error("RequestLimitExceeded"))
         assert r["classification"] == "unknown"
 
-    def test_no_instances_is_unknown(self, fake_boto3):
+    def test_no_instances_no_sir_is_unknown(self, fake_boto3):
         r = self._run(fake_boto3, {"Reservations": []})
         assert r["classification"] == "unknown"
 
     def test_cli_emits_tab_separated_line(self, fake_boto3, capsys):
         fake, ec2 = fake_boto3
+        ec2.describe_spot_instance_requests.return_value = {
+            "SpotInstanceRequests": [{"Status": {"Code": "instance-terminated-no-capacity"}}]
+        }
         ec2.describe_instances.return_value = _describe_resp(
             "shutting-down", reason_code="Server.SpotInstanceTermination",
             transition_reason="Service initiated (ts)",
@@ -510,3 +539,4 @@ class TestClassifyTermination:
         assert fields[0] == "reclaim"
         assert fields[1] == "shutting-down"
         assert fields[2] == "Server.SpotInstanceTermination"
+        assert fields[4] == "instance-terminated-no-capacity"  # sir_code appended
