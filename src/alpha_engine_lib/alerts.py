@@ -404,6 +404,27 @@ def publish(
     result = PublishResult()
     formatted = _format_message(message, severity, source)
 
+    # ── Test-environment guard (defense-in-depth) ────────────────────────
+    # NEVER fan out a real SNS / Telegram alert from inside a test process.
+    # pytest sets ``PYTEST_CURRENT_TEST`` for the duration of each test; when
+    # it is present we short-circuit to a no-op result so any consumer test
+    # that exercises a ``publish`` call site without stubbing it cannot page
+    # the operator for real. This is the cross-repo chokepoint — one guard
+    # protects all 8 suites; consumer repos SHOULD also stub ``publish`` in
+    # their own conftest, but this catches the case where they forget (which
+    # is exactly how the optimizer turnover-governor large-move WARN leaked
+    # from alpha-engine's suite on 2026-06-07). Escape hatch:
+    # ``ALPHA_ENGINE_ALLOW_TEST_ALERTS=1`` re-enables the real path — used
+    # ONLY by this lib's own ``test_alerts`` suite, which deliberately
+    # exercises the fan-out logic against mocked boto3 / Telegram transports.
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get(
+        "ALPHA_ENGINE_ALLOW_TEST_ALERTS"
+    ):
+        detail = "suppressed in test env (PYTEST_CURRENT_TEST set)"
+        result.sns = ChannelResult(ok=False, detail=detail)
+        result.telegram = ChannelResult(ok=False, detail=detail)
+        return result
+
     # ── Dedup check (pre-publish) ────────────────────────────────────────
     marker_key: str | None = None
     bucket = dedup_bucket or DEFAULT_DEDUP_BUCKET

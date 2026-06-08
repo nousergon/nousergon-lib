@@ -718,3 +718,44 @@ class TestCliDedup:
         captured = capsys.readouterr()
         assert rc == 0
         assert "dedup_skipped=True" in captured.err
+
+
+class TestTestEnvGuard:
+    """The ``PYTEST_CURRENT_TEST`` guard short-circuits real fan-out from
+    inside any test process unless ``ALPHA_ENGINE_ALLOW_TEST_ALERTS`` is set
+    (L4566). This is the cross-repo chokepoint that stops a consumer suite
+    (e.g. alpha-engine's optimizer-shadow tests) from paging the operator."""
+
+    def test_suppressed_in_test_env_without_optin(self, monkeypatch):
+        # The autouse conftest sets the escape hatch for the whole lib suite;
+        # remove it here to observe the guard's default-on behaviour.
+        monkeypatch.delenv("ALPHA_ENGINE_ALLOW_TEST_ALERTS", raising=False)
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_guard (call)")
+        # If the guard fails to short-circuit, these explode the test rather
+        # than silently reaching a real channel.
+        boom_sns = MagicMock(side_effect=AssertionError("SNS reached in test env!"))
+        boom_tg = MagicMock(side_effect=AssertionError("Telegram reached in test env!"))
+        monkeypatch.setattr(alerts, "_publish_sns", boom_sns)
+        monkeypatch.setattr(alerts, "_publish_telegram", boom_tg)
+
+        result = alerts.publish("boom", source="x", sns=True, telegram=True)
+
+        assert result.sns.ok is False
+        assert result.telegram.ok is False
+        assert "suppressed in test env" in result.sns.detail
+        assert result.any_ok is False
+        boom_sns.assert_not_called()
+        boom_tg.assert_not_called()
+
+    def test_optin_escape_hatch_re_enables_fanout(self, monkeypatch, fake_boto3):
+        fake, _sts, _sns = fake_boto3
+        monkeypatch.setenv("ALPHA_ENGINE_ALLOW_TEST_ALERTS", "1")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        with patch.dict("sys.modules", {"boto3": fake}):
+            with patch.object(
+                alerts, "_publish_telegram",
+                return_value=alerts.ChannelResult(ok=True, detail="sent"),
+            ):
+                result = alerts.publish("boom", source="x")
+        # Guard did NOT short-circuit — the mocked transports ran.
+        assert result.any_ok is True
