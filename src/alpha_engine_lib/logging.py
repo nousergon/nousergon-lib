@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 # ``${VAR}`` interpolation tokens in a flow-doctor.yaml. flow-doctor
-# resolves these from ``os.environ`` eagerly at ``flow_doctor.init()``
+# resolves these from ``os.environ`` eagerly at ``FlowDoctor.from_config()``
 # time — before any lazy ``get_secret()`` consumer-site call runs — so
 # the seed below must populate them first.
 _FD_VAR_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
@@ -158,7 +158,7 @@ def _seed_flow_doctor_secrets(yaml_path: str) -> None:
     """Populate the flow-doctor ``${VAR}`` secrets into ``os.environ``.
 
     flow-doctor resolves every ``${VAR}`` in its yaml from ``os.environ``
-    eagerly inside ``flow_doctor.init()``, before any consumer-site
+    eagerly inside ``FlowDoctor.from_config()``, before any consumer-site
     :func:`alpha_engine_lib.secrets.get_secret` call has had a chance to
     run. With the legacy ``ssm_secrets.load_secrets()`` bulk-load shim
     retired (PR 9g), systemd/Step-Functions-launched entrypoints have no
@@ -234,7 +234,16 @@ def _attach_flow_doctor(
         )
 
     _seed_flow_doctor_secrets(yaml_path)
-    _fd_instance = flow_doctor.init(config_path=yaml_path)
+    # flow-doctor 0.6.0 removed the deprecated ``flow_doctor.init()`` free
+    # function in favour of ``FlowDoctor.from_config()`` (identical
+    # config_path contract). Prefer from_config when present; fall back to
+    # init() on flow-doctor < 0.6 so this works across the soak window
+    # regardless of which flow-doctor the consumer has pinned. Drop the
+    # fallback once the fleet floor is flow-doctor>=0.6.0.
+    if hasattr(flow_doctor.FlowDoctor, "from_config"):
+        _fd_instance = flow_doctor.FlowDoctor.from_config(config_path=yaml_path)
+    else:
+        _fd_instance = flow_doctor.init(config_path=yaml_path)
     handler_kwargs: dict = {"level": logging.ERROR}
     if exclude_patterns:
         handler_kwargs["exclude_patterns"] = exclude_patterns

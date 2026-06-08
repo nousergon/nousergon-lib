@@ -147,14 +147,16 @@ def test_flow_doctor_enabled_happy_path(monkeypatch, tmp_path):
 
     fake_instance = mock.Mock()
     fake_module = mock.Mock()
-    fake_module.init = mock.Mock(return_value=fake_instance)
+    # flow-doctor 0.6.0+: lib prefers FlowDoctor.from_config() over the
+    # removed init() free function (see logging._attach_flow_doctor).
+    fake_module.FlowDoctor.from_config = mock.Mock(return_value=fake_instance)
     fake_module.FlowDoctorHandler = mock.Mock(return_value=logging.NullHandler())
 
     with mock.patch.dict("sys.modules", {"flow_doctor": fake_module}):
         setup_logging("test", flow_doctor_yaml=str(yaml_path))
 
     assert get_flow_doctor() is fake_instance
-    fake_module.init.assert_called_once_with(config_path=str(yaml_path))
+    fake_module.FlowDoctor.from_config.assert_called_once_with(config_path=str(yaml_path))
     # No exclude_patterns passed → kwarg must be absent so we don't
     # silently override the FlowDoctorHandler default.
     _, kwargs = fake_module.FlowDoctorHandler.call_args
@@ -347,7 +349,7 @@ def test_seed_runs_before_flow_doctor_init(
     monkeypatch, _patch_get_secret, tmp_path, _clean_fd_env
 ):
     """Integration: the seed populates os.environ *before*
-    flow_doctor.init() reads it — the whole point of the fix."""
+    FlowDoctor.from_config() reads it — the whole point of the fix."""
     monkeypatch.setenv("FLOW_DOCTOR_ENABLED", "1")
     yaml_path = tmp_path / "flow-doctor.yaml"
     yaml_path.write_text(_FD_YAML)
@@ -356,12 +358,13 @@ def test_seed_runs_before_flow_doctor_init(
 
     env_at_init: dict[str, str] = {}
 
-    def capturing_init(*, config_path):
+    def capturing_from_config(*, config_path):
         env_at_init.update({v: os.environ.get(v) for v in _FD_VARS})
         return mock.Mock()
 
     fake_module = mock.Mock()
-    fake_module.init = mock.Mock(side_effect=capturing_init)
+    # 0.6.0+ path: lib reads the yaml via FlowDoctor.from_config().
+    fake_module.FlowDoctor.from_config = mock.Mock(side_effect=capturing_from_config)
     fake_module.FlowDoctorHandler = mock.Mock(return_value=logging.NullHandler())
 
     with mock.patch.dict("sys.modules", {"flow_doctor": fake_module}):
