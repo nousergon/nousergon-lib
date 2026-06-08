@@ -741,3 +741,42 @@ class TestDecisionCaptureWriteError:
         # for the silent-loss case), without picking up unrelated
         # exceptions.
         assert issubclass(DecisionCaptureWriteError, RuntimeError)
+
+
+class TestReproducibilityProvenance:
+    """code_sha + data_snapshot_id — optional, additive, back-compat
+    (ROADMAP L4567 reproducible-replay arc)."""
+
+    def test_default_none(self):
+        art = DecisionArtifact(**_minimal_artifact_kwargs())
+        assert art.code_sha is None
+        assert art.data_snapshot_id is None
+
+    def test_fields_round_trip(self):
+        kwargs = _minimal_artifact_kwargs()
+        kwargs["code_sha"] = "abc1234"
+        kwargs["data_snapshot_id"] = "arctic:universe@v812"
+        art = DecisionArtifact(**kwargs)
+        assert art.code_sha == "abc1234"
+        assert art.data_snapshot_id == "arctic:universe@v812"
+
+    def test_legacy_artifact_without_provenance_validates(self):
+        # Pre-arc artifacts have neither key — must still validate (consumers
+        # tolerate absence). Mirrors a stored JSON missing the fields.
+        body = _minimal_artifact_kwargs()
+        body["model_metadata"] = {"model_name": "claude-haiku-4-5"}
+        body["full_prompt_context"] = {"system_prompt": "sys", "user_prompt": "user"}
+        art = DecisionArtifact.model_validate(body)
+        assert art.code_sha is None and art.data_snapshot_id is None
+
+    def test_capture_stamps_provenance_to_s3(self, mocked_s3):
+        kwargs = _minimal_capture_kwargs(
+            mocked_s3,
+            code_sha="deadbee",
+            data_snapshot_id="arctic:universe@v812",
+        )
+        s3_key = capture_decision(**kwargs)
+        obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=s3_key)
+        art = DecisionArtifact.model_validate(json.loads(obj["Body"].read()))
+        assert art.code_sha == "deadbee"
+        assert art.data_snapshot_id == "arctic:universe@v812"

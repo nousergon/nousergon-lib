@@ -179,6 +179,15 @@ class DecisionArtifact(BaseModel):
     input_data_summary: str | None = None
     input_data_truncated_at: int | None = Field(default=None, ge=0)
     agent_output: dict[str, Any]
+    # Reproducibility provenance (optional, additive). Stamp the producing
+    # code revision + the data snapshot/version the agent's inputs were
+    # built from, so a later faithful replay can re-run against the SAME
+    # code + data by construction (the SOTA reproducibility contract —
+    # MLflow/DVC-style: run = code SHA + data version). ``None`` on artifacts
+    # written before the producer populates them; consumers must tolerate
+    # absence. See ROADMAP L4567 (reproducible-replay arc).
+    code_sha: str | None = None
+    data_snapshot_id: str | None = None
 
     @model_validator(mode="after")
     def _llm_fields_paired(self) -> "DecisionArtifact":
@@ -341,6 +350,8 @@ def capture_decision(
     input_data_snapshot: dict[str, Any],
     agent_output: dict[str, Any],
     input_data_summary: str | None = None,
+    code_sha: str | None = None,
+    data_snapshot_id: str | None = None,
     s3_bucket: str = _DEFAULT_S3_BUCKET,
     s3_prefix: str = _DEFAULT_S3_PREFIX,
     s3_client: Any | None = None,
@@ -382,6 +393,12 @@ def capture_decision(
         Optional human-readable summary derived deterministically from
         the typed input model. Not load-bearing for replay; useful for
         dashboards + click-through views.
+    code_sha, data_snapshot_id
+        Optional reproducibility provenance — the producing code revision
+        and the data snapshot/version the agent's inputs were built from.
+        Stamp both so a later faithful replay re-runs against the SAME
+        code + data by construction. ``None`` when the producer hasn't
+        wired them yet; consumers must tolerate absence.
     s3_bucket, s3_prefix
         S3 location overrides. Defaults to
         ``s3://alpha-engine-research/decision_artifacts/`` per the
@@ -425,6 +442,8 @@ def capture_decision(
         input_data_summary=input_data_summary,
         input_data_truncated_at=truncated_at,
         agent_output=agent_output,
+        code_sha=code_sha,
+        data_snapshot_id=data_snapshot_id,
     )
 
     # 3. Compute S3 key + serialize.
