@@ -75,8 +75,10 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForEvaluator": "Evaluator",
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
+    "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
     # Weekday SF
     "WaitForMorningPlanner": "RunMorningPlanner",
+    "WaitForDailyNews": "RunDailyNews",  # secondary daily news pull (fail-soft)
     "WaitForTradingDayCheck": "CheckTradingDay",
     "WaitForInstanceReady": "StartExecutorEC2",
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
@@ -252,6 +254,23 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         page="20_Predictor_Training_Archive",
         artifact_label="Predictor training summary",
     ),
+    # L4544/L4571: after PredictorTraining, the model-zoo rotation trains the
+    # base champion-arch + variant(s) and runs leak-free-CPCV selection, writing
+    # predictor/model_zoo/leaderboard/{date}.json. Surfaced on the Predictor
+    # console's "Model Zoo — Weekly Selection" panel (dashboard #170).
+    "ModelZooRotation": ArchivePageRef(
+        page="7_Predictor",
+        artifact_label="Model-zoo selection leaderboard",
+    ),
+    # L4517: preventive cross-repo alpha-engine-lib pin-drift gate — runs before
+    # any spot launch (asserts backtester-pin == predictor-pin co-install parity
+    # + every Saturday-SF repo pin >= MIN_LIB_VERSION). A guard; blocks the run
+    # on drift. No per-run rendered artifact.
+    "LibPinDriftCheck": ArtifactReason(
+        reason="Cross-repo lib-pin drift gate (L4517) — asserts co-install pin "
+        "parity + the MIN_LIB_VERSION floor before any spot launch; blocks the "
+        "run on drift. No per-run rendered artifact — a preventive guard.",
+    ),
     "Backtester": ArchivePageRef(
         page="21_Backtester_Evaluator_Archive",
         artifact_label="Backtester consolidated report",
@@ -382,6 +401,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     "RunDaemon": ArchivePageRef(
         page="22_Intraday_Surveillance",
         artifact_label="Intraday surveillance (daemon)",
+    ),
+    # Secondary daily news pull for the held + tracked universe; writes
+    # data/news_aggregates_daily/ for the robodashboard morning brief + AE
+    # consumers. Runs AFTER RunDaemon (never delays trading) and is FAIL-SOFT.
+    # Substrate for a separate app (robodashboard) — no AE-console artifact.
+    "RunDailyNews": ArtifactReason(
+        reason="Secondary daily news pull → data/news_aggregates_daily/ for the "
+        "robodashboard morning brief + AE consumers; runs after RunDaemon, "
+        "fail-soft. Substrate for a separate app — no AE-console artifact.",
     ),
     # ── EOD SF (5 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
