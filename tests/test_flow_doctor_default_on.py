@@ -102,6 +102,20 @@ def test_should_activate_precedence():
         assert _flow_doctor_should_activate("x.yaml") is False
 
 
+def test_collection_time_import_suppressed_without_pytest_env(monkeypatch):
+    """Entrypoints call setup_logging at module top, which under pytest runs at
+    COLLECTION time — before the runner sets PYTEST_CURRENT_TEST. The
+    ``"pytest" in sys.modules`` check must close that gap (2026-06-11: an
+    alpha-engine-data test run leaked real alert emails + GitHub issues for
+    synthetic fixture tickers through exactly this import-time window)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    # pytest is necessarily importable-and-imported while this suite runs,
+    # so sys.modules alone must suppress the default-on path.
+    assert _flow_doctor_should_activate("x.yaml") is False
+    monkeypatch.setenv("FLOW_DOCTOR_ALLOW_IN_TESTS", "1")
+    assert _flow_doctor_should_activate("x.yaml") is True
+
+
 # --- deployed / strict posture -----------------------------------------
 
 
