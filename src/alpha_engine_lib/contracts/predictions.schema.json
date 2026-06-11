@@ -2,9 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nousergon.ai/schemas/alpha-engine/predictions.v1.json",
   "title": "Alpha Engine Predictions (Slot M contract, v1)",
-  "description": "Model-slot output contract: written each trading day by the predictor slot to predictor/predictions/{date}.json and predictions/latest.json; consumed by executor (entry gates, vetoes, sizing, optimizer), backtester (veto analysis, IC attribution), dashboard (display). v1 codifies the shape pinned by test_predictions_producer_contract.py (predictor, 2026-06-10 / L4520) plus the always-emitted veto fields, per the consumer-reliance audit of 2026-06-11 (config#638 / M0). predicted_alpha is the 21-day log-domain market-relative alpha estimate under the canonical-alpha framework (clipped to +/-0.15) — NOT the legacy 5-day arithmetic return. Evolution is ADDITIVE-ONLY: new optional fields ride at any time (additionalProperties stays true); removing or renaming a required field is a breaking change requiring a v2 schema + dual-write window.",
+  "description": "Model-slot output contract: written each trading day by the predictor slot to predictor/predictions/{date}.json and predictions/latest.json; consumed by executor (entry gates, vetoes, sizing, optimizer), backtester (veto analysis, IC attribution), dashboard (display). v1 codifies the shape pinned by test_predictions_producer_contract.py (predictor, 2026-06-10 / L4520) plus the always-emitted veto fields, per the consumer-reliance audit of 2026-06-11 (config#638 / M0). predicted_alpha is the 21-day log-domain market-relative alpha estimate under the canonical-alpha framework (clipped to +/-0.15) \u2014 NOT the legacy 5-day arithmetic return. Evolution is ADDITIVE-ONLY: new optional fields ride at any time (additionalProperties stays true); removing or renaming a required field is a breaking change requiring a v2 schema + dual-write window.",
   "type": "object",
-  "required": ["date", "model_version", "n_predictions", "predictions"],
+  "required": [
+    "date",
+    "model_version",
+    "n_predictions",
+    "predictions"
+  ],
   "properties": {
     "schema_version": {
       "type": "integer",
@@ -25,12 +30,18 @@
       "minimum": 0
     },
     "n_high_confidence": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "minimum": 0,
       "description": "Count with prediction_confidence >= veto threshold"
     },
     "model_hit_rate_30d": {
-      "type": ["number", "null"],
+      "type": [
+        "number",
+        "null"
+      ],
       "description": "30-day directional hit rate"
     },
     "timed_out": {
@@ -38,16 +49,24 @@
       "description": "Present only when inference soft-timeout fired; executor treats output as partial"
     },
     "output_distribution_gate": {
-      "type": "object",
-      "description": "Distribution-gate result block (passed/failed_check/reason/metrics); executor hold-book safeguard reads this"
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Distribution-gate result block (passed/failed_check/reason/metrics); executor hold-book safeguard reads this (null when the producing stage did not run \u2014 producer emits the key unconditionally)"
     },
     "level_neutralization": {
-      "type": "object",
-      "description": "Cross-sectional centering observe block (L4487): enabled/applied/reason/mean_removed/direction_diff"
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Cross-sectional centering observe block (L4487): enabled/applied/reason/mean_removed/direction_diff (null when the producing stage did not run \u2014 producer emits the key unconditionally)"
     },
     "predictions": {
       "type": "array",
-      "items": { "$ref": "#/$defs/prediction_entry" }
+      "items": {
+        "$ref": "#/$defs/prediction_entry"
+      }
     }
   },
   "$defs": {
@@ -69,99 +88,192 @@
         },
         "predicted_direction": {
           "type": "string",
-          "enum": ["UP", "DOWN"],
+          "enum": [
+            "UP",
+            "DOWN"
+          ],
           "description": "Binary directional call (FLAT retired with the post-2026-04-15 binary model; historical artifacts carrying FLAT are grandfathered on READ, not valid against this write-contract)"
         },
         "prediction_confidence": {
           "type": "number",
           "minimum": 0,
           "maximum": 1,
-          "description": "|p_up - 0.5| * 2 — absolute confidence, 0 = indifferent"
+          "description": "|p_up - 0.5| * 2 \u2014 absolute confidence, 0 = indifferent"
         },
         "predicted_alpha": {
           "type": "number",
           "description": "21-day log-domain market-relative alpha estimate (canonical-alpha framework), clipped to +/-0.15"
         },
         "combined_rank": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "description": "Cross-sectional rank (1 = best alpha); null only in degenerate single-name runs"
         },
         "gbm_veto": {
           "type": "boolean",
-          "description": "Predictor veto: predicted_alpha < 0 AND bottom-half rank AND confidence >= threshold; executor HARD-BLOCKS ENTER on true — load-bearing safety gate, always emitted"
+          "description": "Predictor veto: predicted_alpha < 0 AND bottom-half rank AND confidence >= threshold; executor HARD-BLOCKS ENTER on true \u2014 load-bearing safety gate, always emitted"
         },
         "momentum_veto": {
           "type": "boolean",
-          "description": "Momentum hard veto (momentum_20d below configured floor); executor entry gate — load-bearing safety gate, always emitted"
+          "description": "Momentum hard veto (momentum_20d below configured floor); executor entry gate \u2014 load-bearing safety gate, always emitted"
         },
-        "p_up": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "p_up": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
         "p_flat": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 1,
           "description": "Always 0.0 under the binary model; retained for shape stability"
         },
-        "p_down": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "p_down": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
         "predicted_alpha_raw": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Pre-centering alpha (level-neutralization observe pair)"
         },
         "predicted_alpha_centered": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Cross-sectionally centered alpha (level-neutralization observe pair)"
         },
         "predicted_alpha_std": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Posterior std from BayesianRidge L2 (B.1); executor alpha-uncertainty penalty input; null on pre-BR models"
         },
         "momentum_confirmation": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "L1 momentum model score"
         },
         "momentum_20d": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Raw 20-day return underlying momentum_veto"
         },
         "expected_move": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "L1 volatility model expected move"
         },
-        "expected_move_macro_aug": { "type": ["number", "null"] },
-        "expected_move_risk_aug": { "type": ["number", "null"] },
+        "expected_move_macro_aug": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "expected_move_risk_aug": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "meta_alpha_tb": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "Triple-barrier L2 parallel observation"
         },
         "barrier_win_prob": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 1,
           "description": "Task B meta-label P(upper barrier first); executor sizing multiplier when enabled"
         },
         "research_calibrator_prob": {
-          "type": ["number", "null"],
+          "type": [
+            "number",
+            "null"
+          ],
           "description": "P(research signal correct) from the research-score calibrator"
         },
         "stance": {
-          "type": ["string", "null"],
-          "enum": ["momentum", "value", "quality", "catalyst", null],
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "momentum",
+            "value",
+            "quality",
+            "catalyst",
+            null
+          ],
           "description": "Dominant stance label (argmax of stance_loadings)"
         },
         "stance_loadings": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "Softmax distribution over {momentum, value, quality, catalyst}"
         },
         "stance_source": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "heuristic | pillar_based"
         },
         "catalyst_date": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Next earnings date (ISO) when available; executor catalyst gate input"
         },
-        "meta_model_version": { "type": ["string", "null"] },
-        "price_data_age_days": { "type": ["integer", "null"] },
-        "watchlist_source": { "type": ["string", "null"] }
+        "meta_model_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price_data_age_days": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "watchlist_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     }
   }

@@ -167,6 +167,14 @@ class TestPredictionsContract:
             _predictions_payload(predictions=[_prediction_entry(combined_rank=None)]),
         )
 
+    def test_null_observe_blocks_tolerated(self):
+        # write_output emits these keys unconditionally, null when the stage
+        # did not run (caught live by predictor conformance, 2026-06-11)
+        contracts.validate(
+            "predictions",
+            _predictions_payload(output_distribution_gate=None, level_neutralization=None),
+        )
+
     def test_optional_modern_fields_pass(self):
         entry = _prediction_entry(
             predicted_alpha_std=0.012,
