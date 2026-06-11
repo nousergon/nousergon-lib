@@ -79,6 +79,8 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # Weekday SF
     "WaitForMorningPlanner": "RunMorningPlanner",
     "WaitForDailyNews": "RunDailyNews",  # secondary daily news pull (fail-soft)
+    "WaitForChronicGap": "ChronicGapSelfHeal",  # L4604 fail-soft heal split
+    "WaitForMorningArcticAppend": "MorningArcticAppend",  # L4608 daily_append split
     "WaitForTradingDayCheck": "CheckTradingDay",
     "WaitForInstanceReady": "StartExecutorEC2",
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
@@ -410,6 +412,18 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         reason="Secondary daily news pull → data/news_aggregates_daily/ for the "
         "robodashboard morning brief + AE consumers; runs after RunDaemon, "
         "fail-soft. Substrate for a separate app — no AE-console artifact.",
+    ),
+    "ChronicGapSelfHeal": ArtifactReason(
+        reason="Weekday fail-soft chronic-polygon-gap self-heal (L4604, data "
+        "#398): split out of MorningEnrich after the 2026-06-11 SIGKILL "
+        "incident; its Catch and Choice default both route forward to "
+        "PredictorInference so a heal hang can never fail the morning. "
+        "Substrate-only — no per-run rendered artifact.",
+    ),
+    "MorningArcticAppend": ArtifactReason(
+        reason="Weekday ArcticDB daily_append split into its own skip-gated "
+        "state (L4608, data #405) so reruns resume without re-paying the "
+        "append. Writes the ArcticDB universe library; substrate-only.",
     ),
     # ── EOD SF (5 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
