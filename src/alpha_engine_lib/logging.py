@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -293,9 +294,16 @@ def _flow_doctor_should_activate(yaml_path: Optional[str]) -> bool:
     1. ``FLOW_DOCTOR_DISABLED=1`` or ``FLOW_DOCTOR_ENABLED=0`` → off (kill switch).
     2. ``FLOW_DOCTOR_ENABLED=1`` → on. Explicit opt-in wins even under pytest —
        preserves the pre-0.58 contract (existing suites that assert activation).
-    3. Test context (``PYTEST_CURRENT_TEST`` set) → off, unless
-       ``FLOW_DOCTOR_ALLOW_IN_TESTS=1``. Guards only the NEW default-on path so a
-       consumer's suite never fires real issues/telegram by merely importing.
+    3. Test context → off, unless ``FLOW_DOCTOR_ALLOW_IN_TESTS=1``. Guards only
+       the NEW default-on path so a consumer's suite never fires real
+       issues/telegram by merely importing. Two signals, either suffices:
+       ``PYTEST_CURRENT_TEST`` (set per-test by pytest) OR ``pytest`` already
+       imported (``sys.modules``). The latter is load-bearing: entrypoints call
+       ``setup_logging`` at module top, so under pytest the handler attaches at
+       COLLECTION time — before any test runs, when PYTEST_CURRENT_TEST is not
+       yet set. 2026-06-11: an alpha-engine-data test run leaked real alert
+       emails + GitHub issues for synthetic fixture tickers through exactly
+       this import-time gap.
     4. Default (unset): on **iff** a ``flow_doctor_yaml`` was provided — passing
        a yaml IS the opt-in. This inverts the old opt-in-per-runtime default
        whose failure mode was silently-dark runtimes (predictor/backtester/
@@ -308,7 +316,10 @@ def _flow_doctor_should_activate(yaml_path: Optional[str]) -> bool:
         return False
     if enabled == "1":
         return True
-    if os.environ.get("PYTEST_CURRENT_TEST") and (
+    in_test_context = bool(os.environ.get("PYTEST_CURRENT_TEST")) or (
+        "pytest" in sys.modules
+    )
+    if in_test_context and (
         os.environ.get("FLOW_DOCTOR_ALLOW_IN_TESTS", "0") != "1"
     ):
         return False
