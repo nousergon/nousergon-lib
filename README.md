@@ -5,7 +5,7 @@
 [![Part of Nous Ergon](https://img.shields.io/badge/Part_of-Nous_Ergon-1a73e8?style=flat-square)](https://nousergon.ai)
 [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
-[![Phase 2 · Reliability](https://img.shields.io/badge/Phase_2-Reliability-e9c46a?style=flat-square)](https://github.com/cipher813/alpha-engine-docs#phase-trajectory)
+[![Phase 2 · Reliability](https://img.shields.io/badge/Phase_2-Reliability-e9c46a?style=flat-square)](https://github.com/nousergon/nousergon-docs#phase-trajectory)
 
 Shared utility library used by all 6 modules of Nous Ergon. Cross-cutting concerns only — logging, freshness checks, trading-calendar arithmetic, ArcticDB helpers, agent-decision capture, LLM cost tracking. No proprietary trading logic, no model weights, no agent prompts.
 
@@ -17,14 +17,14 @@ The lib's job is to keep the same code from being maintained six times.
 
 ```
 # requirements.txt
-alpha-engine-lib @ git+https://github.com/cipher813/alpha-engine-lib@v0.4.0
+alpha-engine-lib @ git+https://github.com/nousergon/nousergon-lib@v0.4.0
 ```
 
 Tagged releases: `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, etc. Consumers pin to a specific tag. Breaking changes bump the minor version while Alpha Engine is in pre-1.0.
 
 ```bash
 # With optional extras
-pip install "alpha-engine-lib[arcticdb] @ git+https://github.com/cipher813/alpha-engine-lib@v0.4.0"
+pip install "alpha-engine-lib[arcticdb] @ git+https://github.com/nousergon/nousergon-lib@v0.4.0"
 ```
 
 | Extra | Pulls in | When you need it |
@@ -247,17 +247,17 @@ All six Nous Ergon module repos depend on this lib:
 
 | Module | Repo | What it imports from here |
 |---|---|---|
-| Data | [`alpha-engine-data`](https://github.com/cipher813/alpha-engine-data) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar`, `rag` (ingestion), `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launchers) |
-| Research | [`alpha-engine-research`](https://github.com/cipher813/alpha-engine-research) | `logging`, `decision_capture`, `cost`, `dates`, `rag` (retrieval), `agent_schemas` (canonical LLM-output contracts) |
-| Predictor | [`alpha-engine-predictor`](https://github.com/cipher813/alpha-engine-predictor) | `logging`, `preflight`, `arcticdb`, `dates`, `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launcher) |
-| Executor | [`alpha-engine`](https://github.com/cipher813/alpha-engine) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar` |
-| Backtester | [`alpha-engine-backtester`](https://github.com/cipher813/alpha-engine-backtester) | `logging`, `preflight`, `arcticdb`, `dates`, `agent_schemas` (replay-harness Pydantic validation), `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launcher) |
-| Dashboard | [`alpha-engine-dashboard`](https://github.com/cipher813/alpha-engine-dashboard) | `logging`, `arcticdb`, `dates`, hosts the SSM-target `.venv` that `ssm_dispatcher` invokes via `python -m` |
+| Data | [`alpha-engine-data`](https://github.com/nousergon/nousergon-data) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar`, `rag` (ingestion), `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launchers) |
+| Research | [`alpha-engine-research`](https://github.com/nousergon/crucible-research) | `logging`, `decision_capture`, `cost`, `dates`, `rag` (retrieval), `agent_schemas` (canonical LLM-output contracts) |
+| Predictor | [`alpha-engine-predictor`](https://github.com/nousergon/crucible-predictor) | `logging`, `preflight`, `arcticdb`, `dates`, `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launcher) |
+| Executor | [`alpha-engine`](https://github.com/nousergon/crucible-executor) | `logging`, `preflight`, `arcticdb`, `dates`, `trading_calendar` |
+| Backtester | [`alpha-engine-backtester`](https://github.com/nousergon/crucible-backtester) | `logging`, `preflight`, `arcticdb`, `dates`, `agent_schemas` (replay-harness Pydantic validation), `ec2_spot` + `ssm_log_capture` + `ssm_dispatcher` (spot launcher) |
+| Dashboard | [`alpha-engine-dashboard`](https://github.com/nousergon/crucible-dashboard) | `logging`, `arcticdb`, `dates`, hosts the SSM-target `.venv` that `ssm_dispatcher` invokes via `python -m` |
 
 ## Development
 
 ```bash
-git clone https://github.com/cipher813/alpha-engine-lib.git
+git clone https://github.com/nousergon/nousergon-lib.git
 cd alpha-engine-lib
 pip install -e ".[dev,arcticdb,flow_doctor]"
 pytest

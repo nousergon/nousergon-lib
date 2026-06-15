@@ -399,7 +399,7 @@ def test_check_deploy_drift_passes_when_baked_matches_upstream(tmp_path):
         "alpha_engine_lib.preflight._fetch_origin_main_sha",
         return_value=sha,
     ):
-        p.check_deploy_drift("cipher813/alpha-engine-foo", sha_file=sha_file)
+        p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
 
 
 def test_check_deploy_drift_raises_on_sha_mismatch(tmp_path):
@@ -413,7 +413,7 @@ def test_check_deploy_drift_raises_on_sha_mismatch(tmp_path):
         return_value="bbbbbbbb" * 5,
     ):
         with pytest.raises(RuntimeError, match="Deploy drift"):
-            p.check_deploy_drift("cipher813/alpha-engine-foo", sha_file=sha_file)
+            p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
 
 
 def test_check_deploy_drift_warns_and_passes_when_stamp_missing(tmp_path, caplog):
@@ -424,7 +424,7 @@ def test_check_deploy_drift_warns_and_passes_when_stamp_missing(tmp_path, caplog
     ) as fetch:
         with caplog.at_level("WARNING"):
             p.check_deploy_drift(
-                "cipher813/alpha-engine-foo",
+                "nousergon/crucible-predictor",
                 sha_file=tmp_path / "does-not-exist",
             )
         fetch.assert_not_called()
@@ -441,7 +441,7 @@ def test_check_deploy_drift_warns_and_passes_on_unknown_stamp(tmp_path, caplog):
         "alpha_engine_lib.preflight._fetch_origin_main_sha",
     ) as fetch:
         with caplog.at_level("WARNING"):
-            p.check_deploy_drift("cipher813/alpha-engine-foo", sha_file=sha_file)
+            p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
         fetch.assert_not_called()
     assert any("no baked GIT_SHA" in r.message for r in caplog.records)
 
@@ -458,7 +458,7 @@ def test_check_deploy_drift_warns_and_passes_on_github_outage(tmp_path):
         return_value=None,
     ):
         # No exception expected
-        p.check_deploy_drift("cipher813/alpha-engine-foo", sha_file=sha_file)
+        p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
 
 
 # ── _fetch_origin_main_sha network-error coverage ─────────────────────────
@@ -474,7 +474,7 @@ def test_fetch_origin_main_sha_returns_none_on_url_error():
         "urllib.request.urlopen",
         side_effect=urllib.error.URLError("dns failure"),
     ):
-        assert _fetch_origin_main_sha("cipher813/alpha-engine-foo") is None
+        assert _fetch_origin_main_sha("nousergon/crucible-predictor") is None
 
 
 def test_fetch_origin_main_sha_returns_none_on_read_timeout():
@@ -489,7 +489,7 @@ def test_fetch_origin_main_sha_returns_none_on_read_timeout():
         "urllib.request.urlopen",
         side_effect=TimeoutError("The read operation timed out"),
     ):
-        assert _fetch_origin_main_sha("cipher813/alpha-engine-foo") is None
+        assert _fetch_origin_main_sha("nousergon/crucible-predictor") is None
 
 
 def test_fetch_origin_main_sha_returns_none_on_json_parse_error():
@@ -499,4 +499,4 @@ def test_fetch_origin_main_sha_returns_none_on_json_parse_error():
     fake_resp.__enter__ = mock.MagicMock(return_value=fake_resp)
     fake_resp.__exit__ = mock.MagicMock(return_value=False)
     with mock.patch("urllib.request.urlopen", return_value=fake_resp):
-        assert _fetch_origin_main_sha("cipher813/alpha-engine-foo") is None
+        assert _fetch_origin_main_sha("nousergon/crucible-predictor") is None

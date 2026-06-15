@@ -371,7 +371,7 @@ class BasePreflight:
         Hard-fail mode — when both stamps are present and differ.
 
         Args:
-            repo: ``"owner/name"`` — e.g. ``"cipher813/alpha-engine-predictor"``.
+            repo: ``"owner/name"`` — e.g. ``"nousergon/crucible-predictor"``.
             branch: Branch HEAD to compare against. Default ``"main"``.
             sha_file: Path to the GIT_SHA stamp. Defaults to
                 ``/var/task/GIT_SHA.txt`` (Lambda image convention).
@@ -426,7 +426,7 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
     Returns ``None`` on any network/parse error — the drift check treats a
     GitHub outage as "unknown, proceed with warning" rather than blocking
     the consumer. ``repo`` is ``"owner/name"`` (e.g.
-    ``"cipher813/alpha-engine-predictor"``).
+    ``"nousergon/crucible-predictor"``).
     """
     url = _GITHUB_BRANCH_URL.format(repo=repo, branch=branch)
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})

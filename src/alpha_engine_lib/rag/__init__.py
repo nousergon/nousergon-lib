@@ -10,7 +10,7 @@ Top-level imports re-export the most common surface so consumers can write
 
 Pgvector + psycopg2 are heavy dependencies; install via the ``[rag]`` extra:
 
-    pip install "alpha-engine-lib[rag] @ git+https://github.com/cipher813/alpha-engine-lib@v0.3.0"
+    pip install "alpha-engine-lib[rag] @ git+https://github.com/nousergon/nousergon-lib@v0.3.0"
 """
 
 # Auto-load .env so RAG_DATABASE_URL and VOYAGE_API_KEY are available
