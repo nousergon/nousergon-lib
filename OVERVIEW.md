@@ -1,6 +1,6 @@
 # alpha-engine-lib — Code Index
 
-> Index of submodules + key files. Companion to [README.md](README.md). System overview lives in [`alpha-engine-docs`](https://github.com/cipher813/alpha-engine-docs).
+> Index of submodules + key files. Companion to [README.md](README.md). System overview lives in [`alpha-engine-docs`](https://github.com/nousergon/nousergon-docs).
 >
 > Last reviewed: 2026-05-05
 
@@ -35,7 +35,7 @@ The lib's job is to keep the same code from being maintained six times.
 | Mechanism | Where |
 |---|---|
 | Package version | [`src/alpha_engine_lib/__init__.py`](src/alpha_engine_lib/__init__.py) (`__version__`) + [`pyproject.toml`](pyproject.toml) (`version`) — kept in sync |
-| Tagged release | `git tag v0.X.Y` at the merge SHA; consumers pin via `git+https://github.com/cipher813/alpha-engine-lib@v0.X.Y` |
+| Tagged release | `git tag v0.X.Y` at the merge SHA; consumers pin via `git+https://github.com/nousergon/nousergon-lib@v0.X.Y` |
 | Optional extras | `[arcticdb]` · `[flow_doctor]` · `[rag]` · `[dev]` — see [pyproject.toml](pyproject.toml) |
 
 ## Tests
