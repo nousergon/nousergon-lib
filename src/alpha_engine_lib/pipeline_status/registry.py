@@ -88,6 +88,7 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # the parent name is the same in both SFs.
     # EOD SF
     "WaitForPostMarketData": "PostMarketData",
+    "WaitForPostMarketArcticAppend": "PostMarketArcticAppend",  # data #... EOD append split (2026-06-16)
     "WaitForCaptureSnapshot": "CaptureSnapshot",
     "WaitForEOD": "EODReconcile",
     "WaitForDailySubstrateHealthCheck": "DailySubstrateHealthCheck",
@@ -454,10 +455,17 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "state (L4608, data #405) so reruns resume without re-paying the "
         "append. Writes the ArcticDB universe library; substrate-only.",
     ),
-    # ── EOD SF (5 substantive Task steps) ────────────────────────────────
+    # ── EOD SF (6 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
         reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
         "substrate-only — consumed by EODReconcile."
+    ),
+    "PostMarketArcticAppend": ArtifactReason(
+        reason="EOD ArcticDB daily_append split into its own state (2026-06-16) "
+        "— writes today's post-market OHLCV row + recomputed features to the "
+        "ArcticDB universe library, read next by EODReconcile + predictor "
+        "inference. Substrate-only; the slow append separated from PostMarketData "
+        "so reruns resume without re-paying it (mirrors MorningArcticAppend)."
     ),
     "CaptureSnapshot": ArchivePageRef(
         page="1_Portfolio",
