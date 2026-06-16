@@ -264,6 +264,28 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         page="7_Predictor",
         artifact_label="Model-zoo selection leaderboard",
     ),
+    # config#1083 PARALLEL fan-out (decomposes the monolithic ModelZooRotation):
+    # ResolveZooSpecs (dispatch — list the budget-N spec ids) → TrainSpecDispatch
+    # (Map: one spot per spec via spot_train.sh) → ModelZooSelect (one spot after
+    # the Map joins, runs leak-free CPCV over whatever spec-* challengers
+    # registered, writes predictor/model_zoo/leaderboard/{date}.json).
+    "ResolveZooSpecs": ArtifactReason(
+        reason="Model-zoo fan-out step 1 (config#1083): a dispatcher SSM command "
+        "that resolves the spec ids to train this rotation, emitting a JSON array "
+        "on stdout consumed by the TrainSpecDispatch Map. No per-run rendered "
+        "artifact — the leaderboard is produced downstream by ModelZooSelect.",
+    ),
+    "TrainSpecDispatch": ArtifactReason(
+        reason="Model-zoo fan-out step 2 (config#1083): per-spec training dispatch "
+        "(Map) — launches a dedicated spot per spec via spot_train.sh "
+        "--model-zoo-spec. The trained spec-* challengers register for the date; "
+        "the rendered artifact is the ModelZooSelect leaderboard, not this "
+        "dispatch step.",
+    ),
+    "ModelZooSelect": ArchivePageRef(
+        page="7_Predictor",
+        artifact_label="Model-zoo selection leaderboard",
+    ),
     # L4517: preventive cross-repo alpha-engine-lib pin-drift gate — runs before
     # any spot launch (asserts backtester-pin == predictor-pin co-install parity
     # + every Saturday-SF repo pin >= MIN_LIB_VERSION). A guard; blocks the run
@@ -346,6 +368,13 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "email IS the surface). Salvage-at-join semantics preserved: "
         "the branch still terminates via BranchBFailed Pass and the SF "
         "fails at CheckBranchOutcomes."
+    ),
+    "PublishModelZooFailureImmediate": ArtifactReason(
+        reason="SNS failure alert fired when the model-zoo rotation fails/times-out "
+        "(config#1083). Required for fallback safety: PredictorTraining exports "
+        "PREDICTOR_DEFER_TRAINING_EMAIL=1, so the base champion-arch retrain still "
+        "serves while the zoo arc is degraded. No persisted artifact (the email IS "
+        "the surface)."
     ),
     # ── Weekday SF (13 substantive Task steps) ───────────────────────────
     "DeployDriftCheck": ArchivePageRef(
