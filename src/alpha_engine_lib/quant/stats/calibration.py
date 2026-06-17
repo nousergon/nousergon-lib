@@ -154,7 +154,9 @@ def expected_calibration_error(
         weighted_gap += abs(mean_pred - hit_rate) * n_bin
         used_n += n_bin
 
-    ece = round(weighted_gap / used_n, 4) if used_n > 0 else None
+    # Headline ECE is returned UNROUNDED — it's a primitive; callers round for
+    # display/artifacts. (Per-bin mean_pred/hit_rate are rounded for readability.)
+    ece = (weighted_gap / used_n) if used_n > 0 else None
 
     return {
         "status": "ok",
