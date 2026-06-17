@@ -1,0 +1,68 @@
+name: Notify CI failure
+
+# Reusable (workflow_call) fleet primitive: send ONE operator alert when a
+# consumer repo's CI fails. Consumers gate the call on
+# `failure() && github.ref == 'refs/heads/main'` so the alert fires only on
+# genuine post-merge breakage of the default branch — PR-branch CI churn
+# (mid-fix commits, cross-repo lib-tag merge-order races) stays silent.
+#
+# Origin: 2026-06-17 — the built-in GitHub Actions failure email fires on
+# every red run regardless of whether the next run goes green, so transient
+# PR-branch reds (e.g. a consumer pinning a lib tag the auto-tag job hasn't
+# created yet) were generating noise indistinguishable from real breakage.
+# GitHub has no "only if it stays red" / "only the default branch" knob, so
+# we turn the built-in email OFF and route the real signal here.
+#
+# Transport reuses the canonical `alpha_engine_lib.alerts` primitive
+# (SNS + Telegram fan-out). This workflow runs Telegram-ONLY (`--no-sns`):
+# Telegram needs no AWS creds in the runner (ALPHA_ENGINE_SECRETS_SOURCE=env
+# forces env-only secret resolution), and keeps the alert in the deliberate
+# @nous_ergon_alerts_bot operator channel rather than the email firehose.
+#
+# No `--dedup-key`: the alerts dedup marker lives in S3 (needs AWS creds,
+# which the Telegram-only path deliberately avoids). Default-branch CI
+# failures are infrequent, and a flapping `main` is a signal worth repeating
+# until it's fixed — so every gated failure alerts.
+
+on:
+  workflow_call:
+    inputs:
+      lib_ref:
+        description: "nousergon-lib git ref to install the alerts CLI from."
+        required: false
+        type: string
+        default: "v0.59.8"
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_CHAT_ID:
+        required: true
+
+jobs:
+  notify:
+    name: telegram alert
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install alerts CLI (base lib, no extras)
+        run: pip install "alpha-engine-lib @ git+https://github.com/nousergon/nousergon-lib@${{ inputs.lib_ref }}"
+
+      - name: Publish Telegram alert
+        env:
+          # Force env-only secret resolution — no SSM round-trip / AWS creds.
+          ALPHA_ENGINE_SECRETS_SOURCE: env
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python -m alpha_engine_lib.alerts publish \
+            --no-sns \
+            --severity error \
+            --source "ci:${{ github.repository }}@${{ github.ref_name }}" \
+            --message "🔴 CI RED on main — ${{ github.repository }} @ ${{ github.sha }}
+          Workflow: ${{ github.workflow }}
+          Run: ${RUN_URL}"
