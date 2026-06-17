@@ -1,5 +1,5 @@
 """
-Unit tests for :mod:`alpha_engine_lib.phase_registry` — the phase-execution
+Unit tests for :mod:`nousergon_lib.phase_registry` — the phase-execution
 framework lifted from alpha-engine-backtester (L4528).
 
 Covers the outcome taxonomy, the marker read/write contract, the should_run
@@ -15,7 +15,7 @@ import json
 import pytest
 from botocore.exceptions import ClientError
 
-from alpha_engine_lib.phase_registry import (
+from nousergon_lib.phase_registry import (
     PhaseContext,
     PhaseOutcome,
     PhaseRegistry,
@@ -221,7 +221,7 @@ def test_record_artifact_rejects_empty():
 
 
 def test_hard_cap_trips_watchdog_and_raises_timeout(s3):
-    from alpha_engine_lib.phase_registry import PhaseTimeoutError
+    from nousergon_lib.phase_registry import PhaseTimeoutError
     r = _reg(s3, hard_caps={"slow": 0.05})
     with pytest.raises(PhaseTimeoutError):
         with r.phase("slow", supports_auto_skip=True):
@@ -236,7 +236,7 @@ def test_hard_cap_trips_watchdog_and_raises_timeout(s3):
 
 def test_simple_phase_logs_start_end(caplog):
     import logging
-    with caplog.at_level(logging.INFO, logger="alpha_engine_lib.phase"):
+    with caplog.at_level(logging.INFO, logger="nousergon_lib.phase"):
         with phase("ingest", rows=10):
             pass
     msgs = [r.getMessage() for r in caplog.records]

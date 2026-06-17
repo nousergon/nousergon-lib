@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.telegram``.
+Unit tests for ``nousergon_lib.telegram``.
 
 Locks down the Telegram-send contract: secret resolution, markdown escape,
 ``disable_notification`` flag propagation, fire-and-forget failure handling
@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from alpha_engine_lib import telegram as tg
-from alpha_engine_lib.secrets import clear_cache
+from nousergon_lib import telegram as tg
+from nousergon_lib.secrets import clear_cache
 
 
 @pytest.fixture(autouse=True)

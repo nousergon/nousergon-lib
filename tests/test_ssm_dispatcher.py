@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.ssm_dispatcher``.
+Unit tests for ``nousergon_lib.ssm_dispatcher``.
 
 Pins the institutional-chokepoint contract that the three alpha-engine
 dispatcher scripts (alpha-engine-predictor ``spot_train.sh``,
@@ -35,7 +35,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from alpha_engine_lib import ssm_dispatcher
+from nousergon_lib import ssm_dispatcher
 
 
 class _FakeClientError(Exception):
@@ -647,7 +647,7 @@ class TestCli:
 
 
 class TestModuleEntrypoint:
-    """The module is invokable as ``python -m alpha_engine_lib.ssm_dispatcher``."""
+    """The module is invokable as ``python -m nousergon_lib.ssm_dispatcher``."""
 
     def test_module_exposes_main(self):
         assert callable(ssm_dispatcher.main)
@@ -702,7 +702,7 @@ class TestShipDiagnostics:
     """``_ship_diagnostics`` writes the failure-record JSON to S3.
 
     Failure-mode posture matches the sibling
-    ``alpha_engine_lib.ssm_log_capture._ship_log_to_s3``: never raises,
+    ``nousergon_lib.ssm_log_capture._ship_log_to_s3``: never raises,
     returns ``(ok, detail)``. The inner SSM exit code must always be
     preserved regardless of S3 outcome."""
 

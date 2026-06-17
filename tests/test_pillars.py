@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 class TestPillarVocabulary:
     def test_pillars_tuple_has_canonical_six(self):
-        from alpha_engine_lib.pillars import PILLARS
+        from nousergon_lib.pillars import PILLARS
 
         assert PILLARS == (
             "quality",
@@ -37,12 +37,12 @@ class TestPillarVocabulary:
         """``PillarLiteral`` and ``PILLARS`` must enumerate the same values
         in the same order. If one changes, the other must change in
         lockstep."""
-        from alpha_engine_lib.pillars import PILLARS, PillarLiteral
+        from nousergon_lib.pillars import PILLARS, PillarLiteral
 
         assert get_args(PillarLiteral) == PILLARS
 
     def test_moat_types_include_all_six_archetypes_plus_none(self):
-        from alpha_engine_lib.pillars import MoatType
+        from nousergon_lib.pillars import MoatType
 
         assert set(get_args(MoatType)) == {
             "network_effects",
@@ -60,7 +60,7 @@ class TestPillarVocabulary:
 
 class TestMoatAssessment:
     def test_accepts_typical_wide_moat_payload(self):
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         moat = MoatAssessment(
             primary_type="process_power",
@@ -79,7 +79,7 @@ class TestMoatAssessment:
 
     def test_accepts_no_moat_default(self):
         """The honest default — most stocks have no identifiable moat."""
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         moat = MoatAssessment(
             primary_type="none",
@@ -92,7 +92,7 @@ class TestMoatAssessment:
         assert moat.evidence == []
 
     def test_durability_upper_bound_50_years(self):
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         with pytest.raises(ValidationError):
             MoatAssessment(
@@ -103,7 +103,7 @@ class TestMoatAssessment:
             )
 
     def test_durability_lower_bound_zero(self):
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         with pytest.raises(ValidationError):
             MoatAssessment(
@@ -116,7 +116,7 @@ class TestMoatAssessment:
     def test_primary_must_not_appear_in_secondary(self):
         """LLM failure mode: agents sometimes restate primary in secondary
         for emphasis."""
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         with pytest.raises(ValidationError, match="primary_type"):
             MoatAssessment(
@@ -128,7 +128,7 @@ class TestMoatAssessment:
             )
 
     def test_secondary_types_must_be_unique(self):
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         with pytest.raises(ValidationError, match="unique"):
             MoatAssessment(
@@ -142,7 +142,7 @@ class TestMoatAssessment:
     def test_evidence_strings_trimmed_and_empties_dropped(self):
         """LLM occasionally emits trailing whitespace + empty strings from
         format-token confusion."""
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         moat = MoatAssessment(
             primary_type="efficient_scale",
@@ -154,7 +154,7 @@ class TestMoatAssessment:
         assert moat.evidence == ["regional landfill network", "permit moat"]
 
     def test_extra_fields_allowed_for_forward_compat(self):
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         moat = MoatAssessment(
             primary_type="intangibles",
@@ -173,7 +173,7 @@ class TestPillarSubscore:
     def test_accepts_typical_qual_only_emission(self):
         """At LLM emission time, only qual fields are populated; quant
         component arrives later from the composite scoring layer."""
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         sub = PillarSubscore(
             pillar="quality",
@@ -188,7 +188,7 @@ class TestPillarSubscore:
         assert sub.qual_component == 82
 
     def test_accepts_blended_emission_with_both_components(self):
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         sub = PillarSubscore(
             pillar="momentum",
@@ -201,7 +201,7 @@ class TestPillarSubscore:
         assert sub.qual_component == 64
 
     def test_score_range_enforced(self):
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         with pytest.raises(ValidationError):
             PillarSubscore(pillar="value", score=150, confidence="medium")
@@ -210,7 +210,7 @@ class TestPillarSubscore:
             PillarSubscore(pillar="value", score=-5, confidence="medium")
 
     def test_qual_component_range_enforced(self):
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         with pytest.raises(ValidationError):
             PillarSubscore(
@@ -221,7 +221,7 @@ class TestPillarSubscore:
             )
 
     def test_confidence_literal_enforced(self):
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         with pytest.raises(ValidationError):
             PillarSubscore(
@@ -231,7 +231,7 @@ class TestPillarSubscore:
             )
 
     def test_pillar_literal_enforced(self):
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         with pytest.raises(ValidationError):
             PillarSubscore(
@@ -241,7 +241,7 @@ class TestPillarSubscore:
             )
 
     def test_evidence_strings_trimmed(self):
-        from alpha_engine_lib.pillars import PillarSubscore
+        from nousergon_lib.pillars import PillarSubscore
 
         sub = PillarSubscore(
             pillar="stewardship",
@@ -256,7 +256,7 @@ class TestPillarSubscore:
 
 
 def _make_subscore(pillar, score=70, confidence="medium"):
-    from alpha_engine_lib.pillars import PillarSubscore
+    from nousergon_lib.pillars import PillarSubscore
 
     return PillarSubscore(pillar=pillar, score=score, confidence=confidence)
 
@@ -267,7 +267,7 @@ def _make_full_assessment(**overrides):
     Tests override individual fields via kwargs. The default payload is the
     "moderately attractive across the board" stock — score 70 on every
     pillar, narrow moat, zero catalyst modulation."""
-    from alpha_engine_lib.pillars import (
+    from nousergon_lib.pillars import (
         MoatAssessment,
         QualitativePillarAssessment,
     )
@@ -303,7 +303,7 @@ class TestQualitativePillarAssessment:
             "defensiveness",
         }
         # Iteration order matches PILLARS canonical ordering
-        from alpha_engine_lib.pillars import PILLARS
+        from nousergon_lib.pillars import PILLARS
 
         assert tuple(subscores.keys()) == PILLARS
 
@@ -312,7 +312,7 @@ class TestQualitativePillarAssessment:
         assert assessment.catalyst_horizon_modulation == 0
 
     def test_catalyst_horizon_modulation_bounds(self):
-        from alpha_engine_lib.pillars import QualitativePillarAssessment
+        from nousergon_lib.pillars import QualitativePillarAssessment
 
         with pytest.raises(ValidationError):
             _make_full_assessment(catalyst_horizon_modulation=25)
@@ -369,7 +369,7 @@ class TestQualitativePillarAssessment:
     def test_quality_moat_embedded(self):
         """The Quality pillar's qualitative core — moat — is embedded as a
         first-class field, not buried in evidence strings."""
-        from alpha_engine_lib.pillars import MoatAssessment
+        from nousergon_lib.pillars import MoatAssessment
 
         assessment = _make_full_assessment(
             quality_moat=MoatAssessment(
@@ -386,7 +386,7 @@ class TestQualitativePillarAssessment:
         assert assessment.quality_moat.trend == "widening"
 
     def test_missing_required_pillar_rejected(self):
-        from alpha_engine_lib.pillars import (
+        from nousergon_lib.pillars import (
             MoatAssessment,
             QualitativePillarAssessment,
         )
@@ -425,7 +425,7 @@ def _make_pillar_contribution(pillar: str, weight: float = 0.0,
                               alpha: float = 0.5):
     """Helper — build a PillarContribution with the within-pillar blend
     pre-computed. Defaults model the Phase 4 default (pillar_weight=0)."""
-    from alpha_engine_lib.pillars import PillarContribution
+    from nousergon_lib.pillars import PillarContribution
 
     if qual is None and quant is None:
         blended = None
@@ -453,7 +453,7 @@ def _make_pillar_contribution(pillar: str, weight: float = 0.0,
 
 def _make_legacy_blend(quant=70.0, qual=75.0, factor=65.0,
                       w_quant=0.35, w_qual=0.35, w_factor=0.30):
-    from alpha_engine_lib.pillars import LegacyComponentBlend
+    from nousergon_lib.pillars import LegacyComponentBlend
 
     contribution = (
         w_quant * (quant or 0.0)
@@ -476,7 +476,7 @@ def _make_breakdown(pillar_contributions=None, legacy_blend=None,
     """Helper — build a CompositeBreakdown defaulting to Phase 4 cutover
     state: 6 pillar contributions with pillar_weight=0 + legacy_blend
     carrying all the weight."""
-    from alpha_engine_lib.pillars import CompositeBreakdown, PILLARS
+    from nousergon_lib.pillars import CompositeBreakdown, PILLARS
 
     if pillar_contributions is None:
         pillar_contributions = [
@@ -537,7 +537,7 @@ class TestPillarContribution:
         assert c.contribution == 13.0  # 0.2 × 65
 
     def test_alpha_clamped_0_to_1(self):
-        from alpha_engine_lib.pillars import PillarContribution
+        from nousergon_lib.pillars import PillarContribution
 
         with pytest.raises(ValidationError):
             PillarContribution(
@@ -551,7 +551,7 @@ class TestPillarContribution:
             )
 
     def test_pillar_weight_clamped_0_to_1(self):
-        from alpha_engine_lib.pillars import PillarContribution
+        from nousergon_lib.pillars import PillarContribution
 
         with pytest.raises(ValidationError):
             PillarContribution(
@@ -577,7 +577,7 @@ class TestLegacyComponentBlend:
         assert blend.contribution == pytest.approx(expected)
 
     def test_individual_weights_clamped_0_to_1(self):
-        from alpha_engine_lib.pillars import LegacyComponentBlend
+        from nousergon_lib.pillars import LegacyComponentBlend
 
         with pytest.raises(ValidationError):
             LegacyComponentBlend(
@@ -630,7 +630,7 @@ class TestCompositeBreakdown:
 
     def test_weights_sum_invariant_enforced(self):
         """Σ pillar_weights + Σ legacy_weights must equal 1.0 within 1e-6."""
-        from alpha_engine_lib.pillars import (
+        from nousergon_lib.pillars import (
             CompositeBreakdown, PillarContribution, PILLARS
         )
 
@@ -662,7 +662,7 @@ class TestCompositeBreakdown:
     def test_weights_sum_invariant_passes_with_ramped_pillars(self):
         """Phase 6 ramps pillars up + legacy down. As long as totals stay
         at 1.0 the invariant accepts it."""
-        from alpha_engine_lib.pillars import PILLARS
+        from nousergon_lib.pillars import PILLARS
 
         # Pillars ramp to 0.5 total (e.g. 0.083 each); legacy ramps to 0.5
         # (e.g. 0.175 / 0.175 / 0.150).
@@ -679,7 +679,7 @@ class TestCompositeBreakdown:
         assert breakdown.final_score is not None
 
     def test_catalyst_modulation_clamped_to_plus_minus_20(self):
-        from alpha_engine_lib.pillars import CompositeBreakdown
+        from nousergon_lib.pillars import CompositeBreakdown
 
         with pytest.raises(ValidationError):
             CompositeBreakdown(
@@ -696,7 +696,7 @@ class TestCompositeBreakdown:
     def test_pillar_contributions_by_name_returns_canonical_order(self):
         """When all 6 pillars present, by-name lookup returns canonical
         PILLARS ordering."""
-        from alpha_engine_lib.pillars import PILLARS
+        from nousergon_lib.pillars import PILLARS
 
         breakdown = _make_breakdown()
         by_name = breakdown.pillar_contributions_by_name()
@@ -716,7 +716,7 @@ class TestCompositeBreakdown:
 
     def test_score_failed_path_emits_none_final_score(self):
         """All input components None → score_failed=True, final_score=None."""
-        from alpha_engine_lib.pillars import CompositeBreakdown
+        from nousergon_lib.pillars import CompositeBreakdown
 
         breakdown = CompositeBreakdown(
             final_score=None,
@@ -733,7 +733,7 @@ class TestCompositeBreakdown:
 
     def test_extra_fields_allowed_for_forward_compat(self):
         breakdown = _make_breakdown()
-        from alpha_engine_lib.pillars import CompositeBreakdown
+        from nousergon_lib.pillars import CompositeBreakdown
         # Add an extra field; permissive ConfigDict should accept it.
         payload = breakdown.model_dump()
         payload["future_field"] = "ok"

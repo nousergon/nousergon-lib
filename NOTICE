@@ -1,0 +1,18 @@
+NOTICE — Licensing boundary
+
+Copyright (C) 2026 Brian McMahon. Sole copyright holder.
+
+This package was renamed from `alpha-engine-lib` (import `alpha_engine_lib`)
+to `nousergon-lib` (import `nousergon_lib`) at version 0.60.0. The deprecated
+`alpha_engine_lib` import alias is retained as a compatibility shim and will be
+removed in a future major release.
+
+Versions up to and including 0.59.8 were published under the MIT License and
+remain available under those terms. All subsequent versions (0.60.0 onward) are
+licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only)
+— see LICENSE.
+
+Commercial licenses are available — contact brian@nousergon.ai.
+
+External contributions require Developer Certificate of Origin sign-off and
+are accepted under the MIT inbound license (see CONTRIBUTING.md).

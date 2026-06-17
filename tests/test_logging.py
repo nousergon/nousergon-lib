@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from alpha_engine_lib.logging import (
+from nousergon_lib.logging import (
     JSONFormatter,
     SecretsRedactingFilter,
     _seed_flow_doctor_secrets,
@@ -24,7 +24,7 @@ def _reset_root_logger():
     yield
     logging.getLogger().handlers.clear()
     # Reset the module-level singleton so tests don't bleed state.
-    import alpha_engine_lib.logging as m
+    import nousergon_lib.logging as m
     m._fd_instance = None
 
 
@@ -233,7 +233,7 @@ def _clean_fd_env():
     direct ``os.environ[var] = ...`` write by the seed can't leak.
     Also resets the secrets per-process cache + SSM-unavailable latch
     so a real get_secret call in a sibling test can't bleed in."""
-    import alpha_engine_lib.secrets as _secrets
+    import nousergon_lib.secrets as _secrets
 
     _secrets.clear_cache()
     saved = {k: os.environ.pop(k, None) for k in _FD_VARS}
@@ -250,16 +250,16 @@ def _clean_fd_env():
 def _patch_get_secret(monkeypatch):
     """Patch ``get_secret`` on the *imported* secrets module object.
 
-    The seed helper resolves it via ``from alpha_engine_lib.secrets
+    The seed helper resolves it via ``from nousergon_lib.secrets
     import get_secret`` at call time. A string-path
-    ``monkeypatch.setattr("alpha_engine_lib.secrets.get_secret", …)``
+    ``monkeypatch.setattr("nousergon_lib.secrets.get_secret", …)``
     can resolve a *different* module object than the one in
     ``sys.modules`` (installed copy vs. ``PYTHONPATH=src`` worktree),
     so the patch silently misses and the real SSM-backed get_secret
     runs. Patching the already-imported module object is identity-safe
     — see ``feedback_monkeypatch_over_unittest_mock_patch_in_research``.
     """
-    import alpha_engine_lib.secrets as _secrets
+    import nousergon_lib.secrets as _secrets
 
     def _apply(fn):
         monkeypatch.setattr(_secrets, "get_secret", fn)

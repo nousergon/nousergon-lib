@@ -1,8 +1,8 @@
-"""Tests for alpha_engine_lib/quant/risk_measures.py (VaR / CVaR estimators)."""
+"""Tests for nousergon_lib/quant/risk_measures.py (VaR / CVaR estimators)."""
 
 import pytest
 
-from alpha_engine_lib.quant import risk_measures as rm
+from nousergon_lib.quant import risk_measures as rm
 
 
 class TestNormPpf:

@@ -1,8 +1,8 @@
-"""Pin ``alpha_engine_lib.__version__`` to ``pyproject.toml::version``.
+"""Pin ``nousergon_lib.__version__`` to ``pyproject.toml::version``.
 
 Doc-string drift: 2026-05-08 we shipped v0.5.6 by bumping
 ``pyproject.toml::version`` 0.5.5 → 0.5.6 but forgot to bump
-``src/alpha_engine_lib/__init__.py::__version__``. The wheel built
+``src/nousergon_lib/__init__.py::__version__``. The wheel built
 from v0.5.6 had package metadata 0.5.6 but the runtime
 ``__version__`` string lagged at 0.5.5 — confusing for any consumer
 that reads the runtime attribute (operator scripts, dashboards,
@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import alpha_engine_lib
+import nousergon_lib
 
 
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
@@ -46,11 +46,11 @@ def test_init_version_matches_pyproject():
 
     If you're updating this test to a new version, you almost
     certainly want to bump BOTH ``pyproject.toml`` and
-    ``src/alpha_engine_lib/__init__.py`` in the same commit. Search
+    ``src/nousergon_lib/__init__.py`` in the same commit. Search
     for ``__version__`` and ``version =`` to find them.
     """
-    assert alpha_engine_lib.__version__ == _pyproject_version(), (
-        f"alpha_engine_lib.__version__={alpha_engine_lib.__version__!r} "
+    assert nousergon_lib.__version__ == _pyproject_version(), (
+        f"nousergon_lib.__version__={nousergon_lib.__version__!r} "
         f"!= pyproject.toml::version={_pyproject_version()!r} — bump both "
         f"in lockstep or this test fails. Doc-string drift cause was a "
         f"pyproject-only bump on 2026-05-08 (v0.5.6) that left __init__.py "

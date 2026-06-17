@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib/quant/returns.py — XIRR, TWR, cumulative, annualize."""
+"""Tests for nousergon_lib/quant/returns.py — XIRR, TWR, cumulative, annualize."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from alpha_engine_lib.quant.returns import (
+from nousergon_lib.quant.returns import (
     CashFlow,
     ValuationPoint,
     annualize,

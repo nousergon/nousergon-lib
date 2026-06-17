@@ -24,7 +24,7 @@ np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
 
-from alpha_engine_lib.quant.stats.regime_sortino import (
+from nousergon_lib.quant.stats.regime_sortino import (
     DEFAULT_MIN_PICKS_PER_STRATUM,
     SUPPORTED_HORIZONS,
     StratumMetrics,

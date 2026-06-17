@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.secrets``.
+Unit tests for ``nousergon_lib.secrets``.
 
 Locks down the resolution-order contract: cache priority, source-toggle
 behavior (env / ssm / auto), SSM-unavailable latching, and the required /
@@ -15,8 +15,8 @@ import pytest
 from botocore.exceptions import EndpointConnectionError
 from moto import mock_aws
 
-from alpha_engine_lib import secrets as secrets_mod
-from alpha_engine_lib.secrets import (
+from nousergon_lib import secrets as secrets_mod
+from nousergon_lib.secrets import (
     SOURCE_TOGGLE_ENV,
     SSM_PREFIX,
     SecretNotFoundError,

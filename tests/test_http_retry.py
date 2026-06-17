@@ -1,4 +1,4 @@
-"""Tests for ``alpha_engine_lib.http_retry`` — the consolidated transient
+"""Tests for ``nousergon_lib.http_retry`` — the consolidated transient
 external-API retry primitive (L4499)."""
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from alpha_engine_lib import http_retry
-from alpha_engine_lib.http_retry import (
+from nousergon_lib import http_retry
+from nousergon_lib.http_retry import (
     HttpRetryError,
     backoff_delay,
     request_with_retry,

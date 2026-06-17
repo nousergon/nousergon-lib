@@ -1,5 +1,5 @@
 """
-Unit tests for :mod:`alpha_engine_lib.locks`.
+Unit tests for :mod:`nousergon_lib.locks`.
 
 Pins the producer-side writer-lock contract:
 
@@ -27,8 +27,8 @@ from unittest.mock import MagicMock
 import pytest
 from botocore.exceptions import ClientError
 
-from alpha_engine_lib import locks
-from alpha_engine_lib.locks import (
+from nousergon_lib import locks
+from nousergon_lib.locks import (
     DEFAULT_BUCKET,
     DEFAULT_LOCK_KEY,
     LockHeldByAnotherWriterError,
@@ -296,7 +296,7 @@ class TestBestEffortRelease:
 
         fake_s3.delete_object.side_effect = _raise_on_delete
 
-        with caplog.at_level(logging.WARNING, logger="alpha_engine_lib.locks"):
+        with caplog.at_level(logging.WARNING, logger="nousergon_lib.locks"):
             with universe_writer_lock(
                 writer_id="test", s3_client=fake_s3
             ):

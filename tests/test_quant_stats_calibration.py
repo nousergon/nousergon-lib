@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.quant.stats.calibration.
+"""Tests for nousergon_lib.quant.stats.calibration.
 
 Pins:
   1. Perfectly calibrated probabilities → ECE ≈ 0.
@@ -16,7 +16,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from alpha_engine_lib.quant.stats.calibration import expected_calibration_error
+from nousergon_lib.quant.stats.calibration import expected_calibration_error
 
 
 class TestCoreECE:

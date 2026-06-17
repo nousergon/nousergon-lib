@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.quant.stats.dsr — PSR + DSR.
+"""Tests for nousergon_lib.quant.stats.dsr — PSR + DSR.
 
 Pins:
   1. PSR(0) on a clearly-positive Sharpe series → > 0.95.
@@ -19,7 +19,7 @@ import pytest
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
-from alpha_engine_lib.quant.stats.dsr import compute_dsr, compute_psr
+from nousergon_lib.quant.stats.dsr import compute_dsr, compute_psr
 
 
 def _build_series(daily_mean: float, daily_std: float, n: int = 252, seed: int = 42):

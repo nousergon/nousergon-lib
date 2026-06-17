@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib/quant/factor_risk.py — statistical factor risk model."""
+"""Tests for nousergon_lib/quant/factor_risk.py — statistical factor risk model."""
 
 import math
 
@@ -8,7 +8,7 @@ import pytest
 # whole module cleanly when a dev installs only [dev] without it.
 np = pytest.importorskip("numpy")
 
-from alpha_engine_lib.quant.factor_risk import (  # noqa: E402  (after importorskip guard)
+from nousergon_lib.quant.factor_risk import (  # noqa: E402  (after importorskip guard)
     benchmark_exposure,
     estimate_factor_model,
     ledoit_wolf_cov,

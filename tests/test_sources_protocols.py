@@ -1,4 +1,4 @@
-"""Tests for ``alpha_engine_lib.sources`` shapes + Protocols (v0.15.0).
+"""Tests for ``nousergon_lib.sources`` shapes + Protocols (v0.15.0).
 
 Wave 1 PR α of the institutional data revamp (see
 ``alpha-engine-docs/private/data-revamp-260513.md``). Lib defines the
@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from alpha_engine_lib.sources import (
+from nousergon_lib.sources import (
     AnalystSnapshot,
     AnalystSource,
     FilingDocument,
@@ -213,17 +213,17 @@ def test_lib_version_bumped_to_0_15_0():
     Asserts >= so future version bumps don't break this gate while
     still catching accidental version regressions below 0.15.0."""
     from packaging.version import Version
-    import alpha_engine_lib
-    assert Version(alpha_engine_lib.__version__) >= Version("0.15.0")
+    import nousergon_lib
+    assert Version(nousergon_lib.__version__) >= Version("0.15.0")
 
 
 # ── Re-exports from package init ──────────────────────────────────────
 
 
 def test_all_shapes_and_protocols_reexported_at_package_root():
-    """Consumers should import from ``alpha_engine_lib.sources``, not
-    ``alpha_engine_lib.sources.protocols``."""
-    from alpha_engine_lib.sources import (  # noqa: F401
+    """Consumers should import from ``nousergon_lib.sources``, not
+    ``nousergon_lib.sources.protocols``."""
+    from nousergon_lib.sources import (  # noqa: F401
         AnalystSnapshot,
         AnalystSource,
         FilingDocument,

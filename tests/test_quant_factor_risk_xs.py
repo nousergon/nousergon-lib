@@ -20,7 +20,7 @@ np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 pytest.importorskip("sklearn")
 
-from alpha_engine_lib.quant.factor_risk_xs import (  # noqa: E402  (after importorskip guard)
+from nousergon_lib.quant.factor_risk_xs import (  # noqa: E402  (after importorskip guard)
     build_factor_returns_series,
     build_factor_risk_model,
     cross_sectional_factor_returns,
@@ -32,7 +32,7 @@ from alpha_engine_lib.quant.factor_risk_xs import (  # noqa: E402  (after import
 def test_ledoit_wolf_branch_uses_shared_numpy_impl():
     """LV1-AE.a consolidation contract: estimate_factor_covariance's ledoit_wolf
     path is the shared numpy quant.factor_risk.ledoit_wolf_cov (one LW impl)."""
-    from alpha_engine_lib.quant.factor_risk import ledoit_wolf_cov
+    from nousergon_lib.quant.factor_risk import ledoit_wolf_cov
 
     rng = np.random.RandomState(0)
     panel = pd.DataFrame(rng.normal(0, 0.01, (200, 4)), columns=["market", "MOM", "VAL", "QUAL"])

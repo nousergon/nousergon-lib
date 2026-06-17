@@ -1,4 +1,4 @@
-"""Tests for ``alpha_engine_lib.eval_artifacts``.
+"""Tests for ``nousergon_lib.eval_artifacts``.
 
 Validates the canonical eval-style artifact partition convention:
 - ``new_eval_run_id`` returns a YYMMDDHHMM string from a UTC moment
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.eval_artifacts import (
     EVAL_LATEST_FILENAME,
     eval_artifact_key,
     eval_latest_key,
@@ -165,7 +165,7 @@ import io as _io
 import json as _json
 from unittest.mock import MagicMock as _MagicMock
 
-from alpha_engine_lib.eval_artifacts import (
+from nousergon_lib.eval_artifacts import (
     list_eval_artifacts,
     load_latest_eval_artifact,
 )

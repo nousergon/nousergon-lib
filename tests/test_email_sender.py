@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.email_sender``.
+Unit tests for ``nousergon_lib.email_sender``.
 
 Locks the email-send contract: secret resolution + argument override,
 recipient parsing, Gmail-SMTP primary vs SES fallback selection, html
@@ -13,8 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib import email_sender as es
-from alpha_engine_lib.secrets import clear_cache
+from nousergon_lib import email_sender as es
+from nousergon_lib.secrets import clear_cache
 
 
 @pytest.fixture(autouse=True)

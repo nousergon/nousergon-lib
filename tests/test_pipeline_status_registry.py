@@ -1,4 +1,4 @@
-"""Unit tests for ``alpha_engine_lib.pipeline_status.registry``.
+"""Unit tests for ``nousergon_lib.pipeline_status.registry``.
 
 Pins the substantive-state filter + state→archive-page registry against
 the SF JSON contract. The downstream-repo CI test (planned for the
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from alpha_engine_lib.pipeline_status import registry
+from nousergon_lib.pipeline_status import registry
 
 
 def test_state_to_archive_page_entries_are_non_empty():

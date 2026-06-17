@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib.rag.retrieval import (
+from nousergon_lib.rag.retrieval import (
     RetrievalResult,
     _blend,
     _minmax_normalize,
@@ -190,24 +190,24 @@ class TestRetrieveDispatch:
         # PR 2 keeps default = "vector" so existing callers (qual_tools.py)
         # see no behavior change. PR 3 explicitly opts qual_tools into
         # method="hybrid".
-        with patch("alpha_engine_lib.rag.retrieval._vector_search") as v_mock, \
-             patch("alpha_engine_lib.rag.retrieval._keyword_search") as k_mock:
+        with patch("nousergon_lib.rag.retrieval._vector_search") as v_mock, \
+             patch("nousergon_lib.rag.retrieval._keyword_search") as k_mock:
             v_mock.return_value = []
             retrieve("query")
         v_mock.assert_called_once()
         k_mock.assert_not_called()
 
     def test_keyword_method_dispatches_to_keyword_only(self) -> None:
-        with patch("alpha_engine_lib.rag.retrieval._vector_search") as v_mock, \
-             patch("alpha_engine_lib.rag.retrieval._keyword_search") as k_mock:
+        with patch("nousergon_lib.rag.retrieval._vector_search") as v_mock, \
+             patch("nousergon_lib.rag.retrieval._keyword_search") as k_mock:
             k_mock.return_value = []
             retrieve("query", method="keyword")
         v_mock.assert_not_called()
         k_mock.assert_called_once()
 
     def test_hybrid_method_calls_both_paths_then_blend(self) -> None:
-        with patch("alpha_engine_lib.rag.retrieval._vector_search") as v_mock, \
-             patch("alpha_engine_lib.rag.retrieval._keyword_search") as k_mock:
+        with patch("nousergon_lib.rag.retrieval._vector_search") as v_mock, \
+             patch("nousergon_lib.rag.retrieval._keyword_search") as k_mock:
             v_mock.return_value = [_result("a", vec=0.9)]
             k_mock.return_value = [_result("a", kw=0.8)]
             out = retrieve("query", method="hybrid", vector_weight=0.7)
@@ -243,9 +243,9 @@ class TestSQLShape:
         conn_cm.__enter__ = lambda self: MagicMock(cursor=fake_cursor)
         conn_cm.__exit__ = lambda self, *a: None
 
-        with patch("alpha_engine_lib.rag.retrieval.embed_query", create=True), \
-             patch("alpha_engine_lib.rag.embeddings.embed_query", return_value=[0.1] * 512), \
-             patch("alpha_engine_lib.rag.db.get_connection", return_value=conn_cm):
+        with patch("nousergon_lib.rag.retrieval.embed_query", create=True), \
+             patch("nousergon_lib.rag.embeddings.embed_query", return_value=[0.1] * 512), \
+             patch("nousergon_lib.rag.db.get_connection", return_value=conn_cm):
             retrieve("query", method="vector", top_k=5)
 
         assert "<=>" in captured["sql"], "vector path must use pgvector <=> cosine operator"
@@ -270,7 +270,7 @@ class TestSQLShape:
         conn_cm.__enter__ = lambda self: MagicMock(cursor=fake_cursor)
         conn_cm.__exit__ = lambda self, *a: None
 
-        with patch("alpha_engine_lib.rag.db.get_connection", return_value=conn_cm):
+        with patch("nousergon_lib.rag.db.get_connection", return_value=conn_cm):
             retrieve("research and development", method="keyword", top_k=5)
 
         # Score fragment + GIN-friendly @@ predicate + 'english' config.

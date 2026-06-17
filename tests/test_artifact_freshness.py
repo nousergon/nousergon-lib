@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.artifact_freshness``.
+Unit tests for ``nousergon_lib.artifact_freshness``.
 
 Pins the substrate contract for the artifact-freshness monitor arc
 (plan doc: ``~/Development/alpha-engine-docs/private/artifact-freshness-monitor-260527.md``).
@@ -37,7 +37,7 @@ from unittest import mock
 
 import pytest
 
-from alpha_engine_lib.artifact_freshness import (
+from nousergon_lib.artifact_freshness import (
     ArtifactSpec,
     CADENCE_SYMBOLS,
     CheckResult,

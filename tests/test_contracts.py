@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.contracts — slot boundary schemas + conformance kit (M0).
+"""Tests for nousergon_lib.contracts — slot boundary schemas + conformance kit (M0).
 
 Fixtures are SYNTHETIC minimal-conforming payloads (never live artifacts — the
 lib repo is public; thesis text / live scores stay out of it).
@@ -11,8 +11,8 @@ import pytest
 
 jsonschema = pytest.importorskip("jsonschema")
 
-from alpha_engine_lib import contracts
-from alpha_engine_lib.contracts import ContractViolation
+from nousergon_lib import contracts
+from nousergon_lib.contracts import ContractViolation
 
 
 def _signal_entry(**overrides):
@@ -209,7 +209,7 @@ class TestConformanceKitApi:
 
 class TestCli:
     def test_cli_ok_and_fail(self, tmp_path, capsys):
-        from alpha_engine_lib.contracts.__main__ import main
+        from nousergon_lib.contracts.__main__ import main
 
         good = tmp_path / "good.json"
         good.write_text(json.dumps(_predictions_payload()))

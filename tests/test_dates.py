@@ -1,11 +1,11 @@
-"""Tests for alpha_engine_lib.dates — dual-tracking date convention."""
+"""Tests for nousergon_lib.dates — dual-tracking date convention."""
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from alpha_engine_lib.dates import DualDate, now_dual, session_for_timestamp
+from nousergon_lib.dates import DualDate, now_dual, session_for_timestamp
 
 
 _NYSE = ZoneInfo("America/New_York")
@@ -171,7 +171,7 @@ class TestNowDualMatchesSessionForTimestamp:
 
 from datetime import date as _date  # noqa: E402
 
-from alpha_engine_lib.dates import (  # noqa: E402
+from nousergon_lib.dates import (  # noqa: E402
     expected_last_close,
     is_fresh_in_trading_days,
     trading_days_stale,

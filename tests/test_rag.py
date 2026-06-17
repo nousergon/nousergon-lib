@@ -16,7 +16,7 @@ import pytest
 
 def test_top_level_imports_resolve():
     """All advertised re-exports should be importable from the top level."""
-    from alpha_engine_lib.rag import (
+    from nousergon_lib.rag import (
         get_connection,
         is_available,
         embed_texts,
@@ -39,9 +39,9 @@ def test_top_level_imports_resolve():
 
 
 def test_submodules_importable():
-    """Each submodule of alpha_engine_lib.rag should import cleanly."""
+    """Each submodule of nousergon_lib.rag should import cleanly."""
     for sub in ("db", "embeddings", "retrieval"):
-        mod = importlib.import_module(f"alpha_engine_lib.rag.{sub}")
+        mod = importlib.import_module(f"nousergon_lib.rag.{sub}")
         assert mod is not None
 
 
@@ -49,9 +49,9 @@ def test_schema_sql_packaged():
     """schema.sql ships as package data so consumers can locate it."""
     import importlib.resources as ir
 
-    files = ir.files("alpha_engine_lib.rag")
+    files = ir.files("nousergon_lib.rag")
     schema_path = files / "schema.sql"
-    assert schema_path.is_file(), "schema.sql should be packaged with alpha_engine_lib.rag"
+    assert schema_path.is_file(), "schema.sql should be packaged with nousergon_lib.rag"
 
     content = schema_path.read_text()
     assert "CREATE" in content.upper(), "schema.sql should contain DDL"
@@ -66,7 +66,7 @@ def test_schema_sql_declares_hybrid_retrieval_surface():
     """
     import importlib.resources as ir
 
-    schema = (ir.files("alpha_engine_lib.rag") / "schema.sql").read_text()
+    schema = (ir.files("nousergon_lib.rag") / "schema.sql").read_text()
     assert "content_tsv" in schema, (
         "schema.sql missing content_tsv generated column for hybrid retrieval"
     )
@@ -90,7 +90,7 @@ def test_migration_0001_packaged_and_idempotent():
     """
     import importlib.resources as ir
 
-    files = ir.files("alpha_engine_lib.rag")
+    files = ir.files("nousergon_lib.rag")
     migration = files / "migrations" / "0001_content_tsv.sql"
     assert migration.is_file(), (
         "migrations/0001_content_tsv.sql should ship as package data "
@@ -109,7 +109,7 @@ def test_migration_0001_packaged_and_idempotent():
 
 def test_is_available_safe_when_db_unreachable(monkeypatch):
     """is_available() must never raise — it's a probe, not an assertion."""
-    from alpha_engine_lib.rag import is_available
+    from nousergon_lib.rag import is_available
 
     # Force RAG_DATABASE_URL to a guaranteed-unreachable target. The probe
     # should swallow the connection error and return False.
@@ -122,7 +122,7 @@ def test_no_bare_rag_imports_in_lib():
     """Inside the lib, every `rag.*` import must be relative or fully qualified.
 
     The v0.3.0 RAG consolidation moved code from consumer-side `rag/` packages
-    into `alpha_engine_lib.rag`, but four deferred imports inside retrieval.py
+    into `nousergon_lib.rag`, but four deferred imports inside retrieval.py
     were left as bare `from rag.X import ...`. They worked when called from a
     consumer that had its own top-level `rag/` package on sys.path, but blew
     up on the spot orchestrator (alpha-engine-data) where the package was
@@ -134,7 +134,7 @@ def test_no_bare_rag_imports_in_lib():
     import importlib.resources as ir
 
     pattern = re.compile(r"^\s*(from|import)\s+rag\.", re.MULTILINE)
-    rag_files = ir.files("alpha_engine_lib.rag")
+    rag_files = ir.files("nousergon_lib.rag")
     offenders: list[str] = []
     for entry in rag_files.iterdir():
         if entry.name.endswith(".py"):

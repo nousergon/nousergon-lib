@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.quant.stats.information_coefficient.
+"""Tests for nousergon_lib.quant.stats.information_coefficient.
 
 Pins:
   1. Perfect rank correlation → IC = 1.0 (exact).
@@ -17,7 +17,7 @@ np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 pytest.importorskip("scipy")
 
-from alpha_engine_lib.quant.stats.information_coefficient import compute_ic, compute_ic_by_bucket
+from nousergon_lib.quant.stats.information_coefficient import compute_ic, compute_ic_by_bucket
 
 
 class TestCoreIC:

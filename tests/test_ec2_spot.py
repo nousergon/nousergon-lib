@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.ec2_spot``.
+Unit tests for ``nousergon_lib.ec2_spot``.
 
 Pins the capacity-resilience contract that the 3 spot launchers will
 rely on after the 2026-05-22 lift from inline-bash-run-instances to
@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib import ec2_spot
+from nousergon_lib import ec2_spot
 
 
 def _capacity_error(code: str = "InsufficientInstanceCapacity"):

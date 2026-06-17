@@ -1,4 +1,4 @@
-"""Tests for :mod:`alpha_engine_lib.collector_results`.
+"""Tests for :mod:`nousergon_lib.collector_results`.
 
 Validates the helper that surfaces collector-style error dicts to Flow
 Doctor's ERROR-level logging handler. The shape under test is the
@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from alpha_engine_lib.collector_results import report_collector_errors
+from nousergon_lib.collector_results import report_collector_errors
 
 
 def test_logs_one_error_per_error_status_entry(caplog: pytest.LogCaptureFixture):

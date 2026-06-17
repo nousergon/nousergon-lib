@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.anthropic_payload``.
+Unit tests for ``nousergon_lib.anthropic_payload``.
 
 Pins the institutional-chokepoint contract for raw-Anthropic-SDK
 payload construction. Surfaced as a lib lift after the 2026-05-26
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from alpha_engine_lib.anthropic_payload import (
+from nousergon_lib.anthropic_payload import (
     DEFAULT_WEB_SEARCH_MAX_USES,
     SERVER_TOOL_PREFIXES,
     PayloadInvariantError,
