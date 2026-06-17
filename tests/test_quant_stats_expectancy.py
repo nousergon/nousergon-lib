@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.quant.stats.expectancy.
+"""Tests for nousergon_lib.quant.stats.expectancy.
 
 Pins:
   1. expectancy = hit_rate * avg_win - (1-hit_rate) * avg_loss on hand fixtures.
@@ -16,7 +16,7 @@ import pytest
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
-from alpha_engine_lib.quant.stats.expectancy import compute_expectancy, compute_expectancy_by_group
+from nousergon_lib.quant.stats.expectancy import compute_expectancy, compute_expectancy_by_group
 
 
 class TestCoreExpectancy:

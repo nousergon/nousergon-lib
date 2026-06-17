@@ -1,4 +1,4 @@
-"""Unit tests for ``alpha_engine_lib.pipeline_status.read``.
+"""Unit tests for ``nousergon_lib.pipeline_status.read``.
 
 Mocks the boto3 ``stepfunctions`` client and exercises every documented
 code path:
@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from alpha_engine_lib.pipeline_status import (
+from nousergon_lib.pipeline_status import (
     PipelineExecutionSummary,
     PipelineRun,
     RunStatus,
@@ -34,7 +34,7 @@ from alpha_engine_lib.pipeline_status import (
     list_recent_pipeline_runs,
     read_pipeline_state,
 )
-from alpha_engine_lib.pipeline_status.read import (
+from nousergon_lib.pipeline_status.read import (
     PipelineStatusError,
     _extract_pipeline_role,
     _failure_cause_from,
@@ -42,7 +42,7 @@ from alpha_engine_lib.pipeline_status.read import (
     _parse_ts,
     _region_from_arn,
 )
-from alpha_engine_lib.pipeline_status.registry import (
+from nousergon_lib.pipeline_status.registry import (
     ArchivePageRef,
     ArtifactReason,
 )

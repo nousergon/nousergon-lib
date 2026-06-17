@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.quant.stats.risk_matched_benchmark.
+"""Tests for nousergon_lib.quant.stats.risk_matched_benchmark.
 
 Pins:
   1. EW-high-vol benchmark selects top-quartile by trailing vol.
@@ -19,7 +19,7 @@ import pytest
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
 
-from alpha_engine_lib.quant.stats.risk_matched_benchmark import (
+from nousergon_lib.quant.stats.risk_matched_benchmark import (
     compute_alpha_vs_benchmark,
     construct_beta_matched_spy_benchmark,
     construct_ew_high_vol_benchmark,

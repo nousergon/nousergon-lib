@@ -1,10 +1,10 @@
-"""Tests for alpha_engine_lib.reconcile — the data-migration parity gate."""
+"""Tests for nousergon_lib.reconcile — the data-migration parity gate."""
 
 from __future__ import annotations
 
 import pytest
 
-from alpha_engine_lib.reconcile import reconcile_frame_dicts
+from nousergon_lib.reconcile import reconcile_frame_dicts
 
 
 def _frames(pd):

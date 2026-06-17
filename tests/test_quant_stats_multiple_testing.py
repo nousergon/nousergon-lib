@@ -1,8 +1,8 @@
-"""Tests for alpha_engine_lib.quant.stats.multiple_testing — Benjamini-Hochberg FDR."""
+"""Tests for nousergon_lib.quant.stats.multiple_testing — Benjamini-Hochberg FDR."""
 
 from __future__ import annotations
 
-from alpha_engine_lib.quant.stats.multiple_testing import benjamini_hochberg
+from nousergon_lib.quant.stats.multiple_testing import benjamini_hochberg
 
 
 def test_empty_returns_empty():

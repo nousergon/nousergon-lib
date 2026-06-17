@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alpha-engine-lib"
-version = "0.59.8"
-description = "Shared utilities for the Alpha Engine modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
+name = "nousergon-lib"
+version = "0.60.0"
+description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
 # 3.9 support 2026-04-29, so upgrade is on the near-term roadmap). All
@@ -13,7 +13,7 @@ readme = "README.md"
 # PEP 604 union syntax (``str | None``) is deferred and works on 3.9.
 requires-python = ">=3.9"
 authors = [{ name = "Brian McMahon" }]
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 dependencies = [
     "boto3>=1.34",
     "pydantic>=2.0",
@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
-# Quantitative portfolio analytics (alpha_engine_lib.quant). Only the
+# Quantitative portfolio analytics (nousergon_lib.quant). Only the
 # factor-risk module needs numpy; the VaR/CVaR, riskstats, returns, and
 # attribution modules are pure stdlib and import without this extra.
 quant = ["numpy>=1.24"]
@@ -39,7 +39,7 @@ quant = ["numpy>=1.24"]
 # separate from [quant] so the numpy-only consumers (e.g. robodashboard)
 # don't pull pandas+sklearn.
 quant-xs = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.0"]
-# Statistical evaluation utilities (alpha_engine_lib.quant.stats — PSR/DSR, IC,
+# Statistical evaluation utilities (nousergon_lib.quant.stats — PSR/DSR, IC,
 # expectancy, BH-FDR, risk-matched benchmarks). numpy + pandas always; scipy is
 # used by information_coefficient for the p-value (numpy fallback otherwise).
 quant-stats = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.7"]
@@ -73,9 +73,9 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"alpha_engine_lib" = ["transparency_inventory.yaml", "model_pricing.yaml"]
-"alpha_engine_lib.contracts" = ["*.schema.json"]
-"alpha_engine_lib.rag" = ["schema.sql", "migrations/*.sql"]
+"nousergon_lib" = ["transparency_inventory.yaml", "model_pricing.yaml"]
+"nousergon_lib.contracts" = ["*.schema.json"]
+"nousergon_lib.rag" = ["schema.sql", "migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

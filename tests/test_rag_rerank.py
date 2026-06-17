@@ -1,4 +1,4 @@
-"""Tests for the RAG rerank primitive (alpha-engine-lib v0.11.0+).
+"""Tests for the RAG rerank primitive (nousergon-lib v0.11.0+).
 
 Covers:
 
@@ -25,13 +25,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib.rag.rerank import (
+from nousergon_lib.rag.rerank import (
     CrossEncoderReranker,
     RerankCache,
     _RERANKER_REGISTRY,
     get_reranker,
 )
-from alpha_engine_lib.rag.retrieval import RetrievalResult, retrieve
+from nousergon_lib.rag.retrieval import RetrievalResult, retrieve
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -176,7 +176,7 @@ class TestCrossEncoderReranker:
     def test_missing_sentence_transformers_raises_with_hint(self) -> None:
         reranker = CrossEncoderReranker()
         with patch.dict("sys.modules", {"sentence_transformers": None}):
-            with pytest.raises(ImportError, match=r"alpha-engine-lib\[rerank\]"):
+            with pytest.raises(ImportError, match=r"nousergon-lib\[rerank\]"):
                 reranker._ensure_model()
 
 
@@ -200,7 +200,7 @@ class _ScriptedReranker:
 
 class TestRetrieveWithRerank:
     def test_rerank_none_preserves_legacy_behavior(self) -> None:
-        with patch("alpha_engine_lib.rag.retrieval._vector_search") as mock_vec:
+        with patch("nousergon_lib.rag.retrieval._vector_search") as mock_vec:
             mock_vec.return_value = [_make_result("a", "1")]
             results = retrieve("q", top_k=1, method="vector")
             mock_vec.assert_called_once_with("q", None, None, None, 1)
@@ -210,7 +210,7 @@ class TestRetrieveWithRerank:
         # Build 10 candidates from the underlying retriever; rerank reverses + truncates to 3.
         candidates = [_make_result(f"doc-{i}", f"id-{i}", similarity=0.1 * i) for i in range(10)]
         _RERANKER_REGISTRY["scripted"] = _ScriptedReranker()
-        with patch("alpha_engine_lib.rag.retrieval._vector_search") as mock_vec:
+        with patch("nousergon_lib.rag.retrieval._vector_search") as mock_vec:
             mock_vec.return_value = candidates
             results = retrieve(
                 "q", top_k=3, method="vector",
@@ -227,7 +227,7 @@ class TestRetrieveWithRerank:
             retrieve("q", top_k=10, method="vector", rerank="cross_encoder", rerank_input_n=5)
 
     def test_unknown_reranker_raises(self) -> None:
-        with patch("alpha_engine_lib.rag.retrieval._vector_search") as mock_vec:
+        with patch("nousergon_lib.rag.retrieval._vector_search") as mock_vec:
             mock_vec.return_value = [_make_result("a", "1")]
             with pytest.raises(ValueError, match="Unknown reranker"):
                 retrieve("q", top_k=1, method="vector", rerank="bogus", rerank_input_n=1)

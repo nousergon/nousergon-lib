@@ -1,4 +1,4 @@
-"""Tests for ``alpha_engine_lib.universe`` — canonical universe-filter
+"""Tests for ``nousergon_lib.universe`` — canonical universe-filter
 primitive shared by alpha-engine-research and alpha-engine.
 """
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from alpha_engine_lib.universe import filter_to_universe, in_universe
+from nousergon_lib.universe import filter_to_universe, in_universe
 
 
 SP500_FIXTURE = frozenset({"AAPL", "MSFT", "GOOGL", "JPM", "XOM"})

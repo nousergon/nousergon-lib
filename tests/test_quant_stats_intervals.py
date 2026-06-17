@@ -1,11 +1,11 @@
-"""Tests for alpha_engine_lib.quant.stats.intervals — bootstrap CI, Newey-West SE, Wilson."""
+"""Tests for nousergon_lib.quant.stats.intervals — bootstrap CI, Newey-West SE, Wilson."""
 
 import math
 
 import numpy as np
 import pytest
 
-from alpha_engine_lib.quant.stats.intervals import (
+from nousergon_lib.quant.stats.intervals import (
     bootstrap_ci,
     newey_west_se,
     wilson_score_interval,

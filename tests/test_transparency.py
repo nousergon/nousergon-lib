@@ -12,8 +12,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from alpha_engine_lib import transparency
-from alpha_engine_lib.transparency import (
+from nousergon_lib import transparency
+from nousergon_lib.transparency import (
     CheckResult,
     INVENTORY_PATH,
     check_inventory,
@@ -128,7 +128,7 @@ def test_every_row_has_required_fields():
 def test_inventory_yaml_is_packaged():
     """The YAML must live next to the module so the wheel ships it."""
     assert INVENTORY_PATH.is_file()
-    assert INVENTORY_PATH.parent.name == "alpha_engine_lib"
+    assert INVENTORY_PATH.parent.name == "nousergon_lib"
 
 
 def test_data_quality_row_matches_actual_parquet_columns():
@@ -1037,7 +1037,7 @@ def test_row_non_fatal_degrades_on_source_failure():
 
 
 def test_format_report_separates_degraded_from_actions():
-    from alpha_engine_lib.transparency import CheckResult, format_report
+    from nousergon_lib.transparency import CheckResult, format_report
     results = [
         CheckResult("ok_row", "daily", "ok", "fine", "2026-01-01"),
         CheckResult("bad_row", "daily", "fail", "broke", "2026-01-01"),

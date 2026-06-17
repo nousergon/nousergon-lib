@@ -1,9 +1,9 @@
-"""Unit tests for alpha_engine_lib.trading_calendar."""
+"""Unit tests for nousergon_lib.trading_calendar."""
 from datetime import date
 
 import pytest
 
-from alpha_engine_lib.trading_calendar import (
+from nousergon_lib.trading_calendar import (
     NYSE_HOLIDAYS,
     add_trading_days,
     count_trading_days,

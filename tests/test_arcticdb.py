@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib.arcticdb helpers.
+"""Tests for nousergon_lib.arcticdb helpers.
 
 These tests cover URI construction + error-wrapping shapes using
 stubs — they don't require arcticdb to be installed.
@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from alpha_engine_lib import arcticdb as ae_arctic
+from nousergon_lib import arcticdb as ae_arctic
 
 
 # ── URI construction ────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ def test_import_helper_raises_runtimeerror_when_arcticdb_missing(monkeypatch):
 
     monkeypatch.setattr("builtins.__import__", fake_import)
 
-    with pytest.raises(RuntimeError, match="alpha-engine-lib\\[arcticdb\\]"):
+    with pytest.raises(RuntimeError, match="nousergon-lib\\[arcticdb\\]"):
         ae_arctic._import_arcticdb()
 
 

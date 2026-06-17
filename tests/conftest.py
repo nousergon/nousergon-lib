@@ -1,4 +1,4 @@
-"""Shared test fixtures for ``alpha_engine_lib``.
+"""Shared test fixtures for ``nousergon_lib``.
 
 ``publish`` (``alerts.py``) gained a ``PYTEST_CURRENT_TEST`` guard that
 short-circuits real SNS / Telegram fan-out from inside any test process

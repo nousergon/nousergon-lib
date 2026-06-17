@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 
-from alpha_engine_lib.preflight import BasePreflight
+from nousergon_lib.preflight import BasePreflight
 
 
 class _Concrete(BasePreflight):
@@ -396,7 +396,7 @@ def test_check_deploy_drift_passes_when_baked_matches_upstream(tmp_path):
 
     p = _Concrete("bkt")
     with mock.patch(
-        "alpha_engine_lib.preflight._fetch_origin_main_sha",
+        "nousergon_lib.preflight._fetch_origin_main_sha",
         return_value=sha,
     ):
         p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
@@ -409,7 +409,7 @@ def test_check_deploy_drift_raises_on_sha_mismatch(tmp_path):
 
     p = _Concrete("bkt")
     with mock.patch(
-        "alpha_engine_lib.preflight._fetch_origin_main_sha",
+        "nousergon_lib.preflight._fetch_origin_main_sha",
         return_value="bbbbbbbb" * 5,
     ):
         with pytest.raises(RuntimeError, match="Deploy drift"):
@@ -420,7 +420,7 @@ def test_check_deploy_drift_warns_and_passes_when_stamp_missing(tmp_path, caplog
     """No GIT_SHA stamp file (legacy build) → warn-and-pass, no GitHub call."""
     p = _Concrete("bkt")
     with mock.patch(
-        "alpha_engine_lib.preflight._fetch_origin_main_sha",
+        "nousergon_lib.preflight._fetch_origin_main_sha",
     ) as fetch:
         with caplog.at_level("WARNING"):
             p.check_deploy_drift(
@@ -438,7 +438,7 @@ def test_check_deploy_drift_warns_and_passes_on_unknown_stamp(tmp_path, caplog):
 
     p = _Concrete("bkt")
     with mock.patch(
-        "alpha_engine_lib.preflight._fetch_origin_main_sha",
+        "nousergon_lib.preflight._fetch_origin_main_sha",
     ) as fetch:
         with caplog.at_level("WARNING"):
             p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
@@ -454,7 +454,7 @@ def test_check_deploy_drift_warns_and_passes_on_github_outage(tmp_path):
 
     p = _Concrete("bkt")
     with mock.patch(
-        "alpha_engine_lib.preflight._fetch_origin_main_sha",
+        "nousergon_lib.preflight._fetch_origin_main_sha",
         return_value=None,
     ):
         # No exception expected
@@ -469,7 +469,7 @@ def test_check_deploy_drift_warns_and_passes_on_github_outage(tmp_path):
 
 def test_fetch_origin_main_sha_returns_none_on_url_error():
     import urllib.error
-    from alpha_engine_lib.preflight import _fetch_origin_main_sha
+    from nousergon_lib.preflight import _fetch_origin_main_sha
     with mock.patch(
         "urllib.request.urlopen",
         side_effect=urllib.error.URLError("dns failure"),
@@ -484,7 +484,7 @@ def test_fetch_origin_main_sha_returns_none_on_read_timeout():
     only listed URLError/HTTPError. The helper is documented as
     warn-and-continue on any GitHub-side error, so this must degrade
     gracefully too."""
-    from alpha_engine_lib.preflight import _fetch_origin_main_sha
+    from nousergon_lib.preflight import _fetch_origin_main_sha
     with mock.patch(
         "urllib.request.urlopen",
         side_effect=TimeoutError("The read operation timed out"),
@@ -493,7 +493,7 @@ def test_fetch_origin_main_sha_returns_none_on_read_timeout():
 
 
 def test_fetch_origin_main_sha_returns_none_on_json_parse_error():
-    from alpha_engine_lib.preflight import _fetch_origin_main_sha
+    from nousergon_lib.preflight import _fetch_origin_main_sha
     fake_resp = mock.MagicMock()
     fake_resp.read.return_value = b"not valid json{{{"
     fake_resp.__enter__ = mock.MagicMock(return_value=fake_resp)

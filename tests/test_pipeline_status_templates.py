@@ -1,4 +1,4 @@
-"""Unit tests for ``alpha_engine_lib.pipeline_status.templates``.
+"""Unit tests for ``nousergon_lib.pipeline_status.templates``.
 
 These functions render the same email-body strings that the SF JSON
 ``States.Format`` templates will produce after Phase 3. They exist so
@@ -10,7 +10,7 @@ downstream in the alpha-engine-data Phase 3 PR.
 
 from __future__ import annotations
 
-from alpha_engine_lib.pipeline_status import templates
+from nousergon_lib.pipeline_status import templates
 
 
 # ── format_success_message ────────────────────────────────────────────────

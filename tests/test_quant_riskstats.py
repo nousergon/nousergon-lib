@@ -1,4 +1,4 @@
-"""Tests for alpha_engine_lib/quant/riskstats.py — volatility, Sharpe, Sortino, drawdown."""
+"""Tests for nousergon_lib/quant/riskstats.py — volatility, Sharpe, Sortino, drawdown."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from alpha_engine_lib.quant.riskstats import max_drawdown, sharpe_ratio, sortino_ratio, volatility
+from nousergon_lib.quant.riskstats import max_drawdown, sharpe_ratio, sortino_ratio, volatility
 
 
 class TestVolatility:

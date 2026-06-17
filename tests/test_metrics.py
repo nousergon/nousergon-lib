@@ -1,11 +1,11 @@
-"""Tests for alpha_engine_lib.metrics — MetricRecord contract + status derivation."""
+"""Tests for nousergon_lib.metrics — MetricRecord contract + status derivation."""
 
 from datetime import datetime, timezone
 
 import pytest
 from pydantic import ValidationError
 
-from alpha_engine_lib.metrics import (
+from nousergon_lib.metrics import (
     MetricRecord,
     derive_letter,
     derive_status,

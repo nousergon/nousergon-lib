@@ -1,5 +1,5 @@
 """
-Round-trip + truncation tests for ``alpha_engine_lib.decision_capture``.
+Round-trip + truncation tests for ``nousergon_lib.decision_capture``.
 
 Schema is the cross-cutting contract every captured agent decision must
 satisfy. These tests lock down: extra-field rejection at the artifact level,
@@ -19,7 +19,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from alpha_engine_lib.decision_capture import (
+from nousergon_lib.decision_capture import (
     DecisionArtifact,
     DecisionCaptureWriteError,
     FullPromptContext,

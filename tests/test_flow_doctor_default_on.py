@@ -12,8 +12,8 @@ from unittest import mock
 
 import pytest
 
-import alpha_engine_lib.logging as m
-from alpha_engine_lib.logging import (
+import nousergon_lib.logging as m
+from nousergon_lib.logging import (
     _flow_doctor_should_activate,
     _is_deployed,
     get_flow_doctor,

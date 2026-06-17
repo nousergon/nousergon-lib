@@ -1,10 +1,10 @@
-# alpha-engine-lib
+# nousergon-lib
 
 > Part of [**Nous Ergon**](https://nousergon.ai) — a harness for rigorous AI/ML experiments in finance: an equity research-and-trading system instrumented end-to-end. Repo and S3 names use the underlying project name `alpha-engine`.
 
 [![Part of Nous Ergon](https://img.shields.io/badge/Part_of-Nous_Ergon-1a73e8?style=flat-square)](https://nousergon.ai)
 [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPL_3.0--only-blue?style=flat-square)](LICENSE)
 [![Phase 2 · Reliability](https://img.shields.io/badge/Phase_2-Reliability-e9c46a?style=flat-square)](https://github.com/nousergon/nousergon-docs#phase-trajectory)
 
 Shared utility library used by all 6 modules of Nous Ergon. Cross-cutting concerns only — logging, freshness checks, trading-calendar arithmetic, ArcticDB helpers, agent-decision capture, LLM cost tracking. No proprietary trading logic, no model weights, no agent prompts.
@@ -17,14 +17,14 @@ The lib's job is to keep the same code from being maintained six times.
 
 ```
 # requirements.txt
-alpha-engine-lib @ git+https://github.com/nousergon/nousergon-lib@v0.4.0
+nousergon-lib @ git+https://github.com/nousergon/nousergon-lib@v0.4.0
 ```
 
 Tagged releases: `v0.1.0`, `v0.2.0`, `v0.3.0`, `v0.4.0`, etc. Consumers pin to a specific tag. Breaking changes bump the minor version while Alpha Engine is in pre-1.0.
 
 ```bash
 # With optional extras
-pip install "alpha-engine-lib[arcticdb] @ git+https://github.com/nousergon/nousergon-lib@v0.4.0"
+pip install "nousergon-lib[arcticdb] @ git+https://github.com/nousergon/nousergon-lib@v0.4.0"
 ```
 
 | Extra | Pulls in | When you need it |
@@ -41,7 +41,7 @@ pip install "alpha-engine-lib[arcticdb] @ git+https://github.com/nousergon/nouse
 Replaces the near-identical `log_config.py` copies that used to live in alpha-engine-data and alpha-engine-executor. Consumers call `setup_logging` once at process startup:
 
 ```python
-from alpha_engine_lib.logging import setup_logging
+from nousergon_lib.logging import setup_logging
 
 setup_logging("data-collector", flow_doctor_yaml="/path/to/flow-doctor.yaml")
 ```
@@ -55,7 +55,7 @@ setup_logging("data-collector", flow_doctor_yaml="/path/to/flow-doctor.yaml")
 Runs at the top of every entrypoint, before any real work starts. Primitives live on `BasePreflight`; each consumer subclasses and overrides `run()`:
 
 ```python
-from alpha_engine_lib.preflight import BasePreflight
+from nousergon_lib.preflight import BasePreflight
 
 class DataPreflight(BasePreflight):
     def __init__(self, bucket, mode):
@@ -91,10 +91,10 @@ The lib-side piece of the artifact-freshness-monitor arc closing the silent abse
 
 ```python
 from datetime import datetime, date, timezone
-from alpha_engine_lib.artifact_freshness import (
+from nousergon_lib.artifact_freshness import (
     ArtifactSpec, check_freshness, resolve_dedup_key,
 )
-from alpha_engine_lib.alerts import publish
+from nousergon_lib.alerts import publish
 
 spec = ArtifactSpec(
     artifact_id="backtest_pit_parity",
@@ -117,7 +117,7 @@ if result.state in ("missing", "stale", "probe_failed"):
 
 Pure function — `check_freshness(s3_client, spec, now)` returns a `CheckResult` with no side effects beyond the injected `s3_client.head_object`. NYSE-holiday-aware (Memorial Day Monday weekday-SF cron returns `state="fresh"` with a holiday reason). Recovery-substitution-aware (canonical 404 + recovery-key fresh ⇒ `state="fresh"` with `recovery_substituted=True`). Grace-period gate for newly-onboarded specs (default 2 cycles).
 
-The freshness-monitor Lambda (`alpha-engine-data/lambdas/freshness_monitor/`, ships in a follow-up PR) walks the `alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml` SoT, calls this substrate per row, and routes via `alpha_engine_lib.alerts.publish` with the resolved dedup key.
+The freshness-monitor Lambda (`alpha-engine-data/lambdas/freshness_monitor/`, ships in a follow-up PR) walks the `alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml` SoT, calls this substrate per row, and routes via `nousergon_lib.alerts.publish` with the resolved dedup key.
 
 ### `decision_capture` — agent decision audit logger
 
@@ -132,7 +132,7 @@ Token-aware cost computation following Anthropic's prompt-caching semantics (cac
 Shared contract surface for the 14 LLM-output classes used in `with_structured_output(...)` calls across the research pipeline (sector quant + qual + peer review, macro economist + critic, held-stock thesis update, CIO, eval-judge rubric). Lives here so downstream tooling — replay harness in alpha-engine-backtester, future cheap-model-concordance signals — can validate against the canonical contract without a heavy cross-repo dep on research.
 
 ```python
-from alpha_engine_lib.agent_schemas import (
+from nousergon_lib.agent_schemas import (
     QuantAnalystOutput,
     JointFinalizationOutput,
     CIORawOutput,
@@ -151,7 +151,7 @@ schema = resolve_schema_for_agent(agent_id)
 Pydantic shapes for the institutional / SOTA refactor of research-module composite scoring — replaces the opaque `quant_score + qual_score` two-bucket model with a canonical 6-pillar decomposition: **Quality / Value / Momentum / Growth / Stewardship / Defensiveness**. Pillar set is the AQR Style Premia / Morningstar Economic Moat / Greenblatt / Piotroski / Fama-French / Asness "QMJ" consensus.
 
 ```python
-from alpha_engine_lib.pillars import (
+from nousergon_lib.pillars import (
     PILLARS,
     MoatAssessment,
     PillarSubscore,
@@ -175,7 +175,7 @@ Origin: 2026-05-20 attractiveness-pillars-260520 plan-doc arc. Phase 1 (this mod
 Neon pgvector backbone shared by `alpha-engine-research` (qual analyst's `query_filings` tool) and `alpha-engine-data` (weekly RAGIngestion step). Re-exports a small surface — `retrieve`, `ingest_document`, `document_exists`, `embed_texts`, `get_connection`, `is_available` — and ships the canonical `schema.sql` as package data.
 
 ```python
-from alpha_engine_lib.rag import retrieve
+from nousergon_lib.rag import retrieve
 
 results = retrieve(
     query="competitive risks and market position",
@@ -192,7 +192,7 @@ Requires the `[rag]` extra. Embeddings are Voyage `voyage-3-lite` (512d); the da
 Canonical Python primitive for the `run_ssm` bash helper that previously appeared as a ~54-line mirror across each dispatcher script that drives a spot instance over the SSM transport. The pre-lift shape — base64-wrap the script body, `aws ssm send-command --document-name AWS-RunShellScript`, loop on `get-command-invocation`, stream the `StandardOutputContent` delta, propagate the inner exit — now lives in one place where the polling cadence, error-class handling, and S3 output-key layout match across every consumer.
 
 ```bash
-python -m alpha_engine_lib.ssm_dispatcher run \
+python -m nousergon_lib.ssm_dispatcher run \
   --instance-id "$INSTANCE_ID" \
   --description "bootstrap" \
   --timeout 3600 \
@@ -210,7 +210,7 @@ Exit 0 on `Success`; exit 1 on any terminal non-Success status, send-command fai
 
 ### `ssm_log_capture` — SSM-step log capture + S3 ship-on-exit chokepoint
 
-Pairs with `ssm_dispatcher` on the SSM target side. The dispatcher script tells the target instance to invoke `python -m alpha_engine_lib.ssm_log_capture run --slug X --log /var/log/X.log -- bash <launcher>`; the target wrapper tees the launcher's stdout/stderr to a local log file and to its own stdout (so the SSM `StandardOutputContent` channel still surfaces output to the dispatcher), then on exit ships the full local log to `s3://alpha-engine-research/_ssm_logs/{slug}/{date}/{host}-{time}.log` regardless of the inner exit code. Replaces the inline `trap 'aws s3 cp ...' EXIT` pattern that broke under ASL `States.Array` escape semantics (2026-05-22 Friday-PM dry-pass catch).
+Pairs with `ssm_dispatcher` on the SSM target side. The dispatcher script tells the target instance to invoke `python -m nousergon_lib.ssm_log_capture run --slug X --log /var/log/X.log -- bash <launcher>`; the target wrapper tees the launcher's stdout/stderr to a local log file and to its own stdout (so the SSM `StandardOutputContent` channel still surfaces output to the dispatcher), then on exit ships the full local log to `s3://alpha-engine-research/_ssm_logs/{slug}/{date}/{host}-{time}.log` regardless of the inner exit code. Replaces the inline `trap 'aws s3 cp ...' EXIT` pattern that broke under ASL `States.Array` escape semantics (2026-05-22 Friday-PM dry-pass catch).
 
 ### `ec2_spot` — capacity-resilient spot-launch chokepoint
 
@@ -224,21 +224,21 @@ Rotates across `(instance_type × subnet)` combinations on `InsufficientInstance
 
 The shared institutional-analytics engine: pure, front-end- and data-source-agnostic functions that *describe and measure* a portfolio (performance, risk, attribution) with **no advisory logic** — it sits on the "analytics, not advice" side of the line. Lifted from robodashboard's `analytics/` after the 2026-06-03 cross-repo leverage audit, so both the alpha-engine fleet and robodashboard consume one engine instead of parallel reimplementations. Import the submodule you need (the package keeps no eager imports, so the stdlib-only modules import without numpy):
 
-- **`quant.factor_risk`** — statistical factor risk model `Σ = B·F·Bᵀ + D`, **Option B** (time-series factor-ETF estimator): `estimate_factor_model` (regress holdings on given factor return series), `portfolio_risk` (ex-ante vol + factor/idio split + per-factor variance contribution), `tracking_error`, `benchmark_exposure`, and a numpy-only `ledoit_wolf_cov` (no sklearn). The estimator-agnostic consumption core (`portfolio_risk`/`tracking_error`) consumes any `FactorRiskModel` (B, F, D). **Needs numpy** — `pip install "alpha-engine-lib[quant]"`.
-- **`quant.factor_risk_xs`** — same `Σ = B·F·Bᵀ + D` model, **Option A** (universe-wide cross-sectional Fama-MacBeth estimator): take *exogenous* per-ticker loadings `B` and infer factor returns `f_t` via a cross-sectional OLS at each date → `F`/`D` (`build_factor_risk_model`, `cross_sectional_factor_returns`, `estimate_factor_covariance`, `estimate_idiosyncratic_variance`). **Needs pandas + scikit-learn** — `pip install "alpha-engine-lib[quant-xs]"` (kept separate so numpy-only consumers stay light).
+- **`quant.factor_risk`** — statistical factor risk model `Σ = B·F·Bᵀ + D`, **Option B** (time-series factor-ETF estimator): `estimate_factor_model` (regress holdings on given factor return series), `portfolio_risk` (ex-ante vol + factor/idio split + per-factor variance contribution), `tracking_error`, `benchmark_exposure`, and a numpy-only `ledoit_wolf_cov` (no sklearn). The estimator-agnostic consumption core (`portfolio_risk`/`tracking_error`) consumes any `FactorRiskModel` (B, F, D). **Needs numpy** — `pip install "nousergon-lib[quant]"`.
+- **`quant.factor_risk_xs`** — same `Σ = B·F·Bᵀ + D` model, **Option A** (universe-wide cross-sectional Fama-MacBeth estimator): take *exogenous* per-ticker loadings `B` and infer factor returns `f_t` via a cross-sectional OLS at each date → `F`/`D` (`build_factor_risk_model`, `cross_sectional_factor_returns`, `estimate_factor_covariance`, `estimate_idiosyncratic_variance`). **Needs pandas + scikit-learn** — `pip install "nousergon-lib[quant-xs]"` (kept separate so numpy-only consumers stay light).
 - **`quant.risk_measures`** — parametric (Gaussian, Acklam inverse-normal, no scipy) + historical VaR & CVaR, as positive loss fractions at a horizon (stdlib).
 - **`quant.riskstats`** — `volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown` (stdlib).
 - **`quant.returns`** — `xirr` (money-weighted, Newton + bisection), `time_weighted_return` (GIPS), `cumulative_return`, `annualize` (stdlib).
 - **`quant.attribution`** — single-period Brinson-Fachler decomposition (`brinson_fachler`) + multi-period Cariño linking (`link_periods`) (stdlib).
-- **`quant.stats`** — strategy/signal-quality evaluation metrics (lifted from the backtester's `analysis/`): `dsr` (Probabilistic + Deflated Sharpe, López de Prado), `information_coefficient` (Spearman rank IC), `expectancy` (hit-rate × win/loss decomposition), `multiple_testing` (Benjamini-Hochberg FDR), `risk_matched_benchmark` (EW-high-vol + beta-matched-SPY baselines + Information Ratio), `regime_sortino` (regime-stratified cross-sectional pick-alpha Sortino). **Needs pandas + scipy** — `pip install "alpha-engine-lib[quant-stats]"` (scipy is only the IC p-value; numpy fallback otherwise).
+- **`quant.stats`** — strategy/signal-quality evaluation metrics (lifted from the backtester's `analysis/`): `dsr` (Probabilistic + Deflated Sharpe, López de Prado), `information_coefficient` (Spearman rank IC), `expectancy` (hit-rate × win/loss decomposition), `multiple_testing` (Benjamini-Hochberg FDR), `risk_matched_benchmark` (EW-high-vol + beta-matched-SPY baselines + Information Ratio), `regime_sortino` (regime-stratified cross-sectional pick-alpha Sortino). **Needs pandas + scipy** — `pip install "nousergon-lib[quant-stats]"` (scipy is only the IC p-value; numpy fallback otherwise).
 
 ### `http_retry` — bounded-backoff transient-API retry chokepoint
 
 `request_with_retry(url, *, params, session, transient_status, ...)` returns the final `requests.Response` after retrying the transient class — 429 + 5xx responses (honoring `Retry-After`) and `Timeout`/`ConnectionError` network errors — with exponential backoff + full jitter; an exhausted network error raises `HttpRetryError` (api-key-scrubbed), while a persistent transient-status response is returned for the caller to interpret (so a 403, not in the transient set, is handed back for e.g. polygon's `PolygonForbiddenError` conversion). Also exposes the low-level `backoff_delay(attempt, *, base, cap, retry_after)` and `scrub_api_keys(msg)` (masks `api_key=`/`apiKey=` querystring values) for consumers with bespoke loops (the rate-limited `polygon_client` keeps its own loop + 403 + JSON parse and reuses just the delay math + scrubber). Consolidates the four mirrored alpha-engine-data retry sites (FRED fetch, polygon client, preflight reachability, FRED repair) into one policy so they stop drifting (L4499). Stdlib + `requests` only.
 
 ```python
-from alpha_engine_lib.quant.risk_measures import historical_cvar
-from alpha_engine_lib.quant.factor_risk import estimate_factor_model, portfolio_risk
+from nousergon_lib.quant.risk_measures import historical_cvar
+from nousergon_lib.quant.factor_risk import estimate_factor_model, portfolio_risk
 ```
 
 ## How it's used
@@ -258,7 +258,7 @@ All six Nous Ergon module repos depend on this lib:
 
 ```bash
 git clone https://github.com/nousergon/nousergon-lib.git
-cd alpha-engine-lib
+cd nousergon-lib
 pip install -e ".[dev,arcticdb,flow_doctor]"
 pytest
 ```
@@ -274,4 +274,9 @@ Code that **does not** belong here:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+AGPL-3.0-only — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Versions up to and
+including `0.59.8` were released under the MIT License and remain available
+under those terms; all subsequent versions (`0.60.0`+) are AGPL-3.0-only.
+Commercial licenses are available — contact brian@nousergon.ai. External
+contributions require DCO sign-off under the MIT inbound license (see
+[CONTRIBUTING.md](CONTRIBUTING.md)).

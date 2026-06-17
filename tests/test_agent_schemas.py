@@ -26,7 +26,7 @@ from pydantic import ValidationError
 
 class TestQuantAnalystOutput:
     def test_accepts_typical_payload(self):
-        from alpha_engine_lib.agent_schemas import QuantAnalystOutput
+        from nousergon_lib.agent_schemas import QuantAnalystOutput
 
         out = QuantAnalystOutput(
             ranked_picks=[
@@ -38,13 +38,13 @@ class TestQuantAnalystOutput:
         assert out.ranked_picks[0].ticker == "NVDA"
 
     def test_quant_score_range_enforced(self):
-        from alpha_engine_lib.agent_schemas import QuantPick
+        from nousergon_lib.agent_schemas import QuantPick
 
         with pytest.raises(ValidationError):
             QuantPick(ticker="X", quant_score=150)
 
     def test_extra_fields_allowed(self):
-        from alpha_engine_lib.agent_schemas import QuantAnalystOutput
+        from nousergon_lib.agent_schemas import QuantAnalystOutput
 
         # Forward-compat: LLM may emit additional keys.
         out = QuantAnalystOutput(
@@ -59,7 +59,7 @@ class TestQuantAnalystOutput:
 
 class TestQualAnalystOutput:
     def test_accepts_assessments_plus_additional_candidate(self):
-        from alpha_engine_lib.agent_schemas import QualAnalystOutput
+        from nousergon_lib.agent_schemas import QualAnalystOutput
 
         out = QualAnalystOutput(
             assessments=[
@@ -95,7 +95,7 @@ class TestStanceLiteral:
         cardinality so a future PR can't quietly slip in a new option
         without surfacing the cross-repo impact."""
         import typing
-        from alpha_engine_lib.agent_schemas import StanceLiteral
+        from nousergon_lib.agent_schemas import StanceLiteral
         args = typing.get_args(StanceLiteral)
         assert args == ("momentum", "value", "quality", "catalyst"), (
             f"StanceLiteral cardinality drift: got {args}. Adding/removing "
@@ -110,7 +110,7 @@ class TestStanceLiteral:
         future ``Momentum``/``MOMENTUM`` or ``momenta`` drift doesn't
         silently break consumers via missed string match."""
         import typing
-        from alpha_engine_lib.agent_schemas import StanceLiteral
+        from nousergon_lib.agent_schemas import StanceLiteral
         for v in typing.get_args(StanceLiteral):
             assert v == v.lower(), f"stance vocabulary not lowercase: {v!r}"
             assert not v.endswith("s"), (
@@ -122,7 +122,7 @@ class TestStanceLiteral:
         StanceLiteral exactly so the discrete label, continuous
         loadings, and iteration order all align."""
         import typing
-        from alpha_engine_lib.agent_schemas import STANCE_NAMES, StanceLiteral
+        from nousergon_lib.agent_schemas import STANCE_NAMES, StanceLiteral
         assert STANCE_NAMES == typing.get_args(StanceLiteral)
 
 
@@ -138,7 +138,7 @@ class TestStanceLoadings:
 
     def test_typical_payload_round_trips(self):
         import json
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         s = StanceLoadings(momentum=0.65, value=0.10, quality=0.20, catalyst=0.05)
         blob = s.model_dump_json()
@@ -149,7 +149,7 @@ class TestStanceLoadings:
         assert s2.catalyst == pytest.approx(0.05)
 
     def test_loadings_must_sum_to_one(self):
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         # Sum = 0.5 → reject
         with pytest.raises(ValidationError, match="sum to 1"):
@@ -163,7 +163,7 @@ class TestStanceLoadings:
         which doesn't yield exact 1.0. Allow ±1e-3 tolerance so the
         producer's rounding doesn't trigger spurious validation
         failures."""
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         # Slightly off from 1.0 (4e-4 short) — accept
         s = StanceLoadings(momentum=0.2500, value=0.2500, quality=0.2499, catalyst=0.2497)
@@ -171,7 +171,7 @@ class TestStanceLoadings:
 
     def test_negative_loadings_rejected(self):
         """Each loading is a probability — must be ≥ 0."""
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         with pytest.raises(ValidationError):
             StanceLoadings(momentum=-0.1, value=0.5, quality=0.4, catalyst=0.2)
@@ -181,7 +181,7 @@ class TestStanceLoadings:
         label of the highest-loaded stance. Simple consumers
         (executor v1) use this; nuanced consumers read all four
         loadings directly."""
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         s = StanceLoadings(momentum=0.65, value=0.10, quality=0.20, catalyst=0.05)
         assert s.argmax() == "momentum"
@@ -196,7 +196,7 @@ class TestStanceLoadings:
         """Ties broken by STANCE_NAMES order (momentum > value >
         quality > catalyst). Deterministic + matches the lib's
         canonical iteration."""
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         s = StanceLoadings(momentum=0.25, value=0.25, quality=0.25, catalyst=0.25)
         assert s.argmax() == "momentum"  # first in canonical order
@@ -205,7 +205,7 @@ class TestStanceLoadings:
         """extra='forbid' guards the schema — typo in field name (e.g.,
         ``momentmu=0.5``) fails validation rather than silently being
         stored on an attribute the consumer never reads."""
-        from alpha_engine_lib.agent_schemas import StanceLoadings
+        from nousergon_lib.agent_schemas import StanceLoadings
 
         with pytest.raises(ValidationError):
             StanceLoadings.model_validate({
@@ -223,7 +223,7 @@ class TestJointSelectionOutput:
     JointFinalizationDecision call per selected ticker)."""
 
     def test_accepts_typical_payload(self):
-        from alpha_engine_lib.agent_schemas import JointSelectionOutput
+        from nousergon_lib.agent_schemas import JointSelectionOutput
 
         out = JointSelectionOutput(
             selected_tickers=["NVDA", "PLTR", "RKLB"],
@@ -236,7 +236,7 @@ class TestJointSelectionOutput:
         """Edge case: agent emits an empty selection (no candidates clear
         the gate). Schema must accept; downstream gate decides whether
         empty is a hard-fail or graceful no-op."""
-        from alpha_engine_lib.agent_schemas import JointSelectionOutput
+        from nousergon_lib.agent_schemas import JointSelectionOutput
 
         out = JointSelectionOutput()
         assert out.selected_tickers == []
@@ -245,7 +245,7 @@ class TestJointSelectionOutput:
     def test_extra_fields_allowed(self):
         """``extra='allow'`` lets the LLM emit forward-compatible fields
         (e.g. ``confidence``) without breaking validation."""
-        from alpha_engine_lib.agent_schemas import JointSelectionOutput
+        from nousergon_lib.agent_schemas import JointSelectionOutput
 
         out = JointSelectionOutput(
             selected_tickers=["NVDA"],
@@ -257,7 +257,7 @@ class TestJointSelectionOutput:
 
 class TestJointFinalizationOutput:
     def test_accepts_typical_payload(self):
-        from alpha_engine_lib.agent_schemas import JointFinalizationOutput
+        from nousergon_lib.agent_schemas import JointFinalizationOutput
 
         out = JointFinalizationOutput(
             selected_decisions=[
@@ -271,7 +271,7 @@ class TestJointFinalizationOutput:
         """Regression test for the 2026-05-03 SF Sonnet failure mode
         where ``selected_decisions`` was returned as a JSON-encoded
         string. The validator parse-and-continues + emits a WARNING."""
-        from alpha_engine_lib.agent_schemas import JointFinalizationOutput
+        from nousergon_lib.agent_schemas import JointFinalizationOutput
 
         encoded = '[{"ticker": "JPM", "rationale": "x"}]'
         with caplog.at_level(logging.WARNING):
@@ -281,7 +281,7 @@ class TestJointFinalizationOutput:
         assert any("JSON-string" in m for m in caplog.messages)
 
     def test_invalid_json_string_falls_through_to_pydantic_error(self):
-        from alpha_engine_lib.agent_schemas import JointFinalizationOutput
+        from nousergon_lib.agent_schemas import JointFinalizationOutput
 
         with pytest.raises(ValidationError):
             JointFinalizationOutput(selected_decisions="this isn't json")
@@ -289,7 +289,7 @@ class TestJointFinalizationOutput:
 
 class TestQuantAcceptanceVerdict:
     def test_accepts_minimal_payload(self):
-        from alpha_engine_lib.agent_schemas import QuantAcceptanceVerdict
+        from nousergon_lib.agent_schemas import QuantAcceptanceVerdict
 
         out = QuantAcceptanceVerdict(accept=True, reason="strong tech score")
         assert out.accept is True
@@ -300,7 +300,7 @@ class TestQuantAcceptanceVerdict:
 
 class TestMacroEconomistRawOutput:
     def test_accepts_typical_payload(self):
-        from alpha_engine_lib.agent_schemas import MacroEconomistRawOutput
+        from nousergon_lib.agent_schemas import MacroEconomistRawOutput
 
         out = MacroEconomistRawOutput(
             report_md="Full regime narrative",
@@ -311,7 +311,7 @@ class TestMacroEconomistRawOutput:
         assert out.sector_modifiers["technology"] == 1.15
 
     def test_sector_modifier_clamp_rejects_out_of_band(self):
-        from alpha_engine_lib.agent_schemas import MacroEconomistRawOutput
+        from nousergon_lib.agent_schemas import MacroEconomistRawOutput
 
         with pytest.raises(ValidationError):
             MacroEconomistRawOutput(sector_modifiers={"technology": 1.5})  # >1.30
@@ -320,7 +320,7 @@ class TestMacroEconomistRawOutput:
             MacroEconomistRawOutput(sector_modifiers={"technology": 0.5})  # <0.70
 
     def test_regime_literal_enforced(self):
-        from alpha_engine_lib.agent_schemas import MacroEconomistRawOutput
+        from nousergon_lib.agent_schemas import MacroEconomistRawOutput
 
         with pytest.raises(ValidationError):
             MacroEconomistRawOutput(market_regime="exuberant")
@@ -333,7 +333,7 @@ class TestMacroEconomistRawOutput:
         # counted by the continuous regime_intensity_z META_FEATURE.
         # Portfolio-protective hysteresis (risk_on/caution/risk_off) is a
         # separate axis emitted by the predictor drawdown leg.
-        from alpha_engine_lib.agent_schemas import (
+        from nousergon_lib.agent_schemas import (
             MacroCriticOutput,
             MacroEconomistRawOutput,
         )
@@ -346,7 +346,7 @@ class TestMacroEconomistRawOutput:
             )
 
     def test_regime_literal_accepts_all_3_classes(self):
-        from alpha_engine_lib.agent_schemas import MacroEconomistRawOutput
+        from nousergon_lib.agent_schemas import MacroEconomistRawOutput
 
         for regime in ("bull", "neutral", "bear"):
             out = MacroEconomistRawOutput(market_regime=regime)
@@ -355,14 +355,14 @@ class TestMacroEconomistRawOutput:
 
 class TestMacroCriticOutput:
     def test_accept_action(self):
-        from alpha_engine_lib.agent_schemas import MacroCriticOutput
+        from nousergon_lib.agent_schemas import MacroCriticOutput
 
         out = MacroCriticOutput(action="accept", critique="looks sound")
         assert out.action == "accept"
         assert out.suggested_regime is None
 
     def test_revise_with_suggested_regime(self):
-        from alpha_engine_lib.agent_schemas import MacroCriticOutput
+        from nousergon_lib.agent_schemas import MacroCriticOutput
 
         out = MacroCriticOutput(
             action="revise", critique="too bullish", suggested_regime="neutral",
@@ -375,7 +375,7 @@ class TestMacroCriticOutput:
 
 class TestHeldThesisUpdateLLMOutput:
     def test_no_score_fields(self):
-        from alpha_engine_lib.agent_schemas import HeldThesisUpdateLLMOutput
+        from nousergon_lib.agent_schemas import HeldThesisUpdateLLMOutput
 
         # Schema intentionally has no final_score / qual_score /
         # quant_score — the held-stock LLM update path must NOT
@@ -392,7 +392,7 @@ class TestHeldThesisUpdateLLMOutput:
 
 class TestCIORawOutput:
     def test_accepts_decisions_with_advance(self):
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         out = CIORawOutput(
             decisions=[
@@ -409,7 +409,7 @@ class TestCIORawOutput:
         """2026-05-02 PR B regression: Sonnet emitted decisions=[] when
         the prompt's per-candidate cue was stripped. min_length=1
         defends at the schema layer."""
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         with pytest.raises(ValidationError):
             CIORawOutput(decisions=[])
@@ -418,13 +418,13 @@ class TestCIORawOutput:
         """validate_default=True ensures the min_length=1 constraint
         fires when decisions is omitted entirely (default_factory=list
         path), not just when the caller explicitly passes []."""
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         with pytest.raises(ValidationError):
             CIORawOutput()
 
     def test_decision_literal_enforced(self):
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         with pytest.raises(ValidationError):
             CIORawOutput(decisions=[
@@ -435,7 +435,7 @@ class TestCIORawOutput:
         """Legacy artifacts emitted by prompts < v1.3.0 omit rule_tags
         entirely. Schema must default to None so loading historical
         captures keeps working."""
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         out = CIORawOutput(decisions=[
             {"ticker": "NVDA", "decision": "ADVANCE",
@@ -444,7 +444,7 @@ class TestCIORawOutput:
         assert out.decisions[0].rule_tags is None
 
     def test_rule_tags_accepts_single_tag(self):
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         out = CIORawOutput(decisions=[
             {"ticker": "MCD", "decision": "REJECT",
@@ -456,7 +456,7 @@ class TestCIORawOutput:
         """Real-world example: REJECT MCD because BOTH qual<50 AND
         Consumer Discretionary is underweight. Multi-tag is the
         common case for REJECTS."""
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         out = CIORawOutput(decisions=[
             {"ticker": "MCD", "decision": "REJECT",
@@ -468,7 +468,7 @@ class TestCIORawOutput:
     def test_rule_tags_rejects_unknown_literal(self):
         """Vocabulary is closed — unknown tags must fail validation
         rather than silently accumulate as freeform strings."""
-        from alpha_engine_lib.agent_schemas import CIORawOutput
+        from nousergon_lib.agent_schemas import CIORawOutput
 
         with pytest.raises(ValidationError):
             CIORawOutput(decisions=[
@@ -479,7 +479,7 @@ class TestCIORawOutput:
     def test_rule_tag_vocabulary_is_nine_tags(self):
         """Locked vocabulary — adding/removing a tag is a deliberate
         prompt-version + analysis-layer change, not an accident."""
-        from alpha_engine_lib.agent_schemas import CIORuleTagLiteral
+        from nousergon_lib.agent_schemas import CIORuleTagLiteral
         from typing import get_args
 
         tags = set(get_args(CIORuleTagLiteral))
@@ -495,7 +495,7 @@ class TestCIORawOutput:
 
 class TestRubricEvalLLMOutput:
     def test_accepts_typical_payload(self):
-        from alpha_engine_lib.agent_schemas import RubricEvalLLMOutput
+        from nousergon_lib.agent_schemas import RubricEvalLLMOutput
 
         out = RubricEvalLLMOutput(
             dimension_scores=[
@@ -511,7 +511,7 @@ class TestRubricEvalLLMOutput:
         assert out.dimension_scores[0].score == 4
 
     def test_score_range_enforced(self):
-        from alpha_engine_lib.agent_schemas import RubricDimensionScore
+        from nousergon_lib.agent_schemas import RubricDimensionScore
 
         for invalid in (0, 6, -1, 10):
             with pytest.raises(ValidationError):
@@ -522,7 +522,7 @@ class TestRubricEvalLLMOutput:
     def test_string_as_list_parser_recovers(self, caplog):
         """Same regression class as JointFinalizationOutput — Haiku
         occasionally returns dimension_scores as a JSON-string."""
-        from alpha_engine_lib.agent_schemas import RubricEvalLLMOutput
+        from nousergon_lib.agent_schemas import RubricEvalLLMOutput
 
         encoded = (
             '[{"dimension": "x", "score": 3, "reasoning": "r"}]'
@@ -549,21 +549,21 @@ class TestSchemaDispatch:
         ("thesis_update:AAPL", "HeldThesisUpdateLLMOutput"),
     ])
     def test_resolve_known_agent_ids(self, agent_id, expected_name):
-        from alpha_engine_lib.agent_schemas import resolve_schema_for_agent
+        from nousergon_lib.agent_schemas import resolve_schema_for_agent
 
         cls = resolve_schema_for_agent(agent_id)
         assert cls is not None
         assert cls.__name__ == expected_name
 
     def test_unknown_agent_returns_none(self):
-        from alpha_engine_lib.agent_schemas import resolve_schema_for_agent
+        from nousergon_lib.agent_schemas import resolve_schema_for_agent
 
         assert resolve_schema_for_agent("brand_new_agent") is None
         assert resolve_schema_for_agent("") is None
         assert resolve_schema_for_agent(None) is None  # type: ignore[arg-type]
 
     def test_dispatch_map_covers_six_canonical_families(self):
-        from alpha_engine_lib.agent_schemas import SCHEMA_BY_AGENT_ID_BASE
+        from nousergon_lib.agent_schemas import SCHEMA_BY_AGENT_ID_BASE
 
         # Pin the canonical family list so additions surface in review.
         assert set(SCHEMA_BY_AGENT_ID_BASE.keys()) == {

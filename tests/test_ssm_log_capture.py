@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.ssm_log_capture``.
+Unit tests for ``nousergon_lib.ssm_log_capture``.
 
 Pins the institutional-chokepoint contract that the 8 Saturday-SF spot
 states + the weekday + EOD SF MorningEnrich states will rely on after
@@ -28,7 +28,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib import ssm_log_capture
+from nousergon_lib import ssm_log_capture
 
 
 @pytest.fixture
@@ -288,7 +288,7 @@ class TestCli:
 
 
 class TestModuleEntrypoint:
-    """The module is invokable as ``python -m alpha_engine_lib.ssm_log_capture``."""
+    """The module is invokable as ``python -m nousergon_lib.ssm_log_capture``."""
 
     def test_module_has_main_guard(self):
         # The module file must end with ``if __name__ == "__main__"`` so

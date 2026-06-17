@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.alerts``.
+Unit tests for ``nousergon_lib.alerts``.
 
 Pins the failure-surveillance fan-out contract: per-channel independence
 (SNS failure doesn't block Telegram and vice-versa), severity-to-push
@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from alpha_engine_lib import alerts
+from nousergon_lib import alerts
 
 
 @pytest.fixture
@@ -143,7 +143,7 @@ class TestPublish:
         """error/critical → disable_notification=False (push);
         info/warning → disable_notification=True (silent)."""
         fake, _sts, _sns = fake_boto3
-        from alpha_engine_lib import telegram as tg_mod
+        from nousergon_lib import telegram as tg_mod
 
         with patch.dict("sys.modules", {"boto3": fake}):
             for sev, expect_silent in [

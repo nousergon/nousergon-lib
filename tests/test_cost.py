@@ -1,5 +1,5 @@
 """
-Unit tests for ``alpha_engine_lib.cost``.
+Unit tests for ``nousergon_lib.cost``.
 
 Locks down the price-table contract: per-model effective-date lookup,
 ordering invariants, malformed-YAML hard-fail, pure cost math correctness,
@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from alpha_engine_lib.cost import (
+from nousergon_lib.cost import (
     PriceCard,
     PriceCardLookupError,
     PriceTable,
@@ -28,7 +28,7 @@ from alpha_engine_lib.cost import (
     record_anthropic_call,
     recompute_cost,
 )
-from alpha_engine_lib.decision_capture import ModelMetadata
+from nousergon_lib.decision_capture import ModelMetadata
 
 
 # ── PriceCard ─────────────────────────────────────────────────────────────

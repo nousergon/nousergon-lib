@@ -1,10 +1,10 @@
-"""Tests for alpha_engine_lib/quant/attribution.py — Brinson-Fachler + Cariño linking."""
+"""Tests for nousergon_lib/quant/attribution.py — Brinson-Fachler + Cariño linking."""
 
 import math
 
 import pytest
 
-from alpha_engine_lib.quant.attribution import (
+from nousergon_lib.quant.attribution import (
     BrinsonResult,
     brinson_fachler,
     link_periods,
