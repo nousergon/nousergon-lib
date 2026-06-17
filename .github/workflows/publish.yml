@@ -75,3 +75,9 @@ jobs:
           # merge attempt a publish without failing on no-version-bump
           # PRs (docs, CI, internal refactors).
           skip-existing: true
+
+  notify-main-failure:
+    needs: [build, publish]
+    if: ${{ failure() && github.ref == 'refs/heads/main' }}
+    uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@main
+    secrets: inherit
