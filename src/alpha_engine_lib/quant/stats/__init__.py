@@ -8,6 +8,7 @@ fallback). Install ``alpha-engine-lib[quant-stats]``.
 
 Modules:
   - ``dsr``                     — Probabilistic + Deflated Sharpe (López de Prado)
+  - ``calibration``             — Expected Calibration Error (probability vs outcome)
   - ``information_coefficient`` — Spearman rank IC of conviction vs forward return
   - ``expectancy``              — hit-rate × win/loss decomposition
   - ``multiple_testing``        — Benjamini-Hochberg FDR correction
