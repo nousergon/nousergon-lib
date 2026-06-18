@@ -32,13 +32,30 @@ class _AliasLoader(importlib.abc.Loader):
     def create_module(self, spec):
         new_name = _NEW + spec.name[len(_OLD):]
         module = importlib.import_module(new_name)
+        # The import machinery's module_from_spec() force-reinitialises
+        # __spec__/__loader__ (override=True) from the ALIAS spec after this
+        # returns — which would replace the real module's SourceFileLoader +
+        # submodule_search_locations with this no-op _AliasLoader, breaking
+        # importlib.resources.files(__package__) for resource-bearing
+        # sub-packages (e.g. nousergon_lib.contracts/*.schema.json) on the
+        # *shared* object. Snapshot the real import attrs so exec_module can
+        # restore them (see the contracts-resource regression test).
+        self._saved = {
+            k: getattr(module, k)
+            for k in ("__name__", "__spec__", "__loader__", "__package__", "__path__")
+            if hasattr(module, k)
+        }
         # Alias under the old fullname so `is` identity holds and the import
         # system caches the same object (no second execution / no split state).
         sys.modules[spec.name] = module
         return module
 
     def exec_module(self, module):  # already executed under its real name
-        pass
+        # Undo module_from_spec's attr clobber: restore the real package's
+        # __spec__/__loader__/__path__ so resource + submodule resolution on
+        # the shared module keeps working under both the old and new names.
+        for key, value in getattr(self, "_saved", {}).items():
+            setattr(module, key, value)
 
 
 class _AliasFinder(importlib.abc.MetaPathFinder):
