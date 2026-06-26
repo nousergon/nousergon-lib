@@ -662,3 +662,114 @@ class TestCycleCompletion:
         assert v.stale == ["d"]
         assert v.probe_failed == ["e"]
         assert v.grace_period == ["b"]
+
+
+# ── Continuous active-window (market-hours-only producers) ───────────────────
+
+
+def _open_orders_spec(**overrides) -> ArtifactSpec:
+    """A continuous, fixed-key spec modelling the executor daemon's
+    ``trades/open_orders/latest.json`` snapshot — written every ~30min
+    ONLY while paper-trading during the NYSE session."""
+    defaults = dict(
+        artifact_id="open_orders_latest",
+        s3_bucket="bkt",
+        s3_key_template="trades/open_orders/latest.json",
+        cadence="continuous",
+        interval_minutes=30,
+        sla_minutes_after_cron=15,
+        severity="warning",
+        owner_repo="alpha-engine",
+        created_at=date(2025, 1, 1),
+        active_trading_days_only=True,
+        active_hours_utc=[14, 21],
+    )
+    defaults.update(overrides)
+    return ArtifactSpec(**defaults)
+
+
+class TestContinuousActiveWindow:
+    """The 2026-06-26 open_orders overnight alert storm: a market-hours-only
+    daemon modelled as 24/7 continuous false-alarmed every 30min outside its
+    write window. The active-window short-circuit suppresses the off-window
+    false positive while preserving the in-window mid-session-death signal."""
+
+    def test_outside_hours_fresh_despite_absent_artifact(self):
+        # Fri 03:00 UTC — outside [14,21). Even a 404 probe must NOT alarm:
+        # the producer is idle by design. Gate short-circuits before HEAD.
+        now = datetime(2026, 6, 26, 3, 0, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), _open_orders_spec(), now)
+        assert result.state == "fresh"
+        assert "outside active production window" in result.reason
+
+    def test_weekend_fresh_when_trading_days_only(self):
+        # Sat 16:00 UTC — inside the hour window but a non-trading day.
+        now = datetime(2026, 6, 27, 16, 0, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), _open_orders_spec(), now)
+        assert result.state == "fresh"
+        assert "non-trading day" in result.reason
+
+    def test_in_window_stale_artifact_flags_stale(self):
+        # Fri 16:00 UTC (trading day, in window). Newest write 12:00 — older
+        # than the floor (16:00 - 45min = 15:15). The daemon died mid-session:
+        # this is the genuine signal the gate must STILL surface.
+        now = datetime(2026, 6, 26, 16, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(head_returns={
+            "trades/open_orders/latest.json": {
+                "LastModified": datetime(2026, 6, 26, 12, 0, tzinfo=timezone.utc),
+            },
+        })
+        result = check_freshness(s3, _open_orders_spec(), now)
+        assert result.state == "stale"
+
+    def test_in_window_fresh_artifact_fresh(self):
+        # Fri 16:00 UTC, newest write 15:50 — within the 45min floor.
+        now = datetime(2026, 6, 26, 16, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(head_returns={
+            "trades/open_orders/latest.json": {
+                "LastModified": datetime(2026, 6, 26, 15, 50, tzinfo=timezone.utc),
+            },
+        })
+        result = check_freshness(s3, _open_orders_spec(), now)
+        assert result.state == "fresh"
+
+    def test_in_window_missing_flags_missing(self):
+        # In-window 404 ⇒ missing (gate does not suppress a real in-window gap).
+        now = datetime(2026, 6, 26, 16, 0, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), _open_orders_spec(), now)
+        assert result.state == "missing"
+
+    def test_hours_only_no_trading_day_gate(self):
+        # active_hours_utc without active_trading_days_only: a weekend hour
+        # INSIDE the window is still evaluated (not short-circuited).
+        spec = _open_orders_spec(active_trading_days_only=False)
+        now = datetime(2026, 6, 27, 16, 0, tzinfo=timezone.utc)  # Sat, in hours
+        result = check_freshness(_fake_s3(), spec, now)
+        assert result.state == "missing"
+
+
+class TestActiveWindowValidation:
+
+    def test_active_hours_list_coerced_to_tuple(self):
+        s = _open_orders_spec(active_hours_utc=[14, 21])
+        assert s.active_hours_utc == (14, 21)
+
+    def test_active_hours_on_non_continuous_raises(self):
+        with pytest.raises(ValueError, match="active_hours_utc"):
+            _spec(active_hours_utc=[14, 21])  # default cadence saturday_sf
+
+    def test_active_trading_days_only_on_non_continuous_raises(self):
+        with pytest.raises(ValueError, match="active_trading_days_only"):
+            _spec(active_trading_days_only=True)
+
+    def test_active_hours_bad_bounds_raises(self):
+        with pytest.raises(ValueError, match="0 <= start < end <= 24"):
+            _open_orders_spec(active_hours_utc=[21, 14])
+
+    def test_active_hours_wrong_length_raises(self):
+        with pytest.raises(ValueError, match="2-tuple"):
+            _open_orders_spec(active_hours_utc=[14])
+
+    def test_active_hours_end_24_allowed(self):
+        s = _open_orders_spec(active_hours_utc=[14, 24])
+        assert s.active_hours_utc == (14, 24)
