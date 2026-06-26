@@ -69,6 +69,53 @@ def test_alias_submodule_preserves_resource_loading():
     assert "RESOURCE_OK" in result.stdout
 
 
+def test_python_dash_m_under_old_alias_runs():
+    """``python -m alpha_engine_lib.<submodule>`` must execute the real module.
+
+    Regression (Saturday-SF MorningEnrich, 2026-06-25): the compat shim handled
+    the ``import`` path but ``_AliasLoader`` implemented none of the legacy
+    code-access protocol. ``runpy._get_module_details`` calls
+    ``loader.get_code(mod_name)`` directly, so ``python -m
+    alpha_engine_lib.ssm_log_capture`` died with ``AttributeError:
+    '_AliasLoader' object has no attribute 'get_code'`` — taking down every SSM
+    step that drives a lib CLI under the deprecated name. Run in a clean
+    interpreter so the alias path is the first importer.
+    """
+    code = (
+        "import warnings; warnings.simplefilter('ignore'); "
+        "import runpy, sys; sys.argv = ['m', '--help']; "
+        "runpy.run_module('alpha_engine_lib.ssm_log_capture', "
+        "run_name='__main__', alter_sys=True)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    # argparse --help exits 0 via SystemExit; the point is it REACHED the real
+    # module's code (printed its usage) instead of dying in runpy on get_code.
+    assert result.returncode == 0, result.stderr
+    assert "get_code" not in result.stderr, result.stderr
+    assert "ssm_log_capture" in result.stdout, result.stdout
+
+
+def test_old_alias_get_code_matches_new():
+    """The alias loader's get_code returns the SAME code as the real loader.
+
+    Proves the proxy resolves to the real module's source (not a duplicate /
+    stale object) and that get_source is wired up for traceback fidelity.
+    """
+    import importlib.util
+
+    old = importlib.util.find_spec("alpha_engine_lib.ssm_log_capture")
+    new = importlib.util.find_spec("nousergon_lib.ssm_log_capture")
+
+    old_code = old.loader.get_code("alpha_engine_lib.ssm_log_capture")
+    new_code = new.loader.get_code("nousergon_lib.ssm_log_capture")
+    assert old_code.co_filename == new_code.co_filename
+
+    src = old.loader.get_source("alpha_engine_lib.ssm_log_capture")
+    assert "def main(" in src
+
+
 def test_fresh_import_emits_deprecation_warning():
     # Order-independent: the in-process finder swallows re-imports, so assert
     # the warning in a clean interpreter with DeprecationWarning escalated.

@@ -29,8 +29,12 @@ _NEW = "nousergon_lib"
 class _AliasLoader(importlib.abc.Loader):
     """Loads ``alpha_engine_lib[.x]`` by returning the ``nousergon_lib[.x]`` module."""
 
+    @staticmethod
+    def _new_name(old_fullname):
+        return _NEW + old_fullname[len(_OLD):]
+
     def create_module(self, spec):
-        new_name = _NEW + spec.name[len(_OLD):]
+        new_name = self._new_name(spec.name)
         module = importlib.import_module(new_name)
         # The import machinery's module_from_spec() force-reinitialises
         # __spec__/__loader__ (override=True) from the ALIAS spec after this
@@ -56,6 +60,39 @@ class _AliasLoader(importlib.abc.Loader):
         # the shared module keeps working under both the old and new names.
         for key, value in getattr(self, "_saved", {}).items():
             setattr(module, key, value)
+
+    # -- `python -m alpha_engine_lib.<submodule>` (runpy) support --------------
+    # runpy._get_module_details fetches the code object STRAIGHT from the
+    # loader returned by find_spec (``loader.get_code(mod_name)``) — it never
+    # routes through create_module/exec_module. So for the old alias to be a
+    # faithful, fully-substitutable stand-in for the new name, the loader must
+    # also proxy the legacy code-access protocol onto the real module's loader.
+    # Without get_code, ``python -m alpha_engine_lib.ssm_log_capture`` died with
+    # ``AttributeError: '_AliasLoader' object has no attribute 'get_code'`` —
+    # which broke every SSM step that invokes a lib CLI under the old name.
+    #
+    # Only get_code + get_source (used by linecache/tracebacks) are proxied:
+    # both are invisible to importlib.util.spec_from_loader. Deliberately NOT
+    # get_filename / is_package — spec_from_loader branches on those, which
+    # would change the alias ModuleSpec for the *import* path and unwind the
+    # __spec__/__path__ restoration that exec_module relies on (see
+    # test_alias_submodule_preserves_resource_loading).
+    def _real_loader(self, fullname):
+        new_name = self._new_name(fullname)
+        spec = importlib.util.find_spec(new_name)
+        if spec is None or spec.loader is None:
+            raise ModuleNotFoundError(
+                f"No module named {new_name!r}", name=new_name
+            )
+        return spec.loader, new_name
+
+    def get_code(self, fullname):
+        loader, new_name = self._real_loader(fullname)
+        return loader.get_code(new_name)
+
+    def get_source(self, fullname):
+        loader, new_name = self._real_loader(fullname)
+        return loader.get_source(new_name)
 
 
 class _AliasFinder(importlib.abc.MetaPathFinder):
