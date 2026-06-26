@@ -148,6 +148,18 @@ class ArtifactSpec:
             the cron is expected to not have fired. Default ``True``.
         interval_minutes: Required only for ``cadence="continuous"``;
             defines the cycle window length. Ignored otherwise.
+        active_trading_days_only: ``continuous``-only. When ``True``, the
+            producer is expected to run only on NYSE session days, so the
+            check short-circuits to ``state="fresh"`` on weekends /
+            holidays (artifact absence is correct). Default ``False`` —
+            existing 24/7 continuous specs are unaffected.
+        active_hours_utc: ``continuous``-only ``(start, end)`` UTC-hour
+            bounds. When set, the check short-circuits to ``state="fresh"``
+            outside ``[start, end)`` UTC — the producer is idle by design
+            (e.g. the executor daemon writing ``open_orders`` only during
+            the NYSE session). Inside the window the normal recency floor
+            still applies, so a producer that dies mid-window is still
+            caught. ``None`` (default) ⇒ evaluated 24/7.
     """
 
     artifact_id: str
@@ -162,6 +174,8 @@ class ArtifactSpec:
     recovery_key_template: str | None = None
     calendar_aware: bool = True
     interval_minutes: int | None = None
+    active_trading_days_only: bool = False
+    active_hours_utc: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if self.cadence not in CADENCE_SYMBOLS:
@@ -190,6 +204,46 @@ class ArtifactSpec:
                     "ArtifactSpec.cadence='continuous' requires "
                     "interval_minutes > 0"
                 )
+        self._validate_active_window()
+
+    def _validate_active_window(self) -> None:
+        """Validate (and normalize) the continuous active-window fields.
+
+        Both bounds are ``continuous``-only — the SF cadences carry their
+        own calendar gate. ``active_hours_utc`` arrives from YAML as a
+        list; coerce it to a ``(start, end)`` int tuple on the frozen
+        dataclass so downstream comparisons are total.
+        """
+        if self.active_trading_days_only and self.cadence != "continuous":
+            raise ValueError(
+                "ArtifactSpec.active_trading_days_only is only valid for "
+                f"cadence='continuous' (got cadence={self.cadence!r})"
+            )
+        if self.active_hours_utc is None:
+            return
+        if self.cadence != "continuous":
+            raise ValueError(
+                "ArtifactSpec.active_hours_utc is only valid for "
+                f"cadence='continuous' (got cadence={self.cadence!r})"
+            )
+        if not isinstance(self.active_hours_utc, (list, tuple)):
+            raise ValueError(
+                "ArtifactSpec.active_hours_utc must be a (start, end) pair, "
+                f"got {self.active_hours_utc!r}"
+            )
+        hours = tuple(self.active_hours_utc)
+        if len(hours) != 2 or not all(isinstance(h, int) for h in hours):
+            raise ValueError(
+                "ArtifactSpec.active_hours_utc must be a 2-tuple of ints, "
+                f"got {self.active_hours_utc!r}"
+            )
+        start, end = hours
+        if not (0 <= start < end <= 24):
+            raise ValueError(
+                "ArtifactSpec.active_hours_utc must satisfy "
+                f"0 <= start < end <= 24, got {self.active_hours_utc!r}"
+            )
+        object.__setattr__(self, "active_hours_utc", (start, end))
 
 
 # ── Result ──────────────────────────────────────────────────────────────────
@@ -576,6 +630,39 @@ def _freshness_floor(
     raise ValueError(f"unknown cadence {spec.cadence!r}")
 
 
+def _continuous_idle_reason(spec: ArtifactSpec, now_utc: datetime) -> str | None:
+    """Return a human reason when a ``continuous`` spec is OUTSIDE its
+    active production window (so artifact absence is correct), else ``None``.
+
+    Two independent, composable bounds — both optional and default-off, so
+    existing 24/7 continuous specs are unaffected:
+
+    - ``active_trading_days_only``: producer runs only on NYSE session days
+      (weekends + holidays ⇒ idle).
+    - ``active_hours_utc = (start, end)``: producer runs only within
+      ``[start, end)`` UTC hours (overnight / pre-boot ⇒ idle).
+
+    This gate only suppresses the structural off-window false positive
+    (a market-hours-only daemon judged against the 24/7 ``now - interval -
+    sla`` floor). INSIDE the window the normal recency floor still applies,
+    so a producer that dies mid-window is caught as ``stale``.
+    """
+    if spec.active_trading_days_only and not is_trading_day(now_utc.date()):
+        return (
+            f"non-trading day {now_utc.date().isoformat()} — continuous "
+            "producer idle, absence is correct"
+        )
+    if spec.active_hours_utc is not None:
+        start, end = spec.active_hours_utc
+        if not (start <= now_utc.hour < end):
+            return (
+                f"{now_utc.hour:02d}:xx UTC outside active production window "
+                f"[{start:02d}:00,{end:02d}:00) UTC — producer idle, "
+                "absence is correct"
+            )
+    return None
+
+
 # ── check_freshness — the core public function ──────────────────────────────
 
 
@@ -655,6 +742,27 @@ def check_freshness(
                     f"NYSE holiday {cycle_tick.date().isoformat()} — "
                     "cron did not fire, absence is correct"
                 ),
+                canonical_key=_format_key(
+                    spec.s3_key_template, cycle_label, cycle_tick,
+                ),
+            )
+
+    # ── 2b. Continuous active-window short-circuit ──────────────────────
+    # A continuous producer that only runs in a bounded window — e.g. the
+    # executor daemon, which writes trades/open_orders/latest.json each tick
+    # ONLY while paper-trading on an NYSE session day — is correctly idle
+    # overnight, on weekends, and on holidays. Judging it against the 24/7
+    # continuous floor (now - interval - sla) false-alarms every interval
+    # outside that window (the 2026-06-26 open_orders overnight alert storm).
+    # Short-circuit to fresh when the producer is idle by design; inside the
+    # window the floor below still applies, so a daemon that dies mid-session
+    # is still caught.
+    if spec.cadence == "continuous":
+        idle_reason = _continuous_idle_reason(spec, now_utc)
+        if idle_reason is not None:
+            return CheckResult(
+                state="fresh",
+                reason=idle_reason,
                 canonical_key=_format_key(
                     spec.s3_key_template, cycle_label, cycle_tick,
                 ),
