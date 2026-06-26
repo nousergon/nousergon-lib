@@ -31,6 +31,7 @@ RELOCATED = [
     "alerts",
     "dates",
     "cost",
+    "yfinance_quiet",
 ]
 
 
