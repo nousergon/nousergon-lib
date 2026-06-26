@@ -119,6 +119,24 @@ Pure function — `check_freshness(s3_client, spec, now)` returns a `CheckResult
 
 The freshness-monitor Lambda (`alpha-engine-data/lambdas/freshness_monitor/`, ships in a follow-up PR) walks the `alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml` SoT, calls this substrate per row, and routes via `nousergon_lib.alerts.publish` with the resolved dedup key.
 
+### `artifact_resolution` — windowed S3 artifact resolution (consumer side)
+
+The CONSUMER half of the artifact-resilience principle (alpha-engine-config#1190): resolve a dated S3 artifact to the **freshest instance within a trailing window**, never to one exact run-date key — so a partial / retried / off-cycle Saturday SF run still resolves instead of reading N/A. The "clean Saturday run" is redefined as "the freshest required artifacts exist within their freshness window," however many partial runs produced them.
+
+```python
+from nousergon_lib.artifact_resolution import get_json_windowed
+
+# Walks back day-by-day from run_date (default 10d); skips corrupt mid-writes,
+# returns the freshest GOOD instance + its real provenance date.
+doc, src_date, age_days, key = get_json_windowed(
+    s3_client, "alpha-engine-research", "backtest/{date}/e2e_lift.json", run_date,
+)
+if doc is None:
+    ...  # genuinely N/A past the window — never silently graded "today"
+```
+
+Single source of truth, consolidating ≥4 independent reimplementations of this scan (`crucible-evaluator` `get_json_windowed`, `crucible-executor` `read_signals_with_fallback` + `eod_reconcile`, `crucible-predictor`/`backtester` signal-fallback). `resolve_windowed_artifact` is the generic HEAD-only resolver (returns a `ResolvedArtifact` with the freshest key) and supports a `latest`-pointer-first fast path. Fail-loud: a missing key keeps the scan walking back; a corrupt half-written JSON candidate is skipped to the last good one; any other S3 error (auth / throttle / wrong-bucket) is raised. Mirror of the same "freshest within a window, never the exact key" rule the `artifact_freshness` monitor enforces on the alerting side.
+
 ### `decision_capture` — agent decision audit logger
 
 Captures every agent decision as a structured artifact: prompt metadata (id + version), input snapshot, agent output, and cost. Each decision becomes replayable, auditable, and attributable to a specific prompt revision. Backbone of the Phase 2 measurement substrate.
