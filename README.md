@@ -79,7 +79,7 @@ Wrappers around the ArcticDB Python client. Standardizes the URI format, library
 
 ### `dates` — trading-day arithmetic
 
-`now_dual()` returns a `(calendar_date, trading_day)` pair following the rule `trading_day = last_closed_trading_day(now)`. Strictly backward-looking; never ahead. `session_for_timestamp(ts)` resolves any timestamp to its trading session. Used at every artifact-write site to prevent calendar/trading-day drift between modules.
+`now_dual()` returns a `(calendar_date, trading_day)` pair following the rule `trading_day = last_closed_trading_day(now)`. Strictly backward-looking; never ahead. `session_for_timestamp(ts)` resolves any timestamp to its trading session. `resolve_trading_day(date_str)` normalizes an incoming calendar run_date string (e.g. a Saturday-SF `event['date']`) to the most recent NYSE trading day on or before it — idempotent and fail-open — so every consumer keys its artifacts on the same `{module}/{trading_day}` the producers wrote. Used at every artifact-write site to prevent calendar/trading-day drift between modules.
 
 ### `trading_calendar` — NYSE holiday detection
 

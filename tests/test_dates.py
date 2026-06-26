@@ -5,7 +5,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from nousergon_lib.dates import DualDate, now_dual, session_for_timestamp
+from nousergon_lib.dates import (
+    DualDate,
+    now_dual,
+    resolve_trading_day,
+    session_for_timestamp,
+)
 
 
 _NYSE = ZoneInfo("America/New_York")
@@ -274,3 +279,47 @@ class TestIsFreshInTradingDays:
         assert is_fresh_in_trading_days(
             _date(2026, 5, 22), _date(2026, 5, 26), max_stale=1,
         )
+
+
+class TestResolveTradingDay:
+    """resolve_trading_day() — canonical calendar→trading-day artifact-key
+    normalizer lifted from pipeline_common (backtester) + grading.handler
+    (evaluator). See issue #669 / L4537."""
+
+    def test_saturday_normalizes_to_prior_friday(self):
+        # The Saturday SF threads a calendar run_date; artifacts key by Friday.
+        assert resolve_trading_day("2026-05-30") == "2026-05-29"
+
+    def test_sunday_normalizes_to_prior_friday(self):
+        assert resolve_trading_day("2026-06-07") == "2026-06-05"
+
+    def test_trading_day_input_is_idempotent(self):
+        # A trading-day input returns unchanged → re-normalizing is a no-op.
+        assert resolve_trading_day("2026-05-29") == "2026-05-29"
+        assert resolve_trading_day(resolve_trading_day("2026-05-30")) == "2026-05-29"
+
+    def test_holiday_walks_back(self):
+        # Good Friday 2026-04-03 → Thursday 2026-04-02.
+        assert resolve_trading_day("2026-04-03") == "2026-04-02"
+
+    def test_monday_after_holiday_weekend_walks_back(self):
+        # Memorial Day Mon 2026-05-25 → prior Friday 2026-05-22.
+        assert resolve_trading_day("2026-05-25") == "2026-05-22"
+
+    def test_iso_datetime_string_tolerated(self):
+        # Only the leading yyyy-mm-dd is parsed.
+        assert resolve_trading_day("2026-05-30T12:00:00Z") == "2026-05-29"
+
+    def test_none_defaults_to_today_normalized(self):
+        # Default = today UTC, then normalized — result is always a trading day.
+        from nousergon_lib.trading_calendar import is_trading_day
+
+        out = resolve_trading_day()
+        assert is_trading_day(_date.fromisoformat(out))
+
+    def test_unparseable_input_returns_unchanged_with_warning(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="nousergon_lib.dates"):
+            assert resolve_trading_day("not-a-date") == "not-a-date"
+        assert any("resolve_trading_day" in r.message for r in caplog.records)
