@@ -76,7 +76,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Final, Literal
 
-from nousergon_lib.trading_calendar import is_trading_day
+from nousergon_lib.trading_calendar import (
+    is_trading_day,
+    last_closed_trading_day,
+    previous_trading_day,
+)
 
 
 # ── Cadence symbols ──────────────────────────────────────────────────────────
@@ -196,12 +200,14 @@ class CheckResult:
     """One ``check_freshness`` outcome.
 
     Attributes:
-        state: Outcome class. ``fresh`` ⇒ artifact present + within
-            the current cycle's last_modified window (or substituted
-            by recovery). ``stale`` ⇒ object exists but last_modified
-            predates the current cycle's start (the pointer-pattern
-            case). ``missing`` ⇒ 404. ``probe_failed`` ⇒ S3 client
-            error other than 404 (the monitor itself is broken).
+        state: Outcome class. ``fresh`` ⇒ the most recent instance's
+            ``last_modified`` is at or after the freshness floor (or a
+            recovery instance is). ``stale`` ⇒ an instance exists but its
+            newest ``last_modified`` predates the floor (this cycle's
+            artifact genuinely missing; off-cycle/early production within
+            the floor reads fresh). ``missing`` ⇒ no instance at all.
+            ``probe_failed`` ⇒ S3 client error on the canonical probe
+            other than 404 (the monitor itself is broken).
             ``grace_period`` ⇒ spec younger than
             ``grace_period_cycles`` cycles; alert suppressed by design.
         last_modified: Object's ``LastModified`` from the canonical
@@ -437,6 +443,139 @@ def _head_object(
     return "present", last_modified, "HEAD ok"
 
 
+# ── Recency-window resolution (the "most recent / fresh" model) ──────────────
+#
+# Freshness is judged by the RECENCY of the newest existing instance, NOT by
+# whether an artifact exists under one exact cron-date key. The prior model
+# HEADed `key.format(date=cron_tick)` and called a present object "stale" iff
+# `last_modified < cron_tick` — which false-alarmed whenever the producer
+# wrote a day off the cron (an off-cycle Friday run, a {trading_day} that
+# resolves to the prior close, a Friday-morning run anchoring to Thursday).
+# A monitor that can't tolerate a one-day anchor shift isn't doing its job.
+#
+# Instead: find the most recent instance (LIST the prefix for date-templated
+# keys; HEAD for fixed keys) and check its age against a cadence-derived
+# freshness floor. Off-cycle / off-by-one / early production all land within
+# the floor and read FRESH; a genuinely missed cycle ages past the floor and
+# reads STALE; nothing at all reads MISSING.
+
+
+def _is_templated(template: str) -> bool:
+    """True when the key carries a per-cycle ``{...}`` placeholder."""
+    return "{" in template
+
+
+def _listable_prefix(template: str) -> str:
+    """The fixed prefix of a templated key — everything before the first
+    ``{`` placeholder. ``signals/{trading_day}/signals.json`` -> ``signals/``;
+    ``market_data/weekly/{date}/manifest.json`` -> ``market_data/weekly/``.
+    """
+    return template.split("{", 1)[0]
+
+
+def _key_suffix(template: str) -> str:
+    """The fixed suffix after the last ``}`` placeholder — used to filter
+    listed objects to the artifact (not its siblings under the same prefix).
+    ``signals/{trading_day}/signals.json`` -> ``/signals.json``;
+    ``predictor/predictions/{trading_day}.json`` -> ``.json``. Empty string
+    when the placeholder is terminal (rare).
+    """
+    return template.rsplit("}", 1)[-1]
+
+
+def _newest_under_prefix(
+    s3_client: Any,
+    bucket: str,
+    prefix: str,
+    suffix: str,
+    *,
+    cap_pages: int = 8,
+) -> tuple[str, datetime | None, str | None]:
+    """Return ``(newest_key, newest_last_modified, probe_error)`` for the
+    most-recently-modified object under ``prefix`` whose key ends with
+    ``suffix``.
+
+    Pure w.r.t. side effects beyond ``s3_client`` LIST calls. Paginates up
+    to ``cap_pages`` pages (8 × 1000 = 8000 objects) — every freshness-
+    tracked date-templated prefix is far smaller; the cap is a runaway
+    backstop. A LIST client error (403 / network) returns
+    ``("", None, reason)`` so the caller can surface ``probe_failed`` rather
+    than mis-reporting ``missing``.
+    """
+    newest_lm: datetime | None = None
+    newest_key = ""
+    try:
+        paginator = s3_client.get_paginator("list_objects_v2")
+        pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        for page_idx, page in enumerate(pages):
+            if page_idx >= cap_pages:
+                break
+            for obj in page.get("Contents", []) or []:
+                key = obj.get("Key", "")
+                if suffix and not key.endswith(suffix):
+                    continue
+                lm = obj.get("LastModified")
+                if lm is None:
+                    continue
+                if lm.tzinfo is None:
+                    lm = lm.replace(tzinfo=timezone.utc)
+                if newest_lm is None or lm > newest_lm:
+                    newest_lm, newest_key = lm, key
+    except Exception as err:  # noqa: BLE001 — duck-typed boto error classification
+        state, reason = _classify_client_error(err)
+        # A LIST that 404s is nonsensical (prefix-level); treat any LIST
+        # error as a probe failure — the monitor can't see the bucket.
+        if state == "missing":
+            reason = f"S3 LIST returned 404-class for prefix {prefix!r}: {reason}"
+        return ("", None, reason)
+    return (newest_key, newest_lm, None)
+
+
+# Off-cycle slack (days) for the saturday weekly cadence. The freshness
+# floor is the most-recent cron tick MINUS this slack, so an off-cycle
+# `run_weekly_offcycle.sh full` run (which suppresses the upcoming Saturday
+# cron and fires earlier in the week) still reads FRESH, while a genuinely
+# skipped week ages past the floor. Must be < 7 so a fully-missed week is
+# still detectable; 5 covers a Mon–Sat off-cycle window.
+_SATURDAY_OFFCYCLE_SLACK_DAYS: Final[int] = 5
+
+
+def _freshness_floor(
+    spec: ArtifactSpec, now_utc: datetime, cycle_tick: datetime
+) -> datetime:
+    """The oldest ``last_modified`` that still counts as FRESH for ``spec``.
+
+    Anchored to the most-recent expected production (``cycle_tick``), NOT to
+    ``now`` — so the floor distinguishes "this cycle produced (possibly
+    off-cycle/early)" from "this cycle was skipped", which a pure
+    ``now - period`` window cannot:
+
+    - ``saturday_sf``: ``cycle_tick - 5 days``. The most-recent Saturday
+      cron minus the off-cycle slack: a Fri/early run for this week is
+      fresh; last week's artifact (>5d before this Saturday) is stale.
+    - ``weekday_sf`` / ``eod_sf``: the start of ``previous_trading_day(
+      last_closed_trading_day(now))`` — calendar-aware, so the newest
+      instance must be from within the last ~2 trading days (tolerates the
+      {trading_day} anchor + overnight + weekends/holidays).
+    - ``continuous``: ``now - (interval + sla)``.
+    """
+    if spec.cadence == "saturday_sf":
+        return cycle_tick - timedelta(days=_SATURDAY_OFFCYCLE_SLACK_DAYS)
+    if spec.cadence in ("weekday_sf", "eod_sf"):
+        floor_day = previous_trading_day(last_closed_trading_day(now_utc))
+        return datetime(
+            floor_day.year, floor_day.month, floor_day.day,
+            tzinfo=timezone.utc,
+        )
+    if spec.cadence == "continuous":
+        assert spec.interval_minutes is not None
+        return now_utc - (
+            timedelta(minutes=spec.interval_minutes)
+            + timedelta(minutes=spec.sla_minutes_after_cron)
+        )
+    raise ValueError(f"unknown cadence {spec.cadence!r}")
+
+
 # ── check_freshness — the core public function ──────────────────────────────
 
 
@@ -451,30 +590,40 @@ def check_freshness(
     :func:`nousergon_lib.alerts.publish` with
     ``dedup_key=resolve_dedup_key(spec, now)``.
 
-    The probe walks five steps:
+    Freshness is judged by the RECENCY of the most recent existing
+    instance — NOT by whether an artifact exists under one exact
+    cron-date key. The prior model HEADed ``key.format(date=cron_tick)``
+    and called a present object stale iff ``last_modified < cron_tick``,
+    which false-alarmed whenever the producer wrote a day off the cron
+    (an off-cycle ``run_weekly_offcycle.sh full`` Friday run, a
+    ``{trading_day}`` that resolves to the prior close, a Friday-morning
+    run anchoring to Thursday). A monitor that can't tolerate a one-day
+    anchor shift isn't doing its job. The probe walks four steps:
 
     1. **Grace-period gate.** If ``(now - spec.created_at)`` is shorter
        than ``spec.grace_period_cycles`` cycles, return
-       ``state="grace_period"`` immediately — newly-onboarded
-       producers don't false-alarm on their first emissions.
-    2. **Calendar-holiday gate.** When ``spec.calendar_aware`` and
-       the resolved cycle's date is NOT a trading day, return
-       ``state="fresh"`` with a holiday reason — the cron didn't
-       fire, so the artifact's absence is correct.
-    3. **HEAD canonical.** Resolve the template into the canonical
-       key. HEAD. Classify the response.
-    4. **Stale check.** When the canonical key is present, compare
-       ``LastModified`` against ``cycle_cron_tick``. Older ⇒ ``stale``
-       (the pointer-pattern case); same-or-newer ⇒ ``fresh``.
-    5. **Recovery substitution.** When the canonical key is
-       missing / stale AND ``spec.recovery_key_template`` is set,
-       HEAD the recovery key. If the recovery key is fresh, override
-       to ``state="fresh"`` with ``recovery_substituted=True``.
+       ``state="grace_period"`` — newly-onboarded producers don't
+       false-alarm on their first emissions.
+    2. **Calendar-holiday gate.** When ``spec.calendar_aware`` and the
+       resolved cycle's date is NOT a trading day, return
+       ``state="fresh"`` with a holiday reason — the cron didn't fire,
+       so absence is correct.
+    3. **Find the most recent instance.** For date-templated keys, LIST
+       the prefix and take the newest object matching the template
+       suffix; for fixed keys (latest-pointers / manifests), HEAD once.
+       A canonical-probe error (403 / network) is AUTHORITATIVE →
+       ``state="probe_failed"`` (the monitor is blind; don't mask it).
+       The recovery template, if any, folds in as a best-effort second
+       source.
+    4. **Classify by recency.** Compare the newest instance's
+       ``last_modified`` against :func:`_freshness_floor` — the
+       most-recent cron tick minus an off-cycle slack (5 days for
+       ``saturday_sf``; ~2 trading days for ``weekday_sf`` / ``eod_sf``;
+       ``interval + sla`` for ``continuous``). ``>= floor`` ⇒ ``fresh``;
+       older ⇒ ``stale``; no instance at all ⇒ ``missing``.
 
-    SLA-violated-by-minutes is computed as
-    ``(now - cycle_cron_tick - sla_minutes_after_cron)`` for the
-    ``missing`` / ``stale`` paths; clipped at zero so the field
-    is always non-negative.
+    ``sla_violated_by_minutes`` reports how far the breach is past the
+    SLA/floor; clipped at zero so the field is always non-negative.
     """
     now_utc = _utc(now)
     cycle_tick, cycle_label = resolve_current_cycle(spec, now_utc)
@@ -511,73 +660,96 @@ def check_freshness(
                 ),
             )
 
-    # ── 3. HEAD canonical ───────────────────────────────────────────────
-    canonical_key = _format_key(spec.s3_key_template, cycle_label, cycle_tick)
-    head_state, last_modified, reason = _head_object(
-        s3_client, spec.s3_bucket, canonical_key,
-    )
+    # ── 3. Find the MOST RECENT instance (recency model) ────────────────
+    # No exact-cron-date matching: for date-templated keys we LIST the
+    # prefix and take the newest object matching the template suffix; for
+    # fixed keys (latest-pointers / manifests) we HEAD once. The recovery
+    # template, if any, folds into the same "newest" search. This is robust
+    # to off-cycle runs, the {trading_day} anchor, and early/late writes —
+    # whatever the producer actually wrote, wherever it landed, we find the
+    # freshest one. ``expected_key`` is kept only as a reporting hint.
+    expected_key = _format_key(spec.s3_key_template, cycle_label, cycle_tick)
+    floor = _freshness_floor(spec, now_utc, cycle_tick)
 
-    # ── 4. Stale check (only when canonical present) ────────────────────
-    canonical_state: CheckState
-    if head_state == "present":
-        assert last_modified is not None
-        if last_modified < cycle_tick:
-            canonical_state = "stale"
-            reason = (
-                f"object present but last_modified={last_modified.isoformat()} "
-                f"< cycle_tick={cycle_tick.isoformat()}"
+    def _probe(tmpl: str) -> tuple[str, datetime | None, str | None]:
+        """Return ``(newest_key, newest_last_modified, probe_error)`` for one
+        template — LIST the prefix (date-templated) or HEAD (fixed key)."""
+        if _is_templated(tmpl):
+            return _newest_under_prefix(
+                s3_client, spec.s3_bucket,
+                _listable_prefix(tmpl), _key_suffix(tmpl),
             )
-        else:
-            return CheckResult(
-                state="fresh",
-                last_modified=last_modified,
-                reason="canonical HEAD fresh",
-                canonical_key=canonical_key,
-            )
-    elif head_state == "missing":
-        canonical_state = "missing"
-    else:
-        # probe_failed bypasses the recovery substitution — the
-        # monitor itself is broken; the operator needs to know.
+        state, lm, reason = _head_object(s3_client, spec.s3_bucket, tmpl)
+        if state == "probe_failed":
+            return ("", None, reason)
+        return (tmpl if state == "present" else "", lm if state == "present" else None, None)
+
+    # Canonical probe is AUTHORITATIVE: if the monitor can't read the
+    # canonical location, surface probe_failed (don't mask it with a
+    # recovery hit — the operator needs to know the monitor is blind).
+    newest_key, newest_lm, canonical_error = _probe(spec.s3_key_template)
+    if canonical_error is not None:
         return CheckResult(
             state="probe_failed",
-            reason=reason,
-            canonical_key=canonical_key,
+            reason=canonical_error,
+            canonical_key=expected_key,
         )
 
-    # ── 5. Recovery substitution ────────────────────────────────────────
+    # Recovery is best-effort: fold its newest instance in (recovery probe
+    # errors are non-authoritative and ignored).
+    recovery_substituted = False
     if spec.recovery_key_template is not None:
-        recovery_key = _format_key(
-            spec.recovery_key_template, cycle_label, cycle_tick,
-        )
-        rec_state, rec_last_modified, _rec_reason = _head_object(
-            s3_client, spec.s3_bucket, recovery_key,
-        )
-        if rec_state == "present" and rec_last_modified is not None:
-            if rec_last_modified >= cycle_tick:
-                return CheckResult(
-                    state="fresh",
-                    last_modified=rec_last_modified,
-                    reason=(
-                        "canonical missing/stale; recovery key "
-                        f"{recovery_key} satisfies cycle"
-                    ),
-                    canonical_key=canonical_key,
-                    recovery_substituted=True,
-                )
+        rec_key, rec_lm, _rec_err = _probe(spec.recovery_key_template)
+        if rec_lm is not None and (newest_lm is None or rec_lm > newest_lm):
+            newest_lm, newest_key = rec_lm, rec_key
+            recovery_substituted = True
 
-    # ── SLA-violation arithmetic ─────────────────────────────────────────
-    sla_deadline = cycle_tick + timedelta(minutes=spec.sla_minutes_after_cron)
-    violated_minutes = int(
-        max(0, (now_utc - sla_deadline).total_seconds() // 60)
-    )
+    # ── 4. Classify by recency vs the freshness floor ───────────────────
+    if newest_lm is None:
+        # Canonical probe already succeeded (probe_failed returns early
+        # above) and found nothing; recovery, if any, also empty.
+        sla_deadline = cycle_tick + timedelta(
+            minutes=spec.sla_minutes_after_cron,
+        )
+        return CheckResult(
+            state="missing",
+            sla_violated_by_minutes=int(
+                max(0, (now_utc - sla_deadline).total_seconds() // 60)
+            ),
+            reason=(
+                f"no instance found under "
+                f"{_listable_prefix(spec.s3_key_template)!r} "
+                f"(expected ~{expected_key})"
+            ),
+            canonical_key=expected_key,
+        )
+
+    age_min = int((now_utc - newest_lm).total_seconds() // 60)
+    if newest_lm >= floor:
+        return CheckResult(
+            state="fresh",
+            last_modified=newest_lm,
+            reason=(
+                f"freshest instance {newest_key} "
+                f"last_modified={newest_lm.isoformat()} (age {age_min}min) "
+                f">= freshness floor {floor.isoformat()}"
+            ),
+            canonical_key=expected_key,
+            recovery_substituted=recovery_substituted,
+        )
 
     return CheckResult(
-        state=canonical_state,
-        last_modified=last_modified,
-        sla_violated_by_minutes=violated_minutes,
-        reason=reason,
-        canonical_key=canonical_key,
+        state="stale",
+        last_modified=newest_lm,
+        sla_violated_by_minutes=int(
+            max(0, (floor - newest_lm).total_seconds() // 60)
+        ),
+        reason=(
+            f"freshest instance {newest_key} "
+            f"last_modified={newest_lm.isoformat()} (age {age_min}min) "
+            f"older than freshness floor {floor.isoformat()}"
+        ),
+        canonical_key=expected_key,
     )
 
 

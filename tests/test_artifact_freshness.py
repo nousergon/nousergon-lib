@@ -71,27 +71,53 @@ def _spec(**overrides) -> ArtifactSpec:
 def _fake_s3(
     head_returns: dict[str, dict] | None = None,
     head_raises: dict[str, Exception] | None = None,
+    objects: dict[str, datetime] | None = None,
+    list_raises: dict[str, Exception] | None = None,
 ):
-    """Build a mock S3 client whose ``head_object`` is keyed by key.
+    """Build a mock S3 client supporting ``head_object`` (fixed-key probes)
+    and ``get_paginator("list_objects_v2")`` (date-templated recency probes).
 
-    ``head_returns[key]`` ⇒ that response dict.
-    ``head_raises[key]`` ⇒ that exception.
-    Default ⇒ raise a 404 ClientError-shaped exception.
+    ``head_returns[key]`` ⇒ that HEAD response dict.
+    ``head_raises[key]`` ⇒ HEAD raises that exception.
+    ``objects[key] = last_modified`` ⇒ object visible to LIST. When omitted,
+        the listing is derived from ``head_returns`` (key → its LastModified),
+        so a single ``head_returns=`` keeps working for both probe shapes.
+    ``list_raises[prefix]`` ⇒ paginate raises for that Prefix.
     """
     head_returns = head_returns or {}
     head_raises = head_raises or {}
+    list_raises = list_raises or {}
+    if objects is None:
+        objects = {
+            k: v["LastModified"]
+            for k, v in head_returns.items()
+            if isinstance(v, dict) and "LastModified" in v
+        }
 
     def _head(*, Bucket, Key):
         if Key in head_raises:
             raise head_raises[Key]
         if Key in head_returns:
             return head_returns[Key]
-        # Default: 404 ClientError-shape.
-        err = _ClientError404()
-        raise err
+        raise _ClientError404()
+
+    def _paginate(*, Bucket, Prefix):
+        for pfx, exc in list_raises.items():
+            if Prefix.startswith(pfx) or pfx.startswith(Prefix):
+                raise exc
+        contents = [
+            {"Key": k, "LastModified": lm}
+            for k, lm in objects.items()
+            if k.startswith(Prefix)
+        ]
+        return iter([{"Contents": contents}])
+
+    paginator = mock.Mock()
+    paginator.paginate.side_effect = _paginate
 
     client = mock.Mock()
     client.head_object.side_effect = _head
+    client.get_paginator.return_value = paginator
     return client
 
 
@@ -399,26 +425,42 @@ class TestCheckFreshnessCanonical:
         # 10:00 - (09:00 + 180min = 12:00) = -120min ⇒ clipped to 0.
         assert result.sla_violated_by_minutes == 0
 
-    def test_stale_when_last_modified_predates_cycle(self):
-        # Pointer-pattern: object always at the same key; freshness from LM.
-        # Cycle tick = Sat 5/30 09:00; LM = Sat 5/23 (prior cycle).
+    def test_stale_when_newest_instance_predates_floor(self):
+        # Recency model: the freshest instance is from 5/23 (last week's
+        # cycle), but now is Sat 5/30 — this week's cron tick is 5/30 09:00,
+        # floor = 5/30 09:00 - 5d = 5/25 09:00. 5/23 < 5/25 ⇒ STALE (this
+        # week's artifact genuinely missing). A within-5d off-cycle instance
+        # would read fresh; a full prior-week instance does not.
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
-        s3 = _fake_s3(head_returns={
-            "path/2026-05-30/file.json": {
-                "LastModified": datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
-            },
+        s3 = _fake_s3(objects={
+            "path/2026-05-23/file.json":
+                datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
         })
         result = check_freshness(s3, _spec(), now)
         assert result.state == "stale"
-        assert result.sla_violated_by_minutes == 360
+        # floor 5/25 09:00 - newest 5/23 10:00 = 47h = 2820min before floor.
+        assert result.sla_violated_by_minutes == 2820
         assert result.last_modified == datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc)
 
-    def test_probe_failed_on_403(self):
-        # 403 ⇒ probe_failed (the monitor itself is broken).
+    def test_fresh_when_off_cycle_instance_within_slack(self):
+        # The off-cycle regression: an instance written the day BEFORE the
+        # Saturday cron (a `run_weekly_offcycle.sh full` Friday run) under a
+        # DIFFERENT date key than the cron date must read FRESH — the monitor
+        # finds the most recent instance, not an exact cron-date key.
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
-        s3 = _fake_s3(head_raises={
-            "path/2026-05-30/file.json": _ClientError403(),
+        s3 = _fake_s3(objects={
+            # Friday-anchored key, written Friday — not the 5/30 cron date.
+            "path/2026-05-29/file.json":
+                datetime(2026, 5, 29, 16, 0, tzinfo=timezone.utc),
         })
+        result = check_freshness(s3, _spec(), now)
+        assert result.state == "fresh"
+        assert result.last_modified == datetime(2026, 5, 29, 16, 0, tzinfo=timezone.utc)
+
+    def test_probe_failed_on_403(self):
+        # 403 on the LIST probe ⇒ probe_failed (the monitor itself is broken).
+        now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(list_raises={"path/": _ClientError403()})
         result = check_freshness(s3, _spec(), now)
         assert result.state == "probe_failed"
         assert "403" in result.reason or "AccessDenied" in result.reason
@@ -426,9 +468,7 @@ class TestCheckFreshnessCanonical:
     def test_probe_failed_on_network_error(self):
         # Random exception (not a ClientError shape) ⇒ probe_failed.
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
-        s3 = _fake_s3(head_raises={
-            "path/2026-05-30/file.json": RuntimeError("network down"),
-        })
+        s3 = _fake_s3(list_raises={"path/": RuntimeError("network down")})
         result = check_freshness(s3, _spec(), now)
         assert result.state == "probe_failed"
         assert "network" in result.reason.lower() or "probe error" in result.reason.lower()
@@ -473,16 +513,17 @@ class TestCheckFreshnessRecovery:
         assert result.recovery_substituted is True
 
     def test_recovery_too_old_does_not_substitute(self):
-        # Recovery exists but its last_modified predates cycle ⇒ does NOT save.
+        # Recovery's freshest instance predates the floor ⇒ does NOT satisfy:
+        # an old instance exists, so it reads STALE (not missing), and the
+        # fresh-only recovery_substituted flag stays False.
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
         spec = _spec(recovery_key_template="recovery/{date}/file.json")
-        s3 = _fake_s3(head_returns={
-            "recovery/2026-05-30/file.json": {
-                "LastModified": datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
-            },
+        s3 = _fake_s3(objects={
+            "recovery/2026-05-23/file.json":
+                datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
         })
         result = check_freshness(s3, spec, now)
-        assert result.state == "missing"
+        assert result.state == "stale"
         assert result.recovery_substituted is False
 
     def test_probe_failed_canonical_bypasses_recovery(self):
@@ -492,11 +533,9 @@ class TestCheckFreshnessRecovery:
         cycle_tick = datetime(2026, 5, 30, 9, 0, tzinfo=timezone.utc)
         spec = _spec(recovery_key_template="recovery/{date}/file.json")
         s3 = _fake_s3(
-            head_raises={"path/2026-05-30/file.json": _ClientError403()},
-            head_returns={
-                "recovery/2026-05-30/file.json": {
-                    "LastModified": cycle_tick + timedelta(hours=4),
-                },
+            list_raises={"path/": _ClientError403()},
+            objects={
+                "recovery/2026-05-30/file.json": cycle_tick + timedelta(hours=4),
             },
         )
         result = check_freshness(s3, spec, now)
