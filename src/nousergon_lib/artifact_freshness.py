@@ -585,34 +585,35 @@ def _newest_under_prefix(
     return (newest_key, newest_lm, None)
 
 
-# Off-cycle slack for the saturday weekly cadence, counted in NYSE TRADING
-# days (not calendar days). The freshness floor is the most-recent cron tick
-# MINUS this slack, so an off-cycle `run_weekly_offcycle.sh full` run (Fri) or
-# a Sunday run still reads FRESH, while a genuinely skipped week ages past the
-# floor and reads STALE.
+# Max-age staleness window for the saturday weekly cadence, counted in
+# CALENDAR days from ``now``. The freshness floor is ``now − 10 days``: the
+# newest existing instance is FRESH iff its ``last_modified`` is within the
+# last 10 calendar days, STALE otherwise. (config#1297, Brian's directive
+# 2026-06-27.)
 #
-# A weekly cycle spans at most 5 trading days (Mon–Fri); 6 trading days of
-# slack covers a normal Sat→Sat gap plus Fri/Sun jitter. Counting in TRADING
-# days fixes two defects of the prior 5-CALENDAR-day slack:
-#   1. 5 calendar days < the 7 calendar days between two Saturdays, so last
-#      week's artifact fell below the floor the instant THIS Saturday's 09:00
-#      cron ticked — before this week's multi-hour SF produced its replacement
-#      → a burst of false "stale" alerts at the Saturday tick (2026-06-27).
-#   2. A Fri→Sun jitter gap (≈9 calendar days) tripped a calendar floor but is
-#      only ≤5 trading days, so it now reads fresh.
-# Trading-day counting is also holiday-robust: a 4-trading-day holiday week
-# automatically gets more calendar slack. A genuinely-skipped week still ages
-# past 6 trading days by the following Saturday and reads STALE — the backstop;
-# the real-time SF failure is caught by the Saturday-SF Watch agent.
-_SATURDAY_OFFCYCLE_SLACK_TRADING_DAYS: Final[int] = 6
-
-
-def _n_trading_days_before(d: date, n: int) -> date:
-    """The date ``n`` NYSE trading days before ``d`` (exclusive of ``d``)."""
-    cur = d
-    for _ in range(n):
-        cur = previous_trading_day(cur)
-    return cur
+# Why 10 calendar days anchored to ``now`` (not the prior trading-day slack
+# anchored to ``cycle_tick``):
+#
+#   1. **No Saturday-SF-start burst.** The prior model derived the floor from
+#      ``cycle_tick`` (the most-recent Saturday 09:00 UTC tick). At the instant
+#      the Saturday cron ticked, the "current cycle" flipped to this week, but
+#      this week's multi-hour SF had not yet produced its artifacts — so last
+#      week's ~7-day-old instances were judged against a freshly-advanced floor
+#      and flipped STALE, paging ~22 false alerts at 2am PT (2026-06-27).
+#      Anchoring the window to ``now`` and sizing it at 10 days means last
+#      week's run (≤7 days old) is comfortably inside the window regardless of
+#      whether this Saturday's run has started — the burst is structurally
+#      impossible.
+#   2. **Run-day jitter tolerated.** A weekly run that lands on Friday and the
+#      next on the following Sunday is ≈9 calendar days apart — normal jitter,
+#      must NOT alert. 9 ≤ 10, so it reads FRESH.
+#   3. **Genuine misses still caught.** A genuinely-skipped week ages past 10
+#      calendar days and reads STALE — the absence backstop. (Real-time SF
+#      failure is separately caught by the Saturday-SF Watch agent.)
+#
+# A per-spec ``stale_after_days`` override may be threaded later; for now the
+# constant is the single source of the weekly window.
+_SATURDAY_SF_STALE_DAYS: Final[int] = 10
 
 
 def _freshness_floor(
@@ -620,17 +621,15 @@ def _freshness_floor(
 ) -> datetime:
     """The oldest ``last_modified`` that still counts as FRESH for ``spec``.
 
-    Anchored to the most-recent expected production (``cycle_tick``), NOT to
-    ``now`` — so the floor distinguishes "this cycle produced (possibly
-    off-cycle/early)" from "this cycle was skipped", which a pure
-    ``now - period`` window cannot:
-
-    - ``saturday_sf``: ``cycle_tick`` minus 6 NYSE TRADING days. The
-      most-recent Saturday cron minus the off-cycle slack: last week's run
-      (≤5 trading days back) and a Fri/Sun off-cycle run read fresh; a
-      genuinely-skipped week ages past 6 trading days and reads stale.
-      Trading-day counting is holiday-robust and never flips last week's
-      artifact stale at the Saturday tick before this week's run completes.
+    - ``saturday_sf``: ``now`` minus :data:`_SATURDAY_SF_STALE_DAYS` (10)
+      CALENDAR days — a max-age recency window anchored to ``now``, NOT to
+      ``cycle_tick``. The newest instance is FRESH iff modified within the
+      last 10 days. Anchoring to ``now`` (rather than the Saturday cron tick)
+      is what kills the Saturday-SF-start false-positive burst: last week's
+      ~7-day-old artifacts stay inside the window at the instant the Saturday
+      cron ticks, before this week's multi-hour SF has produced replacements.
+      A Fri→Sun run-day-jitter gap (≈9d) also stays inside; a genuinely-missed
+      week (>10d) ages out and reads STALE.
     - ``weekday_sf`` / ``eod_sf``: the start of ``previous_trading_day(
       last_closed_trading_day(now))`` — calendar-aware, so the newest
       instance must be from within the last ~2 trading days (tolerates the
@@ -638,13 +637,7 @@ def _freshness_floor(
     - ``continuous``: ``now - (interval + sla)``.
     """
     if spec.cadence == "saturday_sf":
-        floor_day = _n_trading_days_before(
-            cycle_tick.date(), _SATURDAY_OFFCYCLE_SLACK_TRADING_DAYS,
-        )
-        return datetime(
-            floor_day.year, floor_day.month, floor_day.day,
-            tzinfo=timezone.utc,
-        )
+        return now_utc - timedelta(days=_SATURDAY_SF_STALE_DAYS)
     if spec.cadence in ("weekday_sf", "eod_sf"):
         floor_day = previous_trading_day(last_closed_trading_day(now_utc))
         return datetime(
@@ -733,11 +726,14 @@ def check_freshness(
        The recovery template, if any, folds in as a best-effort second
        source.
     4. **Classify by recency.** Compare the newest instance's
-       ``last_modified`` against :func:`_freshness_floor` — the
-       most-recent cron tick minus an off-cycle slack (6 trading days for
-       ``saturday_sf``; ~2 trading days for ``weekday_sf`` / ``eod_sf``;
-       ``interval + sla`` for ``continuous``). ``>= floor`` ⇒ ``fresh``;
-       older ⇒ ``stale``; no instance at all ⇒ ``missing``.
+       ``last_modified`` against :func:`_freshness_floor` — a max-age
+       window (``now`` minus 10 calendar days for ``saturday_sf``;
+       ~2 trading days for ``weekday_sf`` / ``eod_sf``; ``interval + sla``
+       for ``continuous``). ``>= floor`` ⇒ ``fresh``; older ⇒ ``stale``;
+       no instance at all ⇒ ``missing``. The 10-day ``saturday_sf`` window
+       is anchored to ``now`` (not the Saturday cron tick) so last week's
+       artifacts stay fresh at the instant this Saturday's SF starts —
+       killing the Saturday-SF-start false-positive burst (config#1297).
 
     ``sla_violated_by_minutes`` reports how far the breach is past the
     SLA/floor; clipped at zero so the field is always non-negative.

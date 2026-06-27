@@ -426,11 +426,10 @@ class TestCheckFreshnessCanonical:
         assert result.sla_violated_by_minutes == 0
 
     def test_stale_when_newest_instance_predates_floor(self):
-        # Recency model, TRADING-day floor: now is Sat 5/30, cron tick
-        # 5/30 09:00, floor = 6 trading days before 5/30 = 5/21 00:00
-        # (Fri29,Thu28,Wed27,Tue26,[Mon25 Memorial holiday→skip],Fri22,Thu21).
-        # The freshest instance is from 5/15 — well past 6 trading days back ⇒
-        # STALE (a genuinely-skipped week, not normal jitter).
+        # Recency model, 10-day max-age floor anchored to NOW: now is Sat 5/30
+        # 18:00 UTC, floor = now − 10d = 5/20 18:00 UTC. The freshest instance
+        # is from 5/15 — older than 10 calendar days ⇒ STALE (a genuinely-
+        # skipped week, not normal jitter).
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
         s3 = _fake_s3(objects={
             "path/2026-05-15/file.json":
@@ -438,8 +437,9 @@ class TestCheckFreshnessCanonical:
         })
         result = check_freshness(s3, _spec(), now)
         assert result.state == "stale"
-        # floor 5/21 00:00 - newest 5/15 10:00 = 5d14h = 8040min before floor.
-        assert result.sla_violated_by_minutes == 8040
+        # floor 5/20 18:00 - newest 5/15 10:00 = 5d8h = 7680min before floor
+        # (== now − (newest + 10d), the issue's deadline arithmetic).
+        assert result.sla_violated_by_minutes == 7680
         assert result.last_modified == datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc)
 
     def test_last_week_instance_fresh_at_saturday_tick(self):
@@ -448,7 +448,7 @@ class TestCheckFreshnessCanonical:
         # this week's artifacts), last week's instance must read FRESH — the
         # prior 5-CALENDAR-day floor flipped it stale here, paging at 2am.
         # now = Sat 5/30 09:30 (just after the tick); newest = last Saturday
-        # 5/23's run (5 trading days back, within the 6-trading-day floor).
+        # 5/23's run (7 calendar days back, within the 10-day max-age window).
         now = datetime(2026, 5, 30, 9, 30, tzinfo=timezone.utc)
         s3 = _fake_s3(objects={
             "path/2026-05-23/file.json":
@@ -488,6 +488,112 @@ class TestCheckFreshnessCanonical:
         result = check_freshness(s3, _spec(), now)
         assert result.state == "probe_failed"
         assert "network" in result.reason.lower() or "probe error" in result.reason.lower()
+
+
+# ── check_freshness — saturday_sf 10-day max-age staleness (config#1297) ─────
+
+
+class TestSaturdaySf10DayMaxAge:
+    """The 2026-06-27 Saturday-SF-start false-positive burst + run-day-jitter
+    regression set. The ``saturday_sf`` freshness floor is now a 10-CALENDAR-
+    day max-age window anchored to ``now`` (``_SATURDAY_SF_STALE_DAYS = 10``),
+    NOT a slack anchored to the Saturday cron tick. A normal weekly artifact
+    (~7d old) must read FRESH even at the instant the Saturday cron ticks
+    before this week's multi-hour SF has produced its replacement; Fri→Sun
+    run-day jitter (~9d) must read FRESH; a genuinely-missed run (>10d) must
+    read STALE; nothing at all must read MISSING."""
+
+    def test_seven_day_old_keyed_instance_is_fresh(self):
+        # THE regression. now = Sat 6/27 09:05 UTC — the instant this Saturday's
+        # 09:00 cron ticks (the SF has only just started, this week's artifacts
+        # don't exist yet). The newest instance is last Saturday's 6/20 run,
+        # 7 calendar days old. Must read FRESH — the false-positive burst that
+        # paged ~22 SNS alerts at 2am PT must be structurally impossible.
+        now = datetime(2026, 6, 27, 9, 5, tzinfo=timezone.utc)
+        s3 = _fake_s3(objects={
+            "path/2026-06-20/file.json":
+                datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc),
+        })
+        result = check_freshness(s3, _spec(), now)
+        assert result.state == "fresh"
+        assert result.sla_violated_by_minutes == 0
+
+    def test_friday_run_nine_days_old_is_fresh(self):
+        # Run-day jitter: a weekly run landed on a Friday and the next has not
+        # yet started by the following Sunday — ≈9 calendar days apart, normal
+        # jitter that must NOT alert. now = Sun 6/28 12:00; newest = Fri 6/19
+        # 16:00 (9d ago, under the {trading_day}=Fri key). 9 ≤ 10 ⇒ FRESH.
+        now = datetime(2026, 6, 28, 12, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(objects={
+            "path/2026-06-19/file.json":
+                datetime(2026, 6, 19, 16, 0, tzinfo=timezone.utc),
+        })
+        result = check_freshness(s3, _spec(), now)
+        assert result.state == "fresh"
+
+    def test_eleven_day_old_instance_is_stale(self):
+        # A genuinely-missed run: newest instance is 11 calendar days old —
+        # past the 10-day max-age window ⇒ STALE (the absence backstop must
+        # still fire on a real miss). now = Sat 6/27 18:00; newest = 6/16 12:00.
+        now = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(objects={
+            "path/2026-06-16/file.json":
+                datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc),
+        })
+        result = check_freshness(s3, _spec(), now)
+        assert result.state == "stale"
+        # deadline = newest + 10d = 6/26 12:00; violated = now − deadline
+        # = 6/27 18:00 − 6/26 12:00 = 1d6h = 1800min.
+        assert result.sla_violated_by_minutes == 1800
+        assert result.last_modified == datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+
+    def test_none_in_window_is_missing(self):
+        # No instance at all under the prefix ⇒ MISSING (not stale). The SLA
+        # breach anchors to the cron tick + sla grace, not the max-age window.
+        now = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), _spec(), now)
+        assert result.state == "missing"
+
+    def test_pointer_artifact_within_10d_is_fresh(self):
+        # Pointer artifact (fixed key, no {...} placeholder, e.g.
+        # config/scoring_weights.json): fresh iff now − last_modified ≤ 10d.
+        # now = 6/27 18:00; last_modified = 6/18 18:00 (9d) ⇒ FRESH.
+        now = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)
+        spec = _spec(s3_key_template="config/scoring_weights.json")
+        s3 = _fake_s3(head_returns={
+            "config/scoring_weights.json": {
+                "LastModified": datetime(2026, 6, 18, 18, 0, tzinfo=timezone.utc),
+            },
+        })
+        result = check_freshness(s3, spec, now)
+        assert result.state == "fresh"
+
+    def test_pointer_artifact_age_boundary_just_over_10d_is_stale(self):
+        # Pointer-age boundary: last_modified exactly 10d + 1min before now ⇒
+        # just over the window ⇒ STALE. now = 6/27 18:00;
+        # last_modified = 6/17 17:59 (10d 1min ago).
+        now = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)
+        spec = _spec(s3_key_template="regime/latest.json")
+        s3 = _fake_s3(head_returns={
+            "regime/latest.json": {
+                "LastModified": datetime(2026, 6, 17, 17, 59, tzinfo=timezone.utc),
+            },
+        })
+        result = check_freshness(s3, spec, now)
+        assert result.state == "stale"
+
+    def test_pointer_artifact_age_boundary_just_under_10d_is_fresh(self):
+        # The other side of the boundary: last_modified exactly 10d − 1min
+        # before now ⇒ inside the window ⇒ FRESH.
+        now = datetime(2026, 6, 27, 18, 0, tzinfo=timezone.utc)
+        spec = _spec(s3_key_template="regime/latest.json")
+        s3 = _fake_s3(head_returns={
+            "regime/latest.json": {
+                "LastModified": datetime(2026, 6, 17, 18, 1, tzinfo=timezone.utc),
+            },
+        })
+        result = check_freshness(s3, spec, now)
+        assert result.state == "fresh"
 
 
 # ── check_freshness — recovery substitution ─────────────────────────────────
@@ -534,8 +640,9 @@ class TestCheckFreshnessRecovery:
         # fresh-only recovery_substituted flag stays False.
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
         spec = _spec(recovery_key_template="recovery/{date}/file.json")
-        # 5/15 is past the 6-trading-day floor (5/21) — a genuinely-old
-        # recovery instance, so it reads STALE and does not substitute.
+        # 5/15 is past the 10-day max-age floor (now 5/30 − 10d = 5/20) —
+        # a genuinely-old recovery instance, so it reads STALE and does not
+        # substitute.
         s3 = _fake_s3(objects={
             "recovery/2026-05-15/file.json":
                 datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
