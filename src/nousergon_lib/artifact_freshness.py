@@ -585,13 +585,34 @@ def _newest_under_prefix(
     return (newest_key, newest_lm, None)
 
 
-# Off-cycle slack (days) for the saturday weekly cadence. The freshness
-# floor is the most-recent cron tick MINUS this slack, so an off-cycle
-# `run_weekly_offcycle.sh full` run (which suppresses the upcoming Saturday
-# cron and fires earlier in the week) still reads FRESH, while a genuinely
-# skipped week ages past the floor. Must be < 7 so a fully-missed week is
-# still detectable; 5 covers a Mon–Sat off-cycle window.
-_SATURDAY_OFFCYCLE_SLACK_DAYS: Final[int] = 5
+# Off-cycle slack for the saturday weekly cadence, counted in NYSE TRADING
+# days (not calendar days). The freshness floor is the most-recent cron tick
+# MINUS this slack, so an off-cycle `run_weekly_offcycle.sh full` run (Fri) or
+# a Sunday run still reads FRESH, while a genuinely skipped week ages past the
+# floor and reads STALE.
+#
+# A weekly cycle spans at most 5 trading days (Mon–Fri); 6 trading days of
+# slack covers a normal Sat→Sat gap plus Fri/Sun jitter. Counting in TRADING
+# days fixes two defects of the prior 5-CALENDAR-day slack:
+#   1. 5 calendar days < the 7 calendar days between two Saturdays, so last
+#      week's artifact fell below the floor the instant THIS Saturday's 09:00
+#      cron ticked — before this week's multi-hour SF produced its replacement
+#      → a burst of false "stale" alerts at the Saturday tick (2026-06-27).
+#   2. A Fri→Sun jitter gap (≈9 calendar days) tripped a calendar floor but is
+#      only ≤5 trading days, so it now reads fresh.
+# Trading-day counting is also holiday-robust: a 4-trading-day holiday week
+# automatically gets more calendar slack. A genuinely-skipped week still ages
+# past 6 trading days by the following Saturday and reads STALE — the backstop;
+# the real-time SF failure is caught by the Saturday-SF Watch agent.
+_SATURDAY_OFFCYCLE_SLACK_TRADING_DAYS: Final[int] = 6
+
+
+def _n_trading_days_before(d: date, n: int) -> date:
+    """The date ``n`` NYSE trading days before ``d`` (exclusive of ``d``)."""
+    cur = d
+    for _ in range(n):
+        cur = previous_trading_day(cur)
+    return cur
 
 
 def _freshness_floor(
@@ -604,9 +625,12 @@ def _freshness_floor(
     off-cycle/early)" from "this cycle was skipped", which a pure
     ``now - period`` window cannot:
 
-    - ``saturday_sf``: ``cycle_tick - 5 days``. The most-recent Saturday
-      cron minus the off-cycle slack: a Fri/early run for this week is
-      fresh; last week's artifact (>5d before this Saturday) is stale.
+    - ``saturday_sf``: ``cycle_tick`` minus 6 NYSE TRADING days. The
+      most-recent Saturday cron minus the off-cycle slack: last week's run
+      (≤5 trading days back) and a Fri/Sun off-cycle run read fresh; a
+      genuinely-skipped week ages past 6 trading days and reads stale.
+      Trading-day counting is holiday-robust and never flips last week's
+      artifact stale at the Saturday tick before this week's run completes.
     - ``weekday_sf`` / ``eod_sf``: the start of ``previous_trading_day(
       last_closed_trading_day(now))`` — calendar-aware, so the newest
       instance must be from within the last ~2 trading days (tolerates the
@@ -614,7 +638,13 @@ def _freshness_floor(
     - ``continuous``: ``now - (interval + sla)``.
     """
     if spec.cadence == "saturday_sf":
-        return cycle_tick - timedelta(days=_SATURDAY_OFFCYCLE_SLACK_DAYS)
+        floor_day = _n_trading_days_before(
+            cycle_tick.date(), _SATURDAY_OFFCYCLE_SLACK_TRADING_DAYS,
+        )
+        return datetime(
+            floor_day.year, floor_day.month, floor_day.day,
+            tzinfo=timezone.utc,
+        )
     if spec.cadence in ("weekday_sf", "eod_sf"):
         floor_day = previous_trading_day(last_closed_trading_day(now_utc))
         return datetime(
@@ -704,7 +734,7 @@ def check_freshness(
        source.
     4. **Classify by recency.** Compare the newest instance's
        ``last_modified`` against :func:`_freshness_floor` — the
-       most-recent cron tick minus an off-cycle slack (5 days for
+       most-recent cron tick minus an off-cycle slack (6 trading days for
        ``saturday_sf``; ~2 trading days for ``weekday_sf`` / ``eod_sf``;
        ``interval + sla`` for ``continuous``). ``>= floor`` ⇒ ``fresh``;
        older ⇒ ``stale``; no instance at all ⇒ ``missing``.

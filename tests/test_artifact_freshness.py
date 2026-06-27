@@ -426,21 +426,37 @@ class TestCheckFreshnessCanonical:
         assert result.sla_violated_by_minutes == 0
 
     def test_stale_when_newest_instance_predates_floor(self):
-        # Recency model: the freshest instance is from 5/23 (last week's
-        # cycle), but now is Sat 5/30 — this week's cron tick is 5/30 09:00,
-        # floor = 5/30 09:00 - 5d = 5/25 09:00. 5/23 < 5/25 ⇒ STALE (this
-        # week's artifact genuinely missing). A within-5d off-cycle instance
-        # would read fresh; a full prior-week instance does not.
+        # Recency model, TRADING-day floor: now is Sat 5/30, cron tick
+        # 5/30 09:00, floor = 6 trading days before 5/30 = 5/21 00:00
+        # (Fri29,Thu28,Wed27,Tue26,[Mon25 Memorial holiday→skip],Fri22,Thu21).
+        # The freshest instance is from 5/15 — well past 6 trading days back ⇒
+        # STALE (a genuinely-skipped week, not normal jitter).
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
         s3 = _fake_s3(objects={
-            "path/2026-05-23/file.json":
-                datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
+            "path/2026-05-15/file.json":
+                datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
         })
         result = check_freshness(s3, _spec(), now)
         assert result.state == "stale"
-        # floor 5/25 09:00 - newest 5/23 10:00 = 47h = 2820min before floor.
-        assert result.sla_violated_by_minutes == 2820
-        assert result.last_modified == datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc)
+        # floor 5/21 00:00 - newest 5/15 10:00 = 5d14h = 8040min before floor.
+        assert result.sla_violated_by_minutes == 8040
+        assert result.last_modified == datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc)
+
+    def test_last_week_instance_fresh_at_saturday_tick(self):
+        # Regression for the 2026-06-27 burst: at the moment THIS Saturday's
+        # 09:00 cron ticks (the SF has only just started and hasn't produced
+        # this week's artifacts), last week's instance must read FRESH — the
+        # prior 5-CALENDAR-day floor flipped it stale here, paging at 2am.
+        # now = Sat 5/30 09:30 (just after the tick); newest = last Saturday
+        # 5/23's run (5 trading days back, within the 6-trading-day floor).
+        now = datetime(2026, 5, 30, 9, 30, tzinfo=timezone.utc)
+        s3 = _fake_s3(objects={
+            "path/2026-05-23/file.json":
+                datetime(2026, 5, 23, 12, 0, tzinfo=timezone.utc),
+        })
+        result = check_freshness(s3, _spec(), now)
+        assert result.state == "fresh"
+        assert result.last_modified == datetime(2026, 5, 23, 12, 0, tzinfo=timezone.utc)
 
     def test_fresh_when_off_cycle_instance_within_slack(self):
         # The off-cycle regression: an instance written the day BEFORE the
@@ -518,9 +534,11 @@ class TestCheckFreshnessRecovery:
         # fresh-only recovery_substituted flag stays False.
         now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
         spec = _spec(recovery_key_template="recovery/{date}/file.json")
+        # 5/15 is past the 6-trading-day floor (5/21) — a genuinely-old
+        # recovery instance, so it reads STALE and does not substitute.
         s3 = _fake_s3(objects={
-            "recovery/2026-05-23/file.json":
-                datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc),
+            "recovery/2026-05-15/file.json":
+                datetime(2026, 5, 15, 10, 0, tzinfo=timezone.utc),
         })
         result = check_freshness(s3, spec, now)
         assert result.state == "stale"
