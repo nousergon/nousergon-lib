@@ -864,13 +864,19 @@ class TestContinuousActiveWindow:
         result = check_freshness(_fake_s3(), _open_orders_spec(), now)
         assert result.state == "missing"
 
-    def test_hours_only_no_trading_day_gate(self):
-        # active_hours_utc without active_trading_days_only: a weekend hour
-        # INSIDE the window is still evaluated (not short-circuited).
+    def test_hours_implies_market_hours_trading_day_gate(self):
+        # Semantic consolidation (run_calendar, 2026-06-28): a legacy spec
+        # with active_hours_utc set (and no run_calendar) resolves to
+        # run_calendar="market_hours", which is trading-day AND hours gated.
+        # So a weekend hour inside the window short-circuits to fresh — there
+        # is no "hours-only on all calendar days" producer in the fleet, and
+        # the enum has no value for it. Previously these were independent
+        # bounds and a bare active_hours_utc evaluated on Saturday.
         spec = _open_orders_spec(active_trading_days_only=False)
         now = datetime(2026, 6, 27, 16, 0, tzinfo=timezone.utc)  # Sat, in hours
         result = check_freshness(_fake_s3(), spec, now)
-        assert result.state == "missing"
+        assert result.state == "fresh"
+        assert "non-trading day" in result.reason
 
 
 class TestActiveWindowValidation:
@@ -898,3 +904,136 @@ class TestActiveWindowValidation:
     def test_active_hours_end_24_allowed(self):
         s = _open_orders_spec(active_hours_utc=[14, 24])
         assert s.active_hours_utc == (14, 24)
+
+
+# ── run_calendar (the trading-day-by-default continuous fix) ──────────────────
+
+
+def _daily_health_spec(**overrides) -> ArtifactSpec:
+    """A continuous, fixed-key DAILY (1440) spec modelling
+    ``health/daily_data.json`` — written on each weekday + Saturday SF run,
+    never on Sunday. The 2026-06-28 false-positive subject."""
+    defaults = dict(
+        artifact_id="health_alpha_engine_data",
+        s3_bucket="bkt",
+        s3_key_template="health/daily_data.json",
+        cadence="continuous",
+        interval_minutes=1440,
+        sla_minutes_after_cron=60,
+        severity="warning",
+        owner_repo="alpha-engine-data",
+        created_at=date(2025, 1, 1),
+        run_calendar="trading_days",
+    )
+    defaults.update(overrides)
+    return ArtifactSpec(**defaults)
+
+
+def _health_s3(last_modified: datetime):
+    return _fake_s3(head_returns={
+        "health/daily_data.json": {"LastModified": last_modified},
+    })
+
+
+class TestRunCalendarTradingDays:
+    """Daily trading-day continuous producer: the weekend gap must not be
+    counted against it (the bug the alert surfaced 2026-06-28)."""
+
+    def test_sunday_short_circuits_fresh_even_when_absent(self):
+        # Sun 2026-06-28 10:00 UTC — producer idle (no Sunday run). Even an
+        # absent artifact must NOT alarm.
+        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), _daily_health_spec(), now)
+        assert result.state == "fresh"
+        assert "non-trading day" in result.reason
+
+    def test_monday_morning_fresh_with_saturday_write(self):
+        # THE FIX. Mon 2026-06-29 10:00 UTC (trading day, pre-12:45 run).
+        # Freshest write is Sat 2026-06-27 09:30 — ~48h old. Under the old
+        # wall-clock floor (now - 1440 - 60 = ~25h) this flips STALE every
+        # Monday morning. Under the trading-day floor it is FRESH (Saturday's
+        # write >= previous_trading_day(last_closed) = Thursday).
+        sat_write = datetime(2026, 6, 27, 9, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc)
+        result = check_freshness(_health_s3(sat_write), _daily_health_spec(), now)
+        assert result.state == "fresh"
+
+    def test_monday_morning_would_be_stale_under_all_days(self):
+        # Control: the SAME data under run_calendar="all_days" is stale —
+        # proves the trading-day floor (not some other change) is what fixes it.
+        sat_write = datetime(2026, 6, 27, 9, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc)
+        result = check_freshness(
+            _health_s3(sat_write),
+            _daily_health_spec(run_calendar="all_days"),
+            now,
+        )
+        assert result.state == "stale"
+
+    def test_genuine_multiday_miss_caught_stale(self):
+        # Wed 2026-07-01 10:00 UTC: newest write still Sat 06-27 (Mon+Tue runs
+        # both failed). Trading-day floor = previous_trading_day(last_closed
+        # =Tue) = Monday → Saturday < Monday → STALE. The absence backstop
+        # still fires; trading-day awareness only tolerates the weekend gap.
+        sat_write = datetime(2026, 6, 27, 9, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc)
+        result = check_freshness(_health_s3(sat_write), _daily_health_spec(), now)
+        assert result.state == "stale"
+
+
+class TestRunCalendarAllDays:
+    """all_days = the documented wall-clock exception (7-day producers)."""
+
+    def test_weekend_not_short_circuited(self):
+        # A genuine 7-day producer (e.g. the changelog aggregator) is judged
+        # every calendar day — a Sunday absence is a real gap, not idle.
+        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)  # Sunday
+        spec = _daily_health_spec(
+            artifact_id="changelog_daily_view", run_calendar="all_days",
+        )
+        result = check_freshness(_fake_s3(), spec, now)
+        assert result.state == "missing"
+
+
+class TestRunCalendarResolutionAndValidation:
+
+    def test_default_resolves_all_days(self):
+        # Nothing declared ⇒ conservative all_days (no silent flip of an
+        # un-migrated continuous spec).
+        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)  # Sunday
+        spec = _daily_health_spec(run_calendar=None)
+        result = check_freshness(_fake_s3(), spec, now)
+        assert result.state == "missing"  # all_days ⇒ evaluated, absent ⇒ missing
+
+    def test_legacy_active_trading_days_only_maps_to_trading_days(self):
+        # Back-compat: the deprecated boolean (no run_calendar) still gives
+        # trading-day idle behavior through the resolution fallback.
+        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)  # Sunday
+        spec = _daily_health_spec(
+            run_calendar=None, active_trading_days_only=True,
+        )
+        result = check_freshness(_fake_s3(), spec, now)
+        assert result.state == "fresh"
+        assert "non-trading day" in result.reason
+
+    def test_explicit_run_calendar_wins_over_legacy_boolean(self):
+        # Explicit run_calendar="all_days" overrides a stale legacy
+        # active_trading_days_only=True.
+        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)  # Sunday
+        spec = _daily_health_spec(
+            run_calendar="all_days", active_trading_days_only=True,
+        )
+        result = check_freshness(_fake_s3(), spec, now)
+        assert result.state == "missing"  # all_days wins ⇒ evaluated
+
+    def test_market_hours_requires_active_hours(self):
+        with pytest.raises(ValueError, match="market_hours.*active_hours_utc"):
+            _daily_health_spec(run_calendar="market_hours")
+
+    def test_run_calendar_on_non_continuous_raises(self):
+        with pytest.raises(ValueError, match="run_calendar.*continuous"):
+            _spec(run_calendar="trading_days")  # default cadence saturday_sf
+
+    def test_invalid_run_calendar_value_raises(self):
+        with pytest.raises(ValueError, match="run_calendar"):
+            _daily_health_spec(run_calendar="weekly")
