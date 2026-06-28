@@ -8,6 +8,7 @@ fallback). Install ``nousergon-lib[quant-stats]``.
 
 Modules:
   - ``dsr``                     — Probabilistic + Deflated Sharpe (López de Prado)
+  - ``pbo``                     — CSCV Probability of Backtest Overfitting (BBLZ 2014)
   - ``calibration``             — Expected Calibration Error (probability vs outcome)
   - ``information_coefficient`` — Spearman rank IC of conviction vs forward return
   - ``expectancy``              — hit-rate × win/loss decomposition
@@ -19,6 +20,7 @@ Modules:
 Example::
 
     from nousergon_lib.quant.stats.dsr import compute_dsr
+    from nousergon_lib.quant.stats.pbo import cscv_pbo
     from nousergon_lib.quant.stats.multiple_testing import benjamini_hochberg
     from nousergon_lib.quant.stats.intervals import bootstrap_ci, wilson_score_interval
 """
