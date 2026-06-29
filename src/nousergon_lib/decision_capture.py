@@ -95,7 +95,7 @@ class DecisionArtifact(BaseModel):
       supports deterministic decisions with ``model_metadata=None`` +
       ``full_prompt_context=None``). New writes go out as v2.
     - ``run_id``: unique per pipeline invocation; ties multiple agents'
-      artifacts together for one Saturday SF run or weekday morning run.
+      artifacts together for one Weekly Freshness SF run or weekday morning run.
     - ``timestamp``: ISO-8601 capture time (wall clock at the moment the
       wrapper writes to S3).
     - ``agent_id``: identifies which agent produced this — e.g.

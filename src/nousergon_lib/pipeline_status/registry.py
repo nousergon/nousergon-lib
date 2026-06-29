@@ -63,7 +63,7 @@ SUBSTANTIVE_RESOURCES: Final[frozenset[str]] = frozenset(
 # to the registry below; the CI test (planned in dashboard Phase 2) asserts
 # this round-trip.
 WAIT_GROUPING: Final[dict[str, str]] = {
-    # Saturday SF
+    # Weekly Freshness SF
     "WaitForMorningEnrich": "MorningEnrich",
     "WaitForDataPhase1": "DataPhase1",
     "WaitForRAGIngestion": "RAGIngestion",
@@ -76,7 +76,7 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
-    # Weekday SF
+    # Pre-open Trading SF
     "WaitForMorningPlanner": "RunMorningPlanner",
     "WaitForDailyNews": "RunDailyNews",  # secondary daily news pull (fail-soft)
     "WaitForChronicGap": "ChronicGapSelfHeal",  # L4604 fail-soft heal split
@@ -86,7 +86,7 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
     # the Saturday map above (same state name). Lookup-by-name is OK because
     # the parent name is the same in both SFs.
-    # EOD SF
+    # Post-close Trading SF
     "WaitForPostMarketData": "PostMarketData",
     "WaitForPostMarketArcticAppend": "PostMarketArcticAppend",  # data #... EOD append split (2026-06-16)
     "WaitForCaptureSnapshot": "CaptureSnapshot",
@@ -99,9 +99,9 @@ WAIT_GROUPING: Final[dict[str, str]] = {
 
 
 PIPELINE_LABELS: Final[dict[str, str]] = {
-    "alpha-engine-saturday-pipeline": "Saturday SF",
-    "alpha-engine-weekday-pipeline": "Weekday SF",
-    "alpha-engine-eod-pipeline": "EOD SF",
+    "ne-weekly-freshness-pipeline": "Weekly Freshness SF",
+    "ne-preopen-trading-pipeline": "Pre-open Trading SF",
+    "ne-postclose-trading-pipeline": "Post-close Trading SF",
 }
 
 
@@ -177,7 +177,7 @@ RegistryEntry = Annotated[
 # walked). Reviewed against ROADMAP L3050 + the post-2026-05-15
 # artifact-archive pages (dashboard #86: pages 16-22).
 STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] = {
-    # ── Saturday SF (24 substantive Task steps) ──────────────────────────
+    # ── Weekly Freshness SF (24 substantive Task steps) ──────────────────────────
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
         "no per-run rendered artifact — substrate for downstream stages."
@@ -377,7 +377,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "serves while the zoo arc is degraded. No persisted artifact (the email IS "
         "the surface)."
     ),
-    # ── Weekday SF (13 substantive Task steps) ───────────────────────────
+    # ── Pre-open Trading SF (13 substantive Task steps) ───────────────────────────
     "DeployDriftCheck": ArchivePageRef(
         page="4_System_Health",
         artifact_label="Deploy-drift assertions",
@@ -455,7 +455,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "state (L4608, data #405) so reruns resume without re-paying the "
         "append. Writes the ArcticDB universe library; substrate-only.",
     ),
-    # ── EOD SF (6 substantive Task steps) ────────────────────────────────
+    # ── Post-close Trading SF (6 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
         reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
         "substrate-only — consumed by EODReconcile."

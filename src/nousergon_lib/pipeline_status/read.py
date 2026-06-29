@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # cause snippets.
 _CAUSE_MAX_CHARS = 280
 
-# Bounds the ``getExecutionHistory`` page size. The Saturday SF emits
+# Bounds the ``getExecutionHistory`` page size. The Weekly Freshness SF emits
 # ~600-800 history events on a clean run; the page-25 SLA is one round-trip
 # per poll, so we want enough headroom not to paginate but not so much we
 # load 100k events for a one-state-failed execution. 1000 is what
@@ -185,7 +185,7 @@ class PipelineRun(BaseModel):
     model_config = _STRICT_CONFIG
 
     state_machine_arn: str
-    pretty_label: str  # "Saturday SF" / "Weekday SF" / "EOD SF" — from registry
+    pretty_label: str  # "Weekly Freshness SF" / "Pre-open Trading SF" / "Post-close Trading SF" — from registry
     execution_arn: Optional[str] = None  # None iff status == NOT_RUN
     execution_name: Optional[str] = None  # human-readable execution id
     status: RunStatus

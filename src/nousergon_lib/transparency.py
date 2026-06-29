@@ -100,7 +100,7 @@ def check_inventory(
 ) -> list[CheckResult]:
     """Validate every inventory row whose ``cadence`` matches the input.
 
-    The Saturday SF passes ``cadence="weekly"`` to validate weekly +
+    The Weekly Freshness SF passes ``cadence="weekly"`` to validate weekly +
     daily rows (since daily artifacts from Friday should be readable
     on Saturday). The weekday SF passes ``cadence="daily"`` to
     validate only daily rows.
@@ -761,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
         "--cadence",
         choices=["daily", "weekly", "per_event"],
         required=True,
-        help="Run weekly (Saturday SF) or daily (weekday SF) check.",
+        help="Run weekly (Weekly Freshness SF) or daily (weekday SF) check.",
     )
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--alert", action="store_true", help="Publish SNS on failure.")

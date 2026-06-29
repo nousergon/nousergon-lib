@@ -55,9 +55,9 @@ inventory:
         # 2026-05-08 after the lib v0.5.3 Period fix unmasked this drift.
         dimensions:
           StateMachineArn:
-            - arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-saturday-pipeline
-            - arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-weekday-pipeline
-            - arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-eod-pipeline
+            - arn:aws:states:us-east-1:711398986525:stateMachine:ne-weekly-freshness-pipeline
+            - arn:aws:states:us-east-1:711398986525:stateMachine:ne-preopen-trading-pipeline
+            - arn:aws:states:us-east-1:711398986525:stateMachine:ne-postclose-trading-pipeline
         window_days: 7
         assert:
           op: success_rate_pct_gte
@@ -65,7 +65,7 @@ inventory:
 
   - id: agent_decisions
     cadence: weekly
-    # First Saturday SF observation after backtester #146 (decision
+    # First Weekly Freshness SF observation after backtester #146 (decision
     # capture coverage % published from evaluator).
     effective_date: 2026-05-09
     description: >-
@@ -81,7 +81,7 @@ inventory:
         # non_fatal_statuses (Phase 1a, 2026-05-29): the backtester always
         # emits this artifact now (alpha-engine-backtester #265), so absence
         # means the diagnostic never ran (a real failure), while a present
-        # artifact with status=no_recent_sf_run means the upstream Saturday SF
+        # artifact with status=no_recent_sf_run means the upstream Weekly Freshness SF
         # produced no agent captures this cycle (research failed / recovery
         # was predictor-only) — a legitimate recovery-stitched state, not a
         # coverage regression. Degrade rather than fail; a genuinely dead
@@ -258,7 +258,7 @@ inventory:
   - id: cost_telemetry
     cadence: weekly
     # Per-run LLM cost telemetry workstream shipped via alpha-engine-
-    # research PR #73 (merged 2026-05-01). The first Saturday SF run
+    # research PR #73 (merged 2026-05-01). The first Weekly Freshness SF run
     # that captured a ``cost.parquet`` was 2026-05-02. Consumers
     # (backtester ``analysis/cost_report.detect_anomaly``) read this
     # field as the floor of the rolling baseline window so pre-launch
@@ -269,7 +269,7 @@ inventory:
       JSONL writes. One row per agent invocation with token totals
       (input / output / cache_read / cache_create) and computed
       ``cost_usd``. Consumed by the evaluator's anomaly detector +
-      the cost report section of the Saturday SF email.
+      the cost report section of the Weekly Freshness SF email.
     sources:
       - kind: s3_parquet
         bucket: alpha-engine-research

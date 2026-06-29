@@ -5,7 +5,7 @@ bug class.
 **Why this exists.** 2026-05-17 → 2026-05-27 `pit_parity.json` incident:
 a load-bearing artifact (open ROADMAP item L3293's manual-flip gate
 preconditioning input) was silently absent for 11 days across 4
-consecutive Saturday SF firings. Brian's manual audit caught it only
+consecutive Weekly Freshness SF firings. Brian's manual audit caught it only
 because he asked "what are priority actionable items" and we walked
 the gate's preconditions. The narrow PR (#255) fixed the proximate
 ``copy.deepcopy(s3_resource)`` bug but not the SHAPE of the failure:
@@ -100,8 +100,8 @@ CADENCE_SYMBOLS: Final[frozenset[str]] = frozenset(
 )
 
 # Cron-tick hours (UTC) per the live EventBridge rules. Source:
-# ``~/Development/CLAUDE.md`` § Architecture diagrams (Saturday SF at
-# 09:00 UTC, Weekday SF at 13:00 UTC). EOD SF is daemon-triggered
+# ``~/Development/CLAUDE.md`` § Architecture diagrams (Weekly Freshness SF at
+# 09:00 UTC, Pre-open Trading SF at 13:00 UTC). Post-close Trading SF is daemon-triggered
 # post-close so its "expected cron" anchors to a conservative 21:00 UTC
 # (after the daemon shutdown + EOD reconcile typically completes).
 _SATURDAY_SF_CRON_UTC: Final[int] = 9
