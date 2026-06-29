@@ -15,6 +15,7 @@ stdlib-only modules stay importable without numpy):
   - ``riskstats``      — volatility, Sharpe, Sortino, max drawdown (stdlib)
   - ``returns``        — XIRR (money-weighted) + time-weighted return (stdlib)
   - ``attribution``    — Brinson-Fachler decomposition + Cariño linking (stdlib)
+  - ``transaction_cost`` — √-impact (Almgren-Chriss) cost + tradeability score (stdlib)
 
 Example::
 
