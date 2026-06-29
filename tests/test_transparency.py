@@ -179,7 +179,7 @@ def test_cost_telemetry_row_pins_producer_contract():
         "detect_anomaly) read effective_date from this registry"
     )
     assert row["cadence"] == "weekly"
-    # Saturday SF cron produces the parquet — first capture was 5/2.
+    # Weekly Freshness SF cron produces the parquet — first capture was 5/2.
     assert str(row["effective_date"]) == "2026-05-02"
     src = row["sources"][0]
     assert src["kind"] == "s3_parquet"
@@ -211,9 +211,9 @@ def test_pipeline_execution_row_uses_full_state_machine_arns():
     arns = src["dimensions"]["StateMachineArn"]
     assert len(arns) == 3
     expected_suffixes = {
-        "alpha-engine-saturday-pipeline",
-        "alpha-engine-weekday-pipeline",
-        "alpha-engine-eod-pipeline",
+        "ne-weekly-freshness-pipeline",
+        "ne-preopen-trading-pipeline",
+        "ne-postclose-trading-pipeline",
     }
     for arn in arns:
         assert arn.startswith("arn:aws:states:"), (
@@ -299,7 +299,7 @@ def test_weekly_cadence_includes_daily_rows():
 
 
 def test_daily_cadence_excludes_weekly_rows():
-    """Weekday SF check skips weekly rows."""
+    """Pre-open Trading SF check skips weekly rows."""
     inv = _mini_inventory()
     s3 = StubS3()
     s3.put("b", "daily.json", json.dumps({"bar": 2}).encode())
@@ -709,7 +709,7 @@ def test_cloudwatch_success_rate_passes():
                         "metric": "ExecutionsSucceeded",
                         "window_days": 7,
                         "dimensions": {
-                            "StateMachineArn": ["alpha-engine-saturday-pipeline"]
+                            "StateMachineArn": ["ne-weekly-freshness-pipeline"]
                         },
                         "assert": {"op": "success_rate_pct_gte", "value": 99},
                     }
@@ -721,13 +721,13 @@ def test_cloudwatch_success_rate_passes():
     cw.set_stats(
         namespace="AWS/States",
         metric="ExecutionsSucceeded",
-        dimensions=[("StateMachineArn", "alpha-engine-saturday-pipeline")],
+        dimensions=[("StateMachineArn", "ne-weekly-freshness-pipeline")],
         datapoints=[{"Sum": 100.0}],
     )
     cw.set_stats(
         namespace="AWS/States",
         metric="ExecutionsFailed",
-        dimensions=[("StateMachineArn", "alpha-engine-saturday-pipeline")],
+        dimensions=[("StateMachineArn", "ne-weekly-freshness-pipeline")],
         datapoints=[{"Sum": 0.0}],
     )
     res = check_inventory(
@@ -759,7 +759,7 @@ def test_cloudwatch_period_is_multiple_of_60(window_days):
                         "metric": "ExecutionsSucceeded",
                         "window_days": window_days,
                         "dimensions": {
-                            "StateMachineArn": ["alpha-engine-saturday-pipeline"]
+                            "StateMachineArn": ["ne-weekly-freshness-pipeline"]
                         },
                         "assert": {"op": "success_rate_pct_gte", "value": 99},
                     }
@@ -771,13 +771,13 @@ def test_cloudwatch_period_is_multiple_of_60(window_days):
     cw.set_stats(
         namespace="AWS/States",
         metric="ExecutionsSucceeded",
-        dimensions=[("StateMachineArn", "alpha-engine-saturday-pipeline")],
+        dimensions=[("StateMachineArn", "ne-weekly-freshness-pipeline")],
         datapoints=[{"Sum": 100.0}],
     )
     cw.set_stats(
         namespace="AWS/States",
         metric="ExecutionsFailed",
-        dimensions=[("StateMachineArn", "alpha-engine-saturday-pipeline")],
+        dimensions=[("StateMachineArn", "ne-weekly-freshness-pipeline")],
         datapoints=[{"Sum": 0.0}],
     )
     check_inventory(
@@ -854,7 +854,7 @@ def test_cloudwatch_success_rate_fails_below_threshold():
                         "metric": "ExecutionsSucceeded",
                         "window_days": 7,
                         "dimensions": {
-                            "StateMachineArn": ["alpha-engine-saturday-pipeline"]
+                            "StateMachineArn": ["ne-weekly-freshness-pipeline"]
                         },
                         "assert": {"op": "success_rate_pct_gte", "value": 99},
                     }
@@ -866,13 +866,13 @@ def test_cloudwatch_success_rate_fails_below_threshold():
     cw.set_stats(
         namespace="AWS/States",
         metric="ExecutionsSucceeded",
-        dimensions=[("StateMachineArn", "alpha-engine-saturday-pipeline")],
+        dimensions=[("StateMachineArn", "ne-weekly-freshness-pipeline")],
         datapoints=[{"Sum": 90.0}],
     )
     cw.set_stats(
         namespace="AWS/States",
         metric="ExecutionsFailed",
-        dimensions=[("StateMachineArn", "alpha-engine-saturday-pipeline")],
+        dimensions=[("StateMachineArn", "ne-weekly-freshness-pipeline")],
         datapoints=[{"Sum": 10.0}],
     )
     res = check_inventory(

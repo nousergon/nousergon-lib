@@ -18,21 +18,21 @@ from nousergon_lib.pipeline_status import templates
 
 def test_format_success_message_basic_shape():
     out = templates.format_success_message(
-        pretty_label="Saturday SF",
-        execution_arn="arn:aws:states:us-east-1:711398986525:execution:alpha-engine-saturday-pipeline:run-abc",
+        pretty_label="Weekly Freshness SF",
+        execution_arn="arn:aws:states:us-east-1:711398986525:execution:ne-weekly-freshness-pipeline:run-abc",
     )
     expected = (
-        "Saturday SF SUCCEEDED\n"
+        "Weekly Freshness SF SUCCEEDED\n"
         "Console: https://console.nousergon.ai/Pipeline_Status"
         "?run=arn:aws:states:us-east-1:711398986525:execution:"
-        "alpha-engine-saturday-pipeline:run-abc"
+        "ne-weekly-freshness-pipeline:run-abc"
     )
     assert out == expected
 
 
 def test_format_success_message_for_each_pipeline_label():
     """Render for all 3 pipelines — pin that the body shape is consistent."""
-    for label in ("Saturday SF", "Weekday SF", "EOD SF"):
+    for label in ("Weekly Freshness SF", "Pre-open Trading SF", "Post-close Trading SF"):
         out = templates.format_success_message(
             pretty_label=label, execution_arn="arn:fake"
         )
@@ -51,16 +51,16 @@ def test_format_success_message_is_two_lines():
 
 def test_format_failure_message_basic_shape():
     out = templates.format_failure_message(
-        pretty_label="Weekday SF",
-        execution_arn="arn:aws:states:us-east-1:711398986525:execution:alpha-engine-weekday-pipeline:run-xyz",
+        pretty_label="Pre-open Trading SF",
+        execution_arn="arn:aws:states:us-east-1:711398986525:execution:ne-preopen-trading-pipeline:run-xyz",
         failing_state="MorningEnrich",
         cause="States.TaskFailed: exit 1",
     )
-    assert out.startswith("Weekday SF FAILED at state MorningEnrich\n")
+    assert out.startswith("Pre-open Trading SF FAILED at state MorningEnrich\n")
     assert (
         "Console: https://console.nousergon.ai/Pipeline_Status"
         "?run=arn:aws:states:us-east-1:711398986525:execution:"
-        "alpha-engine-weekday-pipeline:run-xyz" in out
+        "ne-preopen-trading-pipeline:run-xyz" in out
     )
     assert "Cause (first 280 chars):\nStates.TaskFailed: exit 1" in out
 
@@ -69,7 +69,7 @@ def test_format_failure_message_truncates_long_cause():
     """Cause field MUST truncate at 280 chars with ellipsis suffix."""
     long_cause = "A" * 500
     out = templates.format_failure_message(
-        pretty_label="EOD SF",
+        pretty_label="Post-close Trading SF",
         execution_arn="arn:test",
         failing_state="EODReconcile",
         cause=long_cause,
@@ -85,7 +85,7 @@ def test_format_failure_message_truncates_long_cause():
 def test_format_failure_message_passes_through_short_cause_untruncated():
     short = "boom: exit 1"
     out = templates.format_failure_message(
-        pretty_label="Saturday SF",
+        pretty_label="Weekly Freshness SF",
         execution_arn="arn:test",
         failing_state="DataPhase1",
         cause=short,
@@ -97,7 +97,7 @@ def test_format_failure_message_passes_through_short_cause_untruncated():
 def test_format_failure_message_handles_empty_cause():
     """Empty cause renders empty after the 'Cause' header — never raises."""
     out = templates.format_failure_message(
-        pretty_label="Weekday SF",
+        pretty_label="Pre-open Trading SF",
         execution_arn="arn:test",
         failing_state="PredictorInference",
         cause="",
@@ -107,7 +107,7 @@ def test_format_failure_message_handles_empty_cause():
 
 def test_format_failure_message_strips_whitespace_on_cause():
     out = templates.format_failure_message(
-        pretty_label="EOD SF",
+        pretty_label="Post-close Trading SF",
         execution_arn="arn:test",
         failing_state="EODReconcile",
         cause="   actual error message   \n",

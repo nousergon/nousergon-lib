@@ -49,11 +49,11 @@ from nousergon_lib.pipeline_status.registry import (
 
 
 SATURDAY_ARN = (
-    "arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-saturday-pipeline"
+    "arn:aws:states:us-east-1:711398986525:stateMachine:ne-weekly-freshness-pipeline"
 )
 EXECUTION_ARN = (
     "arn:aws:states:us-east-1:711398986525:execution:"
-    "alpha-engine-saturday-pipeline:test-exec-1"
+    "ne-weekly-freshness-pipeline:test-exec-1"
 )
 
 
@@ -293,7 +293,7 @@ def test_read_pipeline_state_succeeded_happy_path():
 
     assert isinstance(run, PipelineRun)
     assert run.state_machine_arn == SATURDAY_ARN
-    assert run.pretty_label == "Saturday SF"
+    assert run.pretty_label == "Weekly Freshness SF"
     assert run.execution_arn == EXECUTION_ARN
     assert run.execution_name == "test-exec-1"
     assert run.status == RunStatus.SUCCEEDED
@@ -419,16 +419,16 @@ def test_read_pipeline_state_unknown_status_string_raises():
 def test_pretty_label_for_each_known_pipeline():
     for arn, expected in [
         (
-            "arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-saturday-pipeline",
-            "Saturday SF",
+            "arn:aws:states:us-east-1:711398986525:stateMachine:ne-weekly-freshness-pipeline",
+            "Weekly Freshness SF",
         ),
         (
-            "arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-weekday-pipeline",
-            "Weekday SF",
+            "arn:aws:states:us-east-1:711398986525:stateMachine:ne-preopen-trading-pipeline",
+            "Pre-open Trading SF",
         ),
         (
-            "arn:aws:states:us-east-1:711398986525:stateMachine:alpha-engine-eod-pipeline",
-            "EOD SF",
+            "arn:aws:states:us-east-1:711398986525:stateMachine:ne-postclose-trading-pipeline",
+            "Post-close Trading SF",
         ),
     ]:
         client = _make_sfn_mock()

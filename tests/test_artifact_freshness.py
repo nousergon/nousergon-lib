@@ -911,7 +911,7 @@ class TestActiveWindowValidation:
 
 def _daily_health_spec(**overrides) -> ArtifactSpec:
     """A continuous, fixed-key DAILY (1440) spec modelling
-    ``health/daily_data.json`` — written on each weekday + Saturday SF run,
+    ``health/daily_data.json`` — written on each weekday + Weekly Freshness SF run,
     never on Sunday. The 2026-06-28 false-positive subject."""
     defaults = dict(
         artifact_id="health_alpha_engine_data",

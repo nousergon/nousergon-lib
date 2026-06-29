@@ -43,9 +43,9 @@ def test_pipeline_labels_match_sf_telegram_notifier():
     The two MUST agree so Telegram + email + page channels render the same
     label."""
     assert registry.PIPELINE_LABELS == {
-        "alpha-engine-saturday-pipeline": "Saturday SF",
-        "alpha-engine-weekday-pipeline": "Weekday SF",
-        "alpha-engine-eod-pipeline": "EOD SF",
+        "ne-weekly-freshness-pipeline": "Weekly Freshness SF",
+        "ne-preopen-trading-pipeline": "Pre-open Trading SF",
+        "ne-postclose-trading-pipeline": "Post-close Trading SF",
     }
 
 
@@ -64,7 +64,7 @@ def test_wait_grouping_parents_are_in_registry():
 
 def test_wait_for_instance_ready_maps_to_start_executor_ec2():
     """Regression pin (v0.28.1) — `WaitForInstanceReady` is the post-boot
-    settle delay after `StartExecutorEC2` in the Weekday SF. Caught by
+    settle delay after `StartExecutorEC2` in the Pre-open Trading SF. Caught by
     the alpha-engine-dashboard registry-drift CI test on first Phase-2
     run; v0.28.0 shipped without it because the original `jq` walk
     filtered to `Task`-type states and missed bare `Wait`-type companions.
@@ -98,7 +98,7 @@ def test_substantive_resources_covers_expected_arn_set():
 
 
 def test_registry_covers_known_saturday_substantive_states():
-    """Spot-check: the operator-meaningful Saturday SF states (per plan
+    """Spot-check: the operator-meaningful Weekly Freshness SF states (per plan
     doc §2.1) ALL appear in the registry. Backstop against a future
     refactor accidentally dropping one."""
     required = {

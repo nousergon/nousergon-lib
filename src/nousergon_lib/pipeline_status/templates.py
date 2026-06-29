@@ -74,7 +74,7 @@ def format_success_message(
     Parameters
     ----------
     pretty_label:
-        Human-readable SF label, e.g. ``"Saturday SF"``. Sourced from
+        Human-readable SF label, e.g. ``"Weekly Freshness SF"``. Sourced from
         :data:`nousergon_lib.pipeline_status.registry.PIPELINE_LABELS`.
     execution_arn:
         Full SF execution ARN. Page 25 filters its tables to this ARN
