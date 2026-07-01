@@ -1,22 +1,26 @@
-"""Slot boundary contracts — versioned JSON Schemas + conformance validation (M0).
+"""Cross-repo contracts — versioned JSON Schemas + conformance validation (M0).
 
-The harness's experiment slots exchange artifacts across repo boundaries; those
-artifacts are PRODUCT CONTRACTS, not internal conveniences (M0 contract
-discipline, ratified 2026-06-11 — config#638, ne_product_architecture_plan
-v2.0). This module is the single source of truth for the slot schemas:
+The fleet exchanges artifacts across repo boundaries; those artifacts are
+PRODUCT CONTRACTS, not internal conveniences (M0 contract discipline, ratified
+2026-06-11 — config#638, ne_product_architecture_plan v2.0). This module is the
+single source of truth for those schemas:
 
-- ``signals``      — Slot R (research orchestration) → ``signals/{date}/signals.json``
-- ``predictions``  — Slot M (model/prediction)       → ``predictor/predictions/{date}.json``
+- ``signals``        — Slot R (research orchestration) → ``signals/{date}/signals.json``
+- ``predictions``    — Slot M (model/prediction)       → ``predictor/predictions/{date}.json``
+- ``outcome_record`` — long-format eval outcome (one row per signal/date/horizon;
+  the config#1483 replacement for wide horizon-suffixed ``score_performance``
+  columns). NOT a product SLOT (R/M/S) — it's a cross-repo eval-storage contract,
+  so it lives in :data:`CONTRACT_SCHEMAS` but not :data:`SLOT_SCHEMAS`.
 
 Producers validate a representative emitted artifact in CI; consumers validate
 the fixtures their readers are tested against; external slot implementations
 ("bring your own R/M") validate their output with :func:`conformance_errors` /
 :func:`validate` — the same check the future ``ne validate`` CLI verb fronts.
-CLI today: ``python -m nousergon_lib.contracts validate <slot> <path.json>``.
+CLI today: ``python -m nousergon_lib.contracts validate <name> <path.json>``.
 
 Contract evolution is ADDITIVE-ONLY (S3 Contract Safety): new optional fields
-may appear at any time; removing/renaming a required field requires a new
-schema version + a dual-write window.
+may appear at any time (``additionalProperties`` stays open); removing/renaming
+a required field requires a new schema version + a dual-write window.
 
 Requires the ``contracts`` extra (``nousergon-lib[contracts]`` → jsonschema).
 """
@@ -29,6 +33,7 @@ from importlib import resources
 from typing import Any, Iterator
 
 __all__ = [
+    "CONTRACT_SCHEMAS",
     "SLOT_SCHEMAS",
     "SCHEMA_VERSIONS",
     "ContractViolation",
@@ -38,7 +43,17 @@ __all__ = [
     "validate",
 ]
 
-# slot artifact name -> (schema resource filename, slot id)
+# ALL cross-repo contracts: name -> schema resource filename. The superset that
+# backs load_schema / validate / the CLI.
+CONTRACT_SCHEMAS: dict[str, str] = {
+    "signals": "signals.schema.json",
+    "predictions": "predictions.schema.json",
+    "outcome_record": "outcome_record.schema.json",
+}
+
+# The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
+# their slot id. ``outcome_record`` is a cross-repo eval-storage contract, not a
+# slot boundary, so it is deliberately absent here.
 SLOT_SCHEMAS: dict[str, tuple[str, str]] = {
     "signals": ("signals.schema.json", "R"),
     "predictions": ("predictions.schema.json", "M"),
@@ -46,7 +61,7 @@ SLOT_SCHEMAS: dict[str, tuple[str, str]] = {
 
 # Current contract version per artifact. Bump ONLY on a breaking change,
 # alongside a new .schema.json and a dual-write window.
-SCHEMA_VERSIONS: dict[str, int] = {"signals": 1, "predictions": 1}
+SCHEMA_VERSIONS: dict[str, int] = {"signals": 1, "predictions": 1, "outcome_record": 1}
 
 
 class ContractViolation(Exception):
@@ -64,10 +79,10 @@ class ContractViolation(Exception):
 
 @lru_cache(maxsize=None)
 def load_schema(name: str) -> dict[str, Any]:
-    """Load the JSON Schema for a slot artifact (``signals`` | ``predictions``)."""
-    if name not in SLOT_SCHEMAS:
-        raise KeyError(f"unknown contract {name!r}; known: {sorted(SLOT_SCHEMAS)}")
-    fname, _slot = SLOT_SCHEMAS[name]
+    """Load the JSON Schema for a contract (``signals`` | ``predictions`` | ``outcome_record``)."""
+    if name not in CONTRACT_SCHEMAS:
+        raise KeyError(f"unknown contract {name!r}; known: {sorted(CONTRACT_SCHEMAS)}")
+    fname = CONTRACT_SCHEMAS[name]
     with resources.files(__package__).joinpath(fname).open("r", encoding="utf-8") as f:
         return json.load(f)
 

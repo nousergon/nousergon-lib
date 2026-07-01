@@ -12,30 +12,30 @@ import argparse
 import json
 import sys
 
-from . import SCHEMA_VERSIONS, SLOT_SCHEMAS, conformance_errors
+from . import CONTRACT_SCHEMAS, SCHEMA_VERSIONS, conformance_errors
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m nousergon_lib.contracts")
     sub = parser.add_subparsers(dest="command", required=True)
-    p_val = sub.add_parser("validate", help="validate a slot artifact against its contract")
-    p_val.add_argument("slot", choices=sorted(SLOT_SCHEMAS), help="slot artifact name")
+    p_val = sub.add_parser("validate", help="validate an artifact against its contract")
+    p_val.add_argument("name", choices=sorted(CONTRACT_SCHEMAS), help="contract name")
     p_val.add_argument("path", help="path to the JSON artifact")
     args = parser.parse_args(argv)
 
     with open(args.path, encoding="utf-8") as f:
         payload = json.load(f)
-    errors = conformance_errors(args.slot, payload)
+    errors = conformance_errors(args.name, payload)
     if errors:
         print(
-            f"FAIL: {args.path} violates {args.slot} contract "
-            f"v{SCHEMA_VERSIONS[args.slot]} ({len(errors)} error(s)):",
+            f"FAIL: {args.path} violates {args.name} contract "
+            f"v{SCHEMA_VERSIONS[args.name]} ({len(errors)} error(s)):",
             file=sys.stderr,
         )
         for e in errors:
             print(f"  {e}", file=sys.stderr)
         return 1
-    print(f"OK: {args.path} conforms to {args.slot} contract v{SCHEMA_VERSIONS[args.slot]}")
+    print(f"OK: {args.path} conforms to {args.name} contract v{SCHEMA_VERSIONS[args.name]}")
     return 0
 
 

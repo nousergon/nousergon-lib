@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nousergon.ai/schemas/alpha-engine/outcome_record.v1.json",
+  "title": "Alpha Engine Long-Format Outcome Record (eval-storage contract, v1)",
+  "description": "One resolved evaluation outcome for a (signal, score_date, horizon_days) triple — the long-format replacement for the wide horizon-suffixed score_performance columns (beat_spy_5d/beat_spy_21d/spy_21d_return/log_alpha_21d/...). Root-cause fix for the config#1456 silent-starvation bug class (EPIC config#1483): with outcomes stored one-row-per-horizon and consumers filtering WHERE horizon_days=:h (h resolved from HorizonPolicy in nousergon_lib.quant.horizons), adding or changing a diagnostic horizon becomes a DATA change (zero renames) and an unproduced horizon returns empty rows (graceful + detectable) instead of a dark hardcoded column. Produced across research.db (score_performance_outcomes table), the S3 outcome artifact (long-format array), and ArcticDB (one row per signal/date/horizon). Field names mirror nousergon_lib.quant.horizons.OutcomeColumns so the Phase-2 dual-write is an unambiguous per-field copy. Evolution is ADDITIVE-ONLY per the S3 Contract Safety rule (new optional fields may appear at any time; additionalProperties stays open); removing/renaming a required field requires a v2 schema + dual-write window.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "signal_id",
+    "score_date",
+    "horizon_days",
+    "beat_spy",
+    "stock_return",
+    "spy_return",
+    "log_alpha",
+    "resolved_at",
+    "is_primary"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Contract version stamp. Required (unlike signals v1) because this is a new artifact with no legacy unversioned producers to grandfather."
+    },
+    "signal_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier of the scored signal this outcome resolves (ticker + score_date lineage; producer-defined)."
+    },
+    "score_date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "The date the signal was scored (YYYY-MM-DD) — the decision date the horizon is measured forward from."
+    },
+    "horizon_days": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Forward evaluation window in trading days. The canonical primary horizon is 21 (see HorizonPolicy); diagnostic horizons (e.g. 5) are observability only and NOT alpha-equivalent to the primary."
+    },
+    "beat_spy": {
+      "type": "boolean",
+      "description": "Whether the stock's return beat SPY over horizon_days (was beat_spy_{h}d)."
+    },
+    "stock_return": {
+      "type": "number",
+      "description": "Realized stock return over horizon_days (was return_{h}d)."
+    },
+    "spy_return": {
+      "type": "number",
+      "description": "Realized SPY return over the same window (was spy_{h}d_return)."
+    },
+    "log_alpha": {
+      "type": ["number", "null"],
+      "description": "Log-domain, market-relative, sector-neutral alpha over horizon_days (was log_alpha_{h}d). Populated (non-null) for the canonical primary horizon — see the is_primary conditional below; null-tolerated for diagnostic horizons that carry no canonical alpha."
+    },
+    "resolved_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the outcome was resolved/evaluated (maps from the wide eval_date_{h}d column; a bare date is an acceptable partial timestamp, format is advisory not asserted)."
+    },
+    "is_primary": {
+      "type": "boolean",
+      "description": "True iff horizon_days == HorizonPolicy.primary_horizon AND the label matches the canonical label_definition. Lets consumers pick the canonical row without re-deriving the policy."
+    }
+  },
+  "if": {
+    "properties": { "is_primary": { "const": true } },
+    "required": ["is_primary"]
+  },
+  "then": {
+    "properties": {
+      "log_alpha": {
+        "type": "number",
+        "description": "The canonical label MUST be present (non-null) on the primary-horizon record — fail-loud per the no-silent-fails guardrail (config#1483)."
+      }
+    }
+  }
+}
