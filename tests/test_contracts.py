@@ -106,17 +106,24 @@ def _predictions_payload(**overrides):
 
 
 class TestSchemasAreWellFormed:
-    @pytest.mark.parametrize("name", sorted(contracts.SLOT_SCHEMAS))
+    @pytest.mark.parametrize("name", sorted(contracts.CONTRACT_SCHEMAS))
     def test_schema_passes_metaschema(self, name):
         jsonschema.Draft202012Validator.check_schema(contracts.load_schema(name))
 
-    @pytest.mark.parametrize("name", sorted(contracts.SLOT_SCHEMAS))
+    @pytest.mark.parametrize("name", sorted(contracts.CONTRACT_SCHEMAS))
     def test_schema_is_versioned(self, name):
         schema = contracts.load_schema(name)
         assert "$id" in schema, "every contract schema carries a stable $id"
         assert f"v{contracts.SCHEMA_VERSIONS[name]}" in schema["$id"]
         # additive evolution: the contract must NOT lock out new fields
         assert schema.get("additionalProperties", True) is not False
+
+    def test_slot_schemas_are_a_subset_of_contract_schemas(self):
+        # SLOT_SCHEMAS (R/M/S product boundaries) is a labelled subset of the
+        # full contract registry; outcome_record is a contract but not a slot.
+        assert set(contracts.SLOT_SCHEMAS) <= set(contracts.CONTRACT_SCHEMAS)
+        assert "outcome_record" in contracts.CONTRACT_SCHEMAS
+        assert "outcome_record" not in contracts.SLOT_SCHEMAS
 
     def test_unknown_contract_raises(self):
         with pytest.raises(KeyError):
@@ -282,6 +289,79 @@ class TestPredictionsContract:
         contracts.validate("predictions", _predictions_payload(predictions=[entry]))
 
 
+def _outcome_record(**overrides):
+    record = {
+        "schema_version": 1,
+        "signal_id": "AAPL:2026-06-11",
+        "score_date": "2026-06-11",
+        "horizon_days": 21,
+        "beat_spy": True,
+        "stock_return": 0.043,
+        "spy_return": 0.021,
+        "log_alpha": 0.0215,
+        "resolved_at": "2026-07-10T13:07:29Z",
+        "is_primary": True,
+    }
+    record.update(overrides)
+    return record
+
+
+class TestOutcomeRecordContract:
+    def test_minimal_primary_record(self):
+        contracts.validate("outcome_record", _outcome_record())
+
+    def test_diagnostic_record_may_have_null_log_alpha(self):
+        # A non-primary (diagnostic) horizon carries no canonical alpha — null
+        # log_alpha is valid when is_primary is False.
+        contracts.validate(
+            "outcome_record",
+            _outcome_record(horizon_days=5, is_primary=False, log_alpha=None),
+        )
+
+    def test_primary_record_null_log_alpha_fails(self):
+        # The canonical label must be present on the primary horizon (fail-loud
+        # guardrail via the if/then conditional).
+        errors = contracts.conformance_errors(
+            "outcome_record", _outcome_record(log_alpha=None)
+        )
+        assert errors and "log_alpha" in " ".join(errors)
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "schema_version",
+            "signal_id",
+            "score_date",
+            "horizon_days",
+            "beat_spy",
+            "stock_return",
+            "spy_return",
+            "log_alpha",
+            "resolved_at",
+            "is_primary",
+        ],
+    )
+    def test_missing_required_field_fails(self, missing):
+        record = _outcome_record()
+        del record[missing]
+        assert contracts.conformance_errors("outcome_record", record)
+
+    def test_horizon_days_must_be_positive_integer(self):
+        assert contracts.conformance_errors("outcome_record", _outcome_record(horizon_days=0))
+        assert contracts.conformance_errors("outcome_record", _outcome_record(horizon_days=1.5))
+
+    def test_bad_score_date_pattern_fails(self):
+        assert contracts.conformance_errors(
+            "outcome_record", _outcome_record(score_date="2026/06/11")
+        )
+
+    def test_additive_fields_pass(self):
+        # Additive-only evolution — an unknown optional field must NOT break the
+        # contract (deliberate, per S3 Contract Safety; the schema keeps
+        # additionalProperties open rather than the sketch's false).
+        contracts.validate("outcome_record", _outcome_record(some_future_field=1.23))
+
+
 class TestConformanceKitApi:
     def test_validate_raises_with_full_error_list(self):
         payload = _predictions_payload()
@@ -317,3 +397,11 @@ class TestCli:
         bad.write_text(json.dumps(bad_payload))
         assert main(["validate", "predictions", str(bad)]) == 1
         assert "gbm_veto" in capsys.readouterr().err
+
+    def test_cli_validates_outcome_record(self, tmp_path, capsys):
+        from nousergon_lib.contracts.__main__ import main
+
+        good = tmp_path / "outcome.json"
+        good.write_text(json.dumps(_outcome_record()))
+        assert main(["validate", "outcome_record", str(good)]) == 0
+        assert "OK" in capsys.readouterr().out
