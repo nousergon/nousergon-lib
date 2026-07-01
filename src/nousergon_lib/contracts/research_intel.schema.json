@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nousergon.ai/schemas/alpha-engine/research_intel.v1.json",
+  "title": "Alpha Engine Research Intel (neutral product-facing intel, v1)",
+  "description": "Neutral, product-facing research intel: written weekly by the crucible-research orchestration run to research_intel/{date}.json and research_intel/latest.json; a NEW sibling artifact to signals.json (config#1500, Phase 0 of EPIC config#1499). Carries ONLY the neutral derived OUTPUT of the research run (regime label + narrative, sector ratings/modifiers, market breadth, per-ticker attractiveness score + generic thesis). The tuned pillar/blend weights, prompts, and ENTER/EXIT position judgments stay PRIVATE in crucible-research and in signals.json — they MUST NOT appear here. Consumers (Metron Advisor, dashboards, external product surfaces) read this artifact for neutral intel without touching the edge-mixed signals.json. Evolution is ADDITIVE-ONLY per the S3 Contract Safety rule: new optional fields may appear at any time (additionalProperties stays true); removing/renaming a required field is a breaking change requiring a v2 schema + dual-write window.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "date",
+    "generated_at",
+    "market_regime",
+    "sector_ratings",
+    "sector_modifiers",
+    "market_breadth",
+    "attractiveness"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Contract version stamp"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Trading day the intel is FOR (YYYY-MM-DD)"
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO timestamp / run-time of when the research run produced this artifact (provenance)"
+    },
+    "market_regime": {
+      "type": "string",
+      "enum": ["bull", "neutral", "bear"],
+      "description": "3-class Ang-Bekaert regime taxonomy label (from macro_economist_node). Legacy 4-class 'caution' retired; historical artifacts grandfathered on READ only, not valid against this write-contract."
+    },
+    "regime_narrative": {
+      "type": ["string", "null"],
+      "description": "Macro narrative text for the regime call (from macro_economist_node report_md). Optional/nullable — the artifact remains valid when macro emits no narrative."
+    },
+    "sector_ratings": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/sector_rating" },
+      "description": "Per-sector {rating: overweight|market_weight|underweight, rationale} (from macro_economist_node)"
+    },
+    "sector_modifiers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0.7,
+        "maximum": 1.3
+      },
+      "description": "Per-sector macro score modifiers, 0.70-1.30 (from macro_economist_node)"
+    },
+    "market_breadth": {
+      "$ref": "#/$defs/market_breadth",
+      "description": "Market breadth snapshot (from fetch_data)"
+    },
+    "attractiveness": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/attractiveness_entry" },
+      "description": "Per-ticker final composite attractiveness (0-100) + neutral score breakdown + generic thesis. Keyed by ticker."
+    }
+  },
+  "$defs": {
+    "sector_rating": {
+      "type": "object",
+      "required": ["rating"],
+      "properties": {
+        "rating": {
+          "type": "string",
+          "enum": ["overweight", "market_weight", "underweight"],
+          "description": "Sector-level macro rating"
+        },
+        "rationale": {
+          "type": ["string", "null"],
+          "description": "Macro rationale for the sector rating"
+        }
+      }
+    },
+    "market_breadth": {
+      "type": "object",
+      "properties": {
+        "pct_above_50d_ma": {
+          "type": ["number", "null"],
+          "description": "Percent of tracked stocks above their 50-day moving average"
+        },
+        "pct_above_200d_ma": {
+          "type": ["number", "null"],
+          "description": "Percent of tracked stocks above their 200-day moving average"
+        },
+        "advance_decline_ratio": {
+          "type": ["number", "null"],
+          "description": "Advancers / decliners over the recent window"
+        }
+      }
+    },
+    "attractiveness_entry": {
+      "type": "object",
+      "required": ["ticker", "score"],
+      "properties": {
+        "ticker": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stock ticker symbol"
+        },
+        "score": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Final composite attractiveness score (0-100). null tolerated for unscoreable tickers."
+        },
+        "sector": {
+          "type": ["string", "null"],
+          "description": "GICS sector name"
+        },
+        "breakdown": {
+          "$ref": "#/$defs/attractiveness_breakdown",
+          "description": "Neutral component-VALUE breakdown of the composite score. Carries the OUTPUT sub-scores only — never the tuned pillar/blend weights (those stay private in crucible-research)."
+        },
+        "thesis": {
+          "$ref": "#/$defs/thesis",
+          "description": "Generic sector-team narrative (bull_case / sector). NOT a position or ENTER/EXIT judgment."
+        }
+      }
+    },
+    "attractiveness_breakdown": {
+      "type": "object",
+      "description": "Neutral score-component VALUES (no weights). All fields optional/nullable for graceful degrade.",
+      "properties": {
+        "quant_score": { "type": ["number", "null"] },
+        "qual_score": { "type": ["number", "null"] },
+        "factor_subscore": { "type": ["number", "null"] },
+        "weighted_base": { "type": ["number", "null"] },
+        "macro_shift": { "type": ["number", "null"] }
+      }
+    },
+    "thesis": {
+      "type": "object",
+      "properties": {
+        "bull_case": {
+          "type": ["string", "null"],
+          "description": "Generic bull-case narrative from the sector team"
+        },
+        "sector": {
+          "type": ["string", "null"],
+          "description": "Sector the thesis belongs to"
+        }
+      }
+    }
+  }
+}

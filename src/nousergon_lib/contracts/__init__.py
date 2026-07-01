@@ -5,8 +5,9 @@ artifacts are PRODUCT CONTRACTS, not internal conveniences (M0 contract
 discipline, ratified 2026-06-11 — config#638, ne_product_architecture_plan
 v2.0). This module is the single source of truth for the slot schemas:
 
-- ``signals``      — Slot R (research orchestration) → ``signals/{date}/signals.json``
-- ``predictions``  — Slot M (model/prediction)       → ``predictor/predictions/{date}.json``
+- ``signals``        — Slot R (research orchestration) → ``signals/{date}/signals.json``
+- ``predictions``    — Slot M (model/prediction)       → ``predictor/predictions/{date}.json``
+- ``research_intel`` — Slot R neutral product intel     → ``research_intel/{date}.json``
 
 Producers validate a representative emitted artifact in CI; consumers validate
 the fixtures their readers are tested against; external slot implementations
@@ -42,11 +43,16 @@ __all__ = [
 SLOT_SCHEMAS: dict[str, tuple[str, str]] = {
     "signals": ("signals.schema.json", "R"),
     "predictions": ("predictions.schema.json", "M"),
+    "research_intel": ("research_intel.schema.json", "R"),
 }
 
 # Current contract version per artifact. Bump ONLY on a breaking change,
 # alongside a new .schema.json and a dual-write window.
-SCHEMA_VERSIONS: dict[str, int] = {"signals": 1, "predictions": 1}
+SCHEMA_VERSIONS: dict[str, int] = {
+    "signals": 1,
+    "predictions": 1,
+    "research_intel": 1,
+}
 
 
 class ContractViolation(Exception):

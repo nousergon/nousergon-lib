@@ -44,6 +44,42 @@ def _signals_payload(**overrides):
     return payload
 
 
+def _research_intel_payload(**overrides):
+    payload = {
+        "schema_version": 1,
+        "date": "2026-06-11",
+        "generated_at": "2026-06-13T09:00:00Z",
+        "market_regime": "neutral",
+        "regime_narrative": "Macro backdrop is range-bound.",
+        "sector_ratings": {
+            "Technology": {"rating": "overweight", "rationale": "AI capex tailwind"},
+        },
+        "sector_modifiers": {"Technology": 1.1},
+        "market_breadth": {
+            "pct_above_50d_ma": 58.0,
+            "pct_above_200d_ma": 62.0,
+            "advance_decline_ratio": 1.4,
+        },
+        "attractiveness": {
+            "AAA": {
+                "ticker": "AAA",
+                "score": 82.0,
+                "sector": "Technology",
+                "breakdown": {
+                    "quant_score": 80.0,
+                    "qual_score": 84.0,
+                    "factor_subscore": None,
+                    "weighted_base": 80.0,
+                    "macro_shift": 1.0,
+                },
+                "thesis": {"bull_case": "Durable moat", "sector": "Technology"},
+            },
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _prediction_entry(**overrides):
     entry = {
         "ticker": "TEST",
@@ -123,6 +159,65 @@ class TestSignalsContract:
     def test_additive_fields_pass(self):
         entry = _signal_entry(brand_new_optional_field={"anything": 1})
         contracts.validate("signals", _signals_payload(universe=[entry], some_new_top_level=True))
+
+
+class TestResearchIntelContract:
+    def test_minimal_conforming_payload(self):
+        contracts.validate("research_intel", _research_intel_payload())
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "schema_version",
+            "date",
+            "generated_at",
+            "market_regime",
+            "sector_ratings",
+            "sector_modifiers",
+            "market_breadth",
+            "attractiveness",
+        ],
+    )
+    def test_missing_required_top_level_fails(self, missing):
+        payload = _research_intel_payload()
+        del payload[missing]
+        errors = contracts.conformance_errors("research_intel", payload)
+        assert errors and missing in " ".join(errors)
+
+    def test_null_regime_narrative_tolerated(self):
+        contracts.validate("research_intel", _research_intel_payload(regime_narrative=None))
+
+    def test_null_attractiveness_score_tolerated(self):
+        payload = _research_intel_payload()
+        payload["attractiveness"]["AAA"]["score"] = None
+        contracts.validate("research_intel", payload)
+
+    def test_legacy_caution_regime_rejected_on_write_contract(self):
+        assert contracts.conformance_errors(
+            "research_intel", _research_intel_payload(market_regime="caution")
+        )
+
+    def test_sector_modifier_out_of_range_fails(self):
+        assert contracts.conformance_errors(
+            "research_intel",
+            _research_intel_payload(sector_modifiers={"Technology": 1.9}),
+        )
+
+    def test_invalid_sector_rating_fails(self):
+        payload = _research_intel_payload(
+            sector_ratings={"Technology": {"rating": "strong_buy"}}
+        )
+        assert contracts.conformance_errors("research_intel", payload)
+
+    def test_attractiveness_entry_requires_ticker_and_score(self):
+        payload = _research_intel_payload()
+        del payload["attractiveness"]["AAA"]["ticker"]
+        assert contracts.conformance_errors("research_intel", payload)
+
+    def test_additive_fields_pass(self):
+        payload = _research_intel_payload(some_new_top_level=True)
+        payload["attractiveness"]["AAA"]["brand_new_field"] = {"x": 1}
+        contracts.validate("research_intel", payload)
 
 
 class TestPredictionsContract:
