@@ -9,8 +9,15 @@ from pydantic import ValidationError
 
 from nousergon_lib.sft import (
     SFT_SCHEMA_VERSION,
+    SftProvenance,
     SftRecord,
+    assert_single_teacher,
     build_record,
+    content_hash,
+    dedup,
+    record_content_hash,
+    record_source,
+    segregate_by_teacher,
     to_json_bytes,
     to_jsonl_bytes,
     write_jsonl,
@@ -33,7 +40,7 @@ class _FakeS3:
 
 def test_build_record_canonical_fields_and_defaults():
     rec = build_record("crucible_research", captured_at="2026-06-26T00:00:00+00:00", model="claude-haiku-4-5")
-    assert rec["schema_version"] == SFT_SCHEMA_VERSION == 2
+    assert rec["schema_version"] == SFT_SCHEMA_VERSION == 3
     assert rec["producer"] == "crucible_research"
     assert rec["model"] == "claude-haiku-4-5"
     assert rec["meta"] == {}  # defaults to empty map, never None
@@ -120,3 +127,89 @@ def test_write_jsonl_puts_newline_delimited(monkeypatch):
     write_jsonl(recs, bucket="b", key="decision_artifacts/_sft_raw/d/run/agent.jsonl", s3_client=s3)
     body = s3.puts[0]["Body"].decode()
     assert len(body.splitlines()) == 3
+
+
+# --- provenance (v3, config#1539) ---------------------------------------------------
+
+
+def test_build_record_stamps_live_provenance_and_content_hash():
+    rec = build_record("crucible_research", captured_at="t", input_messages=[{"c": "AMD"}])
+    assert rec["schema_version"] == 3
+    assert rec["provenance"]["source"] == "live"  # default
+    assert rec["provenance"]["content_hash"] == content_hash([{"c": "AMD"}])
+
+
+def test_build_record_source_replay():
+    rec = build_record("crucible_research", captured_at="t", input_messages=[{"c": "x"}], source="replay")
+    assert rec["provenance"]["source"] == "replay"
+
+
+def test_provenance_no_input_leaves_hash_none():
+    rec = build_record("metron_advisor", captured_at="t")
+    assert rec["provenance"] == {"source": "live", "content_hash": None}
+
+
+def test_provenance_extra_forbidden():
+    with pytest.raises(ValidationError):
+        SftProvenance(source="live", teacher="oops")  # unknown field rejected
+
+
+def test_invalid_source_rejected():
+    with pytest.raises(ValidationError):
+        build_record("crucible_research", captured_at="t", source="bogus")  # not a Source literal
+
+
+def test_content_hash_stable_and_input_sensitive():
+    a = content_hash([{"role": "user", "content": "hi"}])
+    assert a == content_hash([{"content": "hi", "role": "user"}])  # key order irrelevant
+    assert a != content_hash([{"role": "user", "content": "bye"}])
+
+
+# --- corpus utilities ---------------------------------------------------------------
+
+
+def test_record_source_prefers_typed_then_ignores_stray_meta():
+    v3 = build_record("crucible_research", captured_at="t", input_messages=[{"c": "1"}], source="replay")
+    assert record_source(v3) == "replay"
+    # legacy v2 with a non-Source meta.source (metron's real-world data-source key)
+    legacy = {"producer": "metron_advisor", "captured_at": "t", "meta": {"source": "interactive"}}
+    assert record_source(legacy) == "live"  # stray value ignored, defaults live
+    # legacy carrying a genuine Source literal is honored
+    assert record_source({"captured_at": "t", "source": "synthetic"}) == "synthetic"
+
+
+def test_record_content_hash_v3_stored_vs_v2_computed():
+    v3 = build_record("crucible_research", captured_at="t", input_messages=[{"c": "z"}])
+    assert record_content_hash(v3) == content_hash([{"c": "z"}])
+    v2 = {"captured_at": "t", "input_messages": [{"c": "z"}]}  # no provenance
+    assert record_content_hash(v2) == record_content_hash(v3)  # same input → same key
+
+
+def test_dedup_keeps_earliest_of_live_and_replay():
+    live = build_record("crucible_research", captured_at="2026-06-27T00:00:00", input_messages=[{"c": "AMD"}])
+    replay = build_record("crucible_research", captured_at="2026-07-01T00:00:00", input_messages=[{"c": "AMD"}], source="replay")
+    other = build_record("crucible_research", captured_at="2026-06-28T00:00:00", input_messages=[{"c": "NVDA"}])
+    out = dedup([replay, live, other])
+    assert len(out) == 2  # AMD live+replay collapse to one
+    amd = next(r for r in out if r["input_messages"] == [{"c": "AMD"}])
+    assert amd["provenance"]["source"] == "live"  # earliest (2026-06-27) wins, not the replay
+
+
+def test_segregate_and_assert_single_teacher():
+    haiku = build_record("crucible_research", captured_at="t", model="claude-haiku-4-5-20251001", input_messages=[{"c": "1"}])
+    sonnet = build_record("crucible_research", captured_at="t", model="claude-sonnet-4-6", input_messages=[{"c": "2"}])
+    groups = segregate_by_teacher([haiku, sonnet, haiku])
+    assert set(groups) == {"claude-haiku-4-5-20251001", "claude-sonnet-4-6"}
+    assert len(groups["claude-haiku-4-5-20251001"]) == 2
+    assert assert_single_teacher([haiku, haiku]) == "claude-haiku-4-5-20251001"
+    with pytest.raises(ValueError, match="multiple teacher versions"):
+        assert_single_teacher([haiku, sonnet])
+
+
+def test_v2_record_reads_back_without_provenance():
+    """Historical v2 dict (no provenance) still validates + defaults cleanly."""
+    v2 = {"schema_version": 2, "producer": "crucible_research", "captured_at": "t",
+          "input_messages": [{"c": "1"}]}
+    rec = SftRecord(**v2)
+    assert rec.provenance is None
+    assert record_source(v2) == "live"
