@@ -7,6 +7,7 @@ single source of truth for those schemas:
 
 - ``signals``        — Slot R (research orchestration) → ``signals/{date}/signals.json``
 - ``predictions``    — Slot M (model/prediction)       → ``predictor/predictions/{date}.json``
+- ``research_intel`` — Slot R neutral product intel     → ``research_intel/{date}.json``
 - ``outcome_record`` — long-format eval outcome (one row per signal/date/horizon;
   the config#1483 replacement for wide horizon-suffixed ``score_performance``
   columns). NOT a product SLOT (R/M/S) — it's a cross-repo eval-storage contract,
@@ -49,6 +50,7 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     "signals": "signals.schema.json",
     "predictions": "predictions.schema.json",
     "outcome_record": "outcome_record.schema.json",
+    "research_intel": "research_intel.schema.json",
 }
 
 # The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
@@ -57,11 +59,17 @@ CONTRACT_SCHEMAS: dict[str, str] = {
 SLOT_SCHEMAS: dict[str, tuple[str, str]] = {
     "signals": ("signals.schema.json", "R"),
     "predictions": ("predictions.schema.json", "M"),
+    "research_intel": ("research_intel.schema.json", "R"),
 }
 
 # Current contract version per artifact. Bump ONLY on a breaking change,
 # alongside a new .schema.json and a dual-write window.
-SCHEMA_VERSIONS: dict[str, int] = {"signals": 1, "predictions": 1, "outcome_record": 1}
+SCHEMA_VERSIONS: dict[str, int] = {
+    "signals": 1,
+    "predictions": 1,
+    "outcome_record": 1,
+    "research_intel": 1,
+}
 
 
 class ContractViolation(Exception):
