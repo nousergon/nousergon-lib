@@ -16,6 +16,8 @@ stdlib-only modules stay importable without numpy):
   - ``returns``        — XIRR (money-weighted) + time-weighted return (stdlib)
   - ``attribution``    — Brinson-Fachler decomposition + Cariño linking (stdlib)
   - ``transaction_cost`` — √-impact (Almgren-Chriss) cost + tradeability score (stdlib)
+  - ``horizons``       — evaluation-horizon chokepoint: canonical primary vs
+                          diagnostic horizons + wide-column naming (stdlib)
 
 Example::
 
