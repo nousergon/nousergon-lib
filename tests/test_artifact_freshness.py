@@ -42,8 +42,12 @@ from nousergon_lib.artifact_freshness import (
     CADENCE_SYMBOLS,
     CheckResult,
     CycleCompletion,
+    DependencyGraph,
+    build_dependency_graph,
     check_freshness,
     cycle_completion,
+    leaf_alert_decisions,
+    localize_root_causes,
     resolve_current_cycle,
     resolve_dedup_key,
 )
@@ -1037,3 +1041,193 @@ class TestRunCalendarResolutionAndValidation:
     def test_invalid_run_calendar_value_raises(self):
         with pytest.raises(ValueError, match="run_calendar"):
             _daily_health_spec(run_calendar="weekly")
+
+
+# ── Phase 2: dependency DAG + root-cause localization ─────────────────────────
+
+
+def _node(artifact_id: str, *, depends_on=(), severity="critical") -> ArtifactSpec:
+    """A registry spec with lineage edges, for DAG tests."""
+    return _spec(artifact_id=artifact_id, severity=severity, depends_on=depends_on)
+
+
+def _pairs(states: dict) -> list:
+    """Build ``(spec, CheckResult)`` pairs from ``{spec: state}``."""
+    return [(spec, _res(state)) for spec, state in states.items()]
+
+
+class TestArtifactSpecLineageValidation:
+    def test_lists_coerced_to_tuples(self):
+        s = _spec(produces=["x", "y"], depends_on=["a", "b"])
+        assert s.produces == ("x", "y")
+        assert s.depends_on == ("a", "b")
+
+    def test_depends_on_deduped_order_preserving(self):
+        s = _spec(depends_on=["a", "b", "a", "c", "b"])
+        assert s.depends_on == ("a", "b", "c")
+
+    def test_default_edges_empty(self):
+        s = _spec()
+        assert s.produces == () and s.depends_on == ()
+
+    def test_self_edge_rejected(self):
+        with pytest.raises(ValueError, match="references itself"):
+            _spec(artifact_id="a", depends_on=["a"])
+
+    def test_string_instead_of_list_rejected(self):
+        with pytest.raises(ValueError, match="list/tuple"):
+            _spec(depends_on="a")
+
+    def test_empty_string_edge_rejected(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            _spec(depends_on=["a", ""])
+
+
+class TestBuildDependencyGraph:
+    def test_roots_and_leaves(self):
+        specs = [_node("a"), _node("b", depends_on=["a"]), _node("c", depends_on=["b"])]
+        g = build_dependency_graph(specs)
+        assert g.roots == ("a",)
+        assert g.leaves == ("c",)
+        assert g.upstream("c") == ("b",)
+        assert g.downstream("a") == ("b",)
+
+    def test_reachable_leaves_walks_transitively(self):
+        specs = [_node("a"), _node("b", depends_on=["a"]), _node("c", depends_on=["b"])]
+        g = build_dependency_graph(specs)
+        assert g.reachable_leaves("a") == ("c",)
+
+    def test_reachable_leaves_of_a_leaf_is_itself(self):
+        g = build_dependency_graph([_node("solo")])
+        assert g.reachable_leaves("solo") == ("solo",)
+
+    def test_diamond_reachable_leaves(self):
+        specs = [
+            _node("a"),
+            _node("b", depends_on=["a"]),
+            _node("c", depends_on=["a"]),
+            _node("d", depends_on=["b", "c"]),
+        ]
+        g = build_dependency_graph(specs)
+        assert g.reachable_leaves("a") == ("d",)
+        assert set(g.downstream("a")) == {"b", "c"}
+
+    def test_dangling_edge_raises(self):
+        with pytest.raises(ValueError, match="unknown artifact 'ghost'"):
+            build_dependency_graph([_node("a", depends_on=["ghost"])])
+
+    def test_cycle_raises(self):
+        specs = [
+            _node("a", depends_on=["c"]),
+            _node("b", depends_on=["a"]),
+            _node("c", depends_on=["b"]),
+        ]
+        with pytest.raises(ValueError, match="dependency cycle"):
+            build_dependency_graph(specs)
+
+    def test_duplicate_id_raises(self):
+        with pytest.raises(ValueError, match="duplicate artifact_id"):
+            build_dependency_graph([_node("a"), _node("a")])
+
+
+class TestLeafAlertDecisions:
+    def test_linear_chain_pages_only_root(self):
+        a, b, c = _node("a"), _node("b", depends_on=["a"]), _node("c", depends_on=["b"])
+        d = leaf_alert_decisions(_pairs({a: "missing", b: "missing", c: "missing"}))
+        assert d["a"].should_page and d["a"].classification == "failed"
+        assert not d["b"].should_page and d["b"].classification == "blocked"
+        assert not d["c"].should_page and d["c"].classification == "blocked"
+        assert d["c"].root_cause_ids == ("a",)
+
+    def test_gap_below_a_fresh_root_pages_the_broken_stage(self):
+        a, b, c = _node("a"), _node("b", depends_on=["a"]), _node("c", depends_on=["b"])
+        d = leaf_alert_decisions(_pairs({a: "fresh", b: "missing", c: "missing"}))
+        assert not d["a"].should_page
+        assert d["b"].should_page and d["b"].classification == "failed"
+        assert not d["c"].should_page and d["c"].root_cause_ids == ("b",)
+
+    def test_healed_downstream_suppresses_upstream_miss(self):
+        # Recovery produced the leaf directly ⇒ the upstream miss is moot.
+        a, b, c = _node("a"), _node("b", depends_on=["a"]), _node("c", depends_on=["b"])
+        d = leaf_alert_decisions(_pairs({a: "missing", b: "missing", c: "fresh"}))
+        assert not d["a"].should_page and "healed" in d["a"].reason
+        assert not d["b"].should_page
+        assert not d["c"].should_page and d["c"].classification == "ok"
+
+    def test_partial_diamond_root_still_pages_when_one_leaf_lost(self):
+        a = _node("a")
+        b = _node("b", depends_on=["a"])  # leaf, missing
+        c = _node("c", depends_on=["a"])  # leaf, fresh (recovered)
+        d = leaf_alert_decisions(_pairs({a: "missing", b: "missing", c: "fresh"}))
+        assert d["a"].should_page  # b never landed ⇒ a's failure is real
+        assert not d["b"].should_page and d["b"].root_cause_ids == ("a",)
+        assert not d["c"].should_page
+
+    def test_unedged_spec_behaviour_preserved(self):
+        # No edges ⇒ root+leaf ⇒ a confirmed miss pages exactly as today.
+        a = _node("a")
+        d = leaf_alert_decisions(_pairs({a: "missing"}))
+        assert d["a"].should_page and d["a"].classification == "failed"
+
+    def test_stale_counts_as_gap(self):
+        a, b = _node("a"), _node("b", depends_on=["a"])
+        d = leaf_alert_decisions(_pairs({a: "stale", b: "missing"}))
+        assert d["a"].should_page
+        assert not d["b"].should_page and d["b"].root_cause_ids == ("a",)
+
+    def test_probe_failed_upstream_does_not_suppress_downstream_miss(self):
+        # An unconfirmable upstream must NOT block a real downstream miss.
+        a, b = _node("a"), _node("b", depends_on=["a"])
+        d = leaf_alert_decisions(_pairs({a: "probe_failed", b: "missing"}))
+        assert d["b"].should_page and d["b"].classification == "failed"
+        assert d["a"].should_page and d["a"].classification == "degraded"
+
+    def test_probe_failed_root_pages_as_degraded(self):
+        a = _node("a")
+        d = leaf_alert_decisions(_pairs({a: "probe_failed"}))
+        assert d["a"].should_page and d["a"].classification == "degraded"
+
+    def test_probe_failed_blocked_by_confirmed_upstream_gap(self):
+        a, b = _node("a"), _node("b", depends_on=["a"])
+        d = leaf_alert_decisions(_pairs({a: "missing", b: "probe_failed"}))
+        assert d["a"].should_page
+        assert not d["b"].should_page and d["b"].classification == "blocked"
+
+    def test_grace_period_counts_as_satisfied(self):
+        a, b = _node("a"), _node("b", depends_on=["a"])
+        d = leaf_alert_decisions(_pairs({a: "grace_period", b: "missing"}))
+        assert not d["a"].should_page and d["a"].classification == "ok"
+        # b's upstream is satisfied (grace) ⇒ b is its own root failure.
+        assert d["b"].should_page and d["b"].classification == "failed"
+
+    def test_diamond_two_roots_localized(self):
+        # d depends on two independently-broken roots.
+        a = _node("a")
+        b = _node("b")
+        d_ = _node("d", depends_on=["a", "b"])
+        out = leaf_alert_decisions(_pairs({a: "missing", b: "missing", d_: "missing"}))
+        assert out["a"].should_page and out["b"].should_page
+        assert not out["d"].should_page
+        assert out["d"].root_cause_ids == ("a", "b")
+
+    def test_accepts_prebuilt_graph(self):
+        a, b = _node("a"), _node("b", depends_on=["a"])
+        g = build_dependency_graph([a, b])
+        assert isinstance(g, DependencyGraph)
+        d = leaf_alert_decisions(_pairs({a: "missing", b: "missing"}), graph=g)
+        assert d["a"].should_page and not d["b"].should_page
+
+
+class TestLocalizeRootCauses:
+    def test_projection_omits_satisfied_and_maps_gaps(self):
+        a, b, c = _node("a"), _node("b", depends_on=["a"]), _node("c", depends_on=["b"])
+        rc = localize_root_causes(_pairs({a: "missing", b: "missing", c: "missing"}))
+        assert rc == {"a": ("a",), "b": ("a",), "c": ("a",)}
+
+    def test_healed_root_still_localizes_but_does_not_page(self):
+        a, b = _node("a"), _node("b", depends_on=["a"])
+        # a healed (b fresh) ⇒ a omitted only if satisfied; a is 'failed' class
+        # (suppressed), so it still appears in the localization map.
+        rc = localize_root_causes(_pairs({a: "missing", b: "fresh"}))
+        assert "b" not in rc  # satisfied leaf omitted
+        assert rc["a"] == ("a",)
