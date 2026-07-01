@@ -205,6 +205,19 @@ class ArtifactSpec:
             ``open_orders`` only during the NYSE session). Inside the
             window the normal recency floor still applies, so a producer
             that dies mid-window is still caught.
+        produces: Optional lineage edge — the ``artifact_id``s this
+            artifact's producer *stage* also emits. Advisory metadata for
+            the dashboard/stage grouping; the DAG walk keys off
+            ``depends_on``. Default ``()`` (declared none).
+        depends_on: Optional lineage edges — the ``artifact_id``s this
+            artifact's producer READS to produce it (artifact → upstream
+            artifact). Turns the flat registry into a DAG so
+            :func:`localize_root_causes` can walk a downstream miss back to
+            the first missing upstream (the actual failed stage) and
+            :func:`leaf_alert_decisions` can suppress the blocked-downstream
+            cascade. An empty ``depends_on`` marks a DAG *root* — a miss
+            there is its own root cause and pages as it does today, so
+            unedged specs are behaviour-preserving. Default ``()``.
     """
 
     artifact_id: str
@@ -222,6 +235,8 @@ class ArtifactSpec:
     run_calendar: RunCalendarSymbol | None = None
     active_trading_days_only: bool = False
     active_hours_utc: tuple[int, int] | None = None
+    produces: tuple[str, ...] = ()
+    depends_on: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.cadence not in CADENCE_SYMBOLS:
@@ -251,6 +266,43 @@ class ArtifactSpec:
                     "interval_minutes > 0"
                 )
         self._validate_active_window()
+        self._validate_lineage()
+
+    def _validate_lineage(self) -> None:
+        """Validate (and normalize) the ``produces`` / ``depends_on`` DAG edges.
+
+        Both arrive from YAML as lists; coerce each to a tuple of unique,
+        order-preserving, non-empty ``artifact_id`` strings on the frozen
+        dataclass so the spec stays hashable and the edges are total.
+        Referential integrity (every ``depends_on`` id exists in the
+        registry) and acyclicity are *registry-global* properties, so they
+        are enforced by :func:`build_dependency_graph`, not here — a single
+        spec cannot see its siblings.
+        """
+        for attr in ("produces", "depends_on"):
+            raw = getattr(self, attr)
+            if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+                raise ValueError(
+                    f"ArtifactSpec.{attr} must be a list/tuple of artifact_id "
+                    f"strings, got {raw!r}"
+                )
+            seen: set[str] = set()
+            edges: list[str] = []
+            for item in raw:
+                if not isinstance(item, str) or not item:
+                    raise ValueError(
+                        f"ArtifactSpec.{attr} entries must be non-empty "
+                        f"strings, got {item!r}"
+                    )
+                if item == self.artifact_id and attr == "depends_on":
+                    raise ValueError(
+                        f"ArtifactSpec.depends_on for {self.artifact_id!r} "
+                        f"references itself — a self-edge is a 1-cycle"
+                    )
+                if item not in seen:
+                    seen.add(item)
+                    edges.append(item)
+            object.__setattr__(self, attr, tuple(edges))
 
     def _validate_active_window(self) -> None:
         """Validate (and normalize) the continuous calendar fields.
@@ -1182,3 +1234,351 @@ def cycle_completion(
             + grace_note
         ),
     )
+
+
+# ── Dependency DAG + root-cause localization (Phase 2) ────────────────────────
+#
+# The freshness substrate above judges each artifact *independently*. That is
+# correct for freshness but wrong for *alerting*: on a recovery-stitched cycle a
+# single upstream miss (say DataPhase1) makes every downstream artifact that
+# reads it also read "missing", so the operator gets a cascade of alerts whose
+# real root is one stage. Two symptoms this closes (design doc
+# `artifact-completion-monitoring-design-260529.md` §4 Move 2):
+#
+#   1. Root-cause localization — page the *first missing upstream* (the actual
+#      failed stage), not the downstream deliverables it starved.
+#   2. Leaf-only / healed-downstream suppression — if the terminal deliverable
+#      landed anyway (a recovery run produced it directly), the intermediate
+#      upstream miss is moot and must NOT fire.
+#
+# The unit is `depends_on` (artifact → the upstream artifacts its producer
+# reads). An artifact with no `depends_on` is a DAG *root*: its miss is its own
+# root cause and pages exactly as it does today, so the flat (unedged) registry
+# is behaviour-preserving — edges only ever *suppress* redundant pages, never
+# add new ones.
+
+# A delivered artifact — neither pages nor blocks its downstream. `grace_period`
+# is suppressed-by-design (newly onboarded producer), counted satisfied here
+# exactly as `cycle_completion` does.
+_SATISFIED_STATES: Final[frozenset[str]] = frozenset({"fresh", "grace_period"})
+# A *confirmed* delivery gap — the only state that can explain (block) a
+# downstream artifact's own miss. `probe_failed` is deliberately excluded: an
+# unconfirmable upstream must not suppress a real downstream miss (mirrors
+# cycle_completion's "a real gap outranks an unconfirmable probe").
+_GAP_STATES: Final[frozenset[str]] = frozenset({"missing", "stale"})
+
+# Per-artifact routing verdict.
+#   ``ok``       — satisfied (fresh / grace_period); never pages.
+#   ``failed``   — a confirmed gap (missing/stale) at a DAG root-of-gap position
+#                  (its own producer is at fault). Pages iff *consequential*.
+#   ``blocked``  — a gap / probe_failed explained by a confirmed upstream gap
+#                  (not its own fault); the upstream root pages, this stays
+#                  silent.
+#   ``degraded`` — probe_failed at a root-of-gap position (the monitor could not
+#                  confirm). Preserves today's page-on-probe_failed, iff
+#                  consequential.
+ArtifactClass = Literal["ok", "failed", "blocked", "degraded"]
+
+
+@dataclass(frozen=True)
+class DependencyGraph:
+    """Immutable adjacency view over a registry's ``depends_on`` edges.
+
+    Built by :func:`build_dependency_graph`, which enforces the two
+    registry-global invariants a single :class:`ArtifactSpec` cannot:
+    referential integrity (every ``depends_on`` target is a real
+    ``artifact_id``) and acyclicity.
+
+    Attributes:
+        depends_on: ``artifact_id`` → the upstream ids its producer reads.
+        dependents: reverse edges — ``artifact_id`` → the downstream ids
+            that read it.
+        roots: ids with no ``depends_on`` (they read nothing tracked).
+        leaves: ids nothing depends on (terminal deliverables).
+    """
+
+    depends_on: dict[str, tuple[str, ...]]
+    dependents: dict[str, tuple[str, ...]]
+    roots: tuple[str, ...]
+    leaves: tuple[str, ...]
+
+    def upstream(self, artifact_id: str) -> tuple[str, ...]:
+        """Direct upstream ids ``artifact_id``'s producer reads."""
+        return self.depends_on.get(artifact_id, ())
+
+    def downstream(self, artifact_id: str) -> tuple[str, ...]:
+        """Direct downstream ids that read ``artifact_id``."""
+        return self.dependents.get(artifact_id, ())
+
+    def reachable_leaves(self, artifact_id: str) -> tuple[str, ...]:
+        """Terminal deliverables reachable downstream of ``artifact_id``.
+
+        A node with no dependents is itself a leaf ⇒ ``(artifact_id,)``.
+        Cycle-safe via a visited set (the graph is acyclic by
+        construction, but the guard keeps a hand-built graph from looping).
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        stack = [artifact_id]
+        while stack:
+            node = stack.pop()
+            if node in seen:
+                continue
+            seen.add(node)
+            kids = self.dependents.get(node, ())
+            if not kids:
+                out.append(node)
+            else:
+                stack.extend(kids)
+        return tuple(out)
+
+
+@dataclass(frozen=True)
+class AlertDecision:
+    """Whether (and why) one artifact should page, after DAG resolution.
+
+    Attributes:
+        artifact_id: The artifact this verdict is for.
+        classification: :data:`ArtifactClass` — ``ok`` / ``failed`` /
+            ``blocked`` / ``degraded``.
+        should_page: Whether the Lambda should route an alert. ``False``
+            for satisfied, blocked-by-upstream, and healed-downstream nodes.
+        root_cause_ids: The upstream root(s) explaining this node's gap —
+            ``(artifact_id,)`` when the node is itself the root, the
+            confirmed-gap ancestors otherwise (a diamond can have several).
+            ``()`` for ``ok``.
+        reason: Human-readable diagnostic routed into the alert body.
+    """
+
+    artifact_id: str
+    classification: ArtifactClass
+    should_page: bool
+    root_cause_ids: tuple[str, ...] = ()
+    reason: str = ""
+
+
+def build_dependency_graph(specs: Iterable[ArtifactSpec]) -> DependencyGraph:
+    """Assemble a :class:`DependencyGraph` from registry specs.
+
+    Enforces the two registry-global lineage invariants:
+
+    * **Referential integrity** — every ``depends_on`` target is a real
+      ``artifact_id`` in ``specs``. A dangling edge is a typo that would
+      silently break localization, so it raises.
+    * **Acyclicity** — the ``depends_on`` relation is a DAG. A cycle would
+      make "walk to the first missing upstream" non-terminating and has no
+      real-pipeline meaning, so it raises with the offending cycle.
+
+    Raises:
+        ValueError: on a duplicate ``artifact_id``, a dangling ``depends_on``
+            target, or a dependency cycle.
+    """
+    specs = list(specs)
+    depends_on: dict[str, tuple[str, ...]] = {}
+    for spec in specs:
+        if spec.artifact_id in depends_on:
+            raise ValueError(
+                f"duplicate artifact_id {spec.artifact_id!r} in dependency graph"
+            )
+        depends_on[spec.artifact_id] = tuple(spec.depends_on)
+
+    all_ids = set(depends_on)
+    dependents: dict[str, list[str]] = {aid: [] for aid in all_ids}
+    for aid, ups in depends_on.items():
+        for up in ups:
+            if up not in all_ids:
+                raise ValueError(
+                    f"artifact {aid!r} depends_on unknown artifact {up!r} — "
+                    f"dangling lineage edge (not an artifact_id in the registry)"
+                )
+            dependents[up].append(aid)
+
+    _raise_on_cycle(depends_on)
+
+    roots = tuple(sorted(a for a, ups in depends_on.items() if not ups))
+    leaves = tuple(sorted(a for a in all_ids if not dependents[a]))
+    return DependencyGraph(
+        depends_on=depends_on,
+        dependents={a: tuple(v) for a, v in dependents.items()},
+        roots=roots,
+        leaves=leaves,
+    )
+
+
+def _raise_on_cycle(depends_on: dict[str, tuple[str, ...]]) -> None:
+    """DFS three-colouring; raise ValueError naming a cycle if one exists."""
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {a: WHITE for a in depends_on}
+
+    def visit(node: str, path: list[str]) -> None:
+        colour[node] = GREY
+        path.append(node)
+        for up in depends_on.get(node, ()):
+            if colour[up] == GREY:
+                cyc = path[path.index(up):] + [up]
+                raise ValueError(
+                    "dependency cycle in ARTIFACT_REGISTRY depends_on: "
+                    + " -> ".join(cyc)
+                )
+            if colour[up] == WHITE:
+                visit(up, path)
+        path.pop()
+        colour[node] = BLACK
+
+    for aid in depends_on:
+        if colour[aid] == WHITE:
+            visit(aid, [])
+
+
+def leaf_alert_decisions(
+    spec_results: Iterable[tuple[ArtifactSpec, CheckResult]],
+    *,
+    graph: DependencyGraph | None = None,
+) -> dict[str, AlertDecision]:
+    """Resolve per-artifact freshness results into DAG-aware page decisions.
+
+    Given the same ``(spec, CheckResult)`` pairs the Lambda already computes,
+    return one :class:`AlertDecision` per artifact so the Lambda can route
+    **leaf-only, root-cause-localized** alerts instead of one page per
+    independently-missing artifact.
+
+    An artifact pages iff ALL of:
+
+    1. it has a gap of its own — ``state`` ∈ {missing, stale, probe_failed}
+       (i.e. not satisfied); AND
+    2. it is the *root* of that gap — no direct upstream is a confirmed gap
+       (missing/stale); a node blocked by a confirmed upstream gap stays
+       silent and points at that upstream; AND
+    3. the gap is *consequential* — at least one terminal deliverable
+       reachable downstream did not land. If every downstream leaf is
+       satisfied (a recovery run produced it directly), the upstream miss was
+       healed and must not fire.
+
+    Unedged specs (no ``depends_on`` and no dependents) are simultaneously
+    root and leaf, so this reduces to "page a confirmed/unconfirmable miss" —
+    exactly today's behaviour. Edges only suppress redundant pages.
+
+    Pure: consumes already-computed :class:`CheckResult` rows and performs no
+    I/O. Builds the graph from ``specs`` when ``graph`` is not supplied.
+    """
+    pairs = list(spec_results)
+    if graph is None:
+        graph = build_dependency_graph(s for s, _ in pairs)
+    state_by_id = {s.artifact_id: r.state for s, r in pairs}
+    severity_by_id = {s.artifact_id: s.severity for s, _ in pairs}
+
+    def is_confirmed_gap(aid: str) -> bool:
+        return state_by_id.get(aid) in _GAP_STATES
+
+    def blocking_upstreams(aid: str) -> list[str]:
+        return [u for u in graph.upstream(aid) if is_confirmed_gap(u)]
+
+    decisions: dict[str, AlertDecision] = {}
+    for aid, state in state_by_id.items():
+        if state in _SATISFIED_STATES:
+            decisions[aid] = AlertDecision(aid, "ok", False, (), reason=f"{state}")
+            continue
+
+        blockers = blocking_upstreams(aid)
+        if blockers:
+            roots = _root_causes(aid, graph, is_confirmed_gap)
+            decisions[aid] = AlertDecision(
+                aid,
+                "blocked",
+                should_page=False,
+                root_cause_ids=roots,
+                reason=(
+                    f"{state}: blocked on upstream gap "
+                    f"{sorted(roots) or sorted(blockers)} — suppressed "
+                    f"(root pages)"
+                ),
+            )
+            continue
+
+        # Root of its own gap. Does it actually cost a deliverable?
+        leaves = graph.reachable_leaves(aid)
+        consequential = any(
+            state_by_id.get(leaf) not in _SATISFIED_STATES for leaf in leaves
+        )
+        classification: ArtifactClass = (
+            "degraded" if state == "probe_failed" else "failed"
+        )
+        if not consequential:
+            landed = [leaf for leaf in leaves if state_by_id.get(leaf) in _SATISFIED_STATES]
+            decisions[aid] = AlertDecision(
+                aid,
+                classification,
+                should_page=False,
+                root_cause_ids=(aid,),
+                reason=(
+                    f"{state}: healed downstream — deliverable(s) "
+                    f"{sorted(landed)} landed; suppressed"
+                ),
+            )
+            continue
+
+        lost = [leaf for leaf in leaves if state_by_id.get(leaf) not in _SATISFIED_STATES]
+        note = (
+            "root-cause miss"
+            if classification == "failed"
+            else "unconfirmable probe"
+        )
+        decisions[aid] = AlertDecision(
+            aid,
+            classification,
+            should_page=True,
+            root_cause_ids=(aid,),
+            reason=(
+                f"{state}: {note} (severity={severity_by_id.get(aid)}); "
+                f"starves deliverable(s) {sorted(lost)}"
+                if lost != [aid]
+                else f"{state}: {note} (severity={severity_by_id.get(aid)})"
+            ),
+        )
+    return decisions
+
+
+def _root_causes(
+    artifact_id: str,
+    graph: DependencyGraph,
+    is_confirmed_gap,
+) -> tuple[str, ...]:
+    """Walk ``depends_on`` up from ``artifact_id`` to the confirmed-gap root(s).
+
+    A root cause is a confirmed-gap ancestor that is *itself* not blocked by a
+    further confirmed-gap upstream — i.e. the first missing stage on each
+    branch. Diamonds can yield several. Cycle-safe via a visited set.
+    """
+    seen: set[str] = set()
+    roots: list[str] = []
+    stack = [u for u in graph.upstream(artifact_id) if is_confirmed_gap(u)]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        deeper = [u for u in graph.upstream(node) if is_confirmed_gap(u)]
+        if deeper:
+            stack.extend(deeper)
+        else:
+            roots.append(node)
+    return tuple(sorted(set(roots)))
+
+
+def localize_root_causes(
+    spec_results: Iterable[tuple[ArtifactSpec, CheckResult]],
+    *,
+    graph: DependencyGraph | None = None,
+) -> dict[str, tuple[str, ...]]:
+    """Map each *gapped* artifact_id → its upstream confirmed-gap root(s).
+
+    A thin projection of :func:`leaf_alert_decisions` for callers that only
+    want localization (e.g. a report surface): satisfied artifacts are
+    omitted; a root-of-gap artifact maps to ``(itself,)``; a blocked
+    downstream maps to the upstream root(s) that explain it.
+    """
+    return {
+        aid: d.root_cause_ids
+        for aid, d in leaf_alert_decisions(spec_results, graph=graph).items()
+        if d.classification != "ok"
+    }
