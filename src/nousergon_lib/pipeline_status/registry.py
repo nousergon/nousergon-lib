@@ -81,7 +81,6 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForDailyNews": "RunDailyNews",  # secondary daily news pull (fail-soft)
     "WaitForChronicGap": "ChronicGapSelfHeal",  # L4604 fail-soft heal split
     "WaitForMorningArcticAppend": "MorningArcticAppend",  # L4608 daily_append split
-    "WaitForTradingDayCheck": "CheckTradingDay",
     "WaitForInstanceReady": "StartExecutorEC2",
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
     # the Saturday map above (same state name). Lookup-by-name is OK because
@@ -390,20 +389,23 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         reason="Boot diagnostic call against the trading instance; "
         "no artifact — operational only."
     ),
-    "CheckTradingDay": ArtifactReason(
-        reason="NYSE-holiday gate via SSM command; no artifact — gate outcome "
-        "is encoded in the SF branch taken."
+    # config#1430 (2026-06-30): replaced the on-box SSM trading_calendar check
+    # (CheckTradingDay / TradingDayCheckFailed, whose stdout was unreliably
+    # captured on a just-cold-booted instance) with a pre-boot Lambda gate
+    # invoked BEFORE StartExecutorEC2 — the box is never booted on a holiday.
+    "TradingDayGate": ArtifactReason(
+        reason="NYSE-holiday gate — predictor Lambda invoke (action="
+        "check_trading_day), pure calendar math, run before StartExecutorEC2; "
+        "no artifact — gate outcome is encoded in the SF branch taken."
+    ),
+    "TradingDayGateFailed": ArtifactReason(
+        reason="Trading-day gate Lambda failed for infrastructure reasons "
+        "(not a holiday detection) — SNS alert, pipeline proceeds as a "
+        "trading day; no persisted artifact (the email IS the surface)."
     ),
     "NotifyHolidaySkip": ArtifactReason(
         reason="Holiday-skip SNS publish; no persisted artifact (the email IS "
         "the surface)."
-    ),
-    "StopExecutorOnHoliday": ArtifactReason(
-        reason="EC2 stopInstances on the trading instance after a holiday-skip; "
-        "no artifact — operational only."
-    ),
-    "TradingDayCheckFailed": ArtifactReason(
-        reason="SF Pass state recording a holiday-skip outcome; no artifact."
     ),
     # MorningEnrich (weekday) — same state name as Saturday; same entry above wins.
     "PredictorInference": ArchivePageRef(
