@@ -44,7 +44,8 @@ SUBSTANTIVE_RESOURCES: Final[frozenset[str]] = frozenset(
         # SNS publish (terminal-state emails — kept substantive so the
         # console shows whether the success/failure email actually fired)
         "arn:aws:states:::sns:publish",
-        # EC2 lifecycle (StartExecutorEC2 + StopTradingInstance + ForceStopInstance)
+        # EC2 lifecycle (StartExecutorEC2 + StartTradingInstance +
+        # StopTradingInstance + ForceStopInstance)
         "arn:aws:states:::aws-sdk:ec2:startInstances",
         "arn:aws:states:::aws-sdk:ec2:stopInstances",
     }
@@ -484,6 +485,12 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     "StopTradingInstance": ArtifactReason(
         reason="EC2 stopInstances on the trading instance; no artifact — "
         "operational only."
+    ),
+    "StartTradingInstance": ArtifactReason(
+        reason="EC2 startInstances re-runnability guard on the EOD SF "
+        "(nousergon-data#576) — ensures the trading instance is up + "
+        "SSM-registered before EOD sendCommands on an operator recovery "
+        "rerun; no artifact — operational only."
     ),
     "ForceStopInstance": ArtifactReason(
         reason="EC2 stopInstances fallback on a non-graceful EOD; no artifact — "
