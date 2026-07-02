@@ -23,6 +23,16 @@ name: Notify CI failure
 # which the Telegram-only path deliberately avoids). Default-branch CI
 # failures are infrequent, and a flapping `main` is a signal worth repeating
 # until it's fixed — so every gated failure alerts.
+#
+# CI-watch dispatch (config#1593): after the alert, a second step hands the
+# failure to the autonomous Fleet CI Watch agent via a repository_dispatch
+# (type `ci-main-failure`) to nousergon/alpha-engine-config, whose
+# sf-watch.yml listener runs the .github/ci-watch-prompt.md charter
+# (diagnose → rerun transients / fix defects → leave main green → report).
+# Requires org secret SF_WATCH_DISPATCH_PAT (fine-grained PAT with
+# Contents R/W on alpha-engine-config — repository_dispatch is a
+# contents-write operation). The step warns-and-skips when the secret is
+# absent so a not-yet-onboarded consumer still alerts cleanly.
 
 on:
   workflow_call:
@@ -37,6 +47,9 @@ on:
         required: true
       TELEGRAM_CHAT_ID:
         required: true
+      SF_WATCH_DISPATCH_PAT:
+        description: "Fine-grained PAT (Contents R/W on alpha-engine-config) used to fire the ci-main-failure repository_dispatch to the Fleet CI Watch (config#1593). Optional: absent → dispatch skipped with a ::warning, alert unaffected."
+        required: false
 
 jobs:
   notify:
@@ -66,3 +79,41 @@ jobs:
             --message "🔴 CI RED on main — ${{ github.repository }} @ ${{ github.sha }}
           Workflow: ${{ github.workflow }}
           Run: ${RUN_URL}"
+
+      # Secondary observability hung off the primary alert path: when the org
+      # secret is not configured the dispatch is SKIPPED with a ::warning (the
+      # recording surface) rather than failing the job — the Telegram alert
+      # above already delivered this workflow's primary deliverable, and a
+      # missing-secret hard-fail would bury that success under an unrelated
+      # red during the fleet-wide secret rollout. A configured-but-failing
+      # dispatch DOES fail the step (curl --fail) — that is a real defect and
+      # must surface loudly.
+      - name: Dispatch Fleet CI Watch (config#1593)
+        if: ${{ always() }}
+        env:
+          DISPATCH_PAT: ${{ secrets.SF_WATCH_DISPATCH_PAT }}
+          CI_REPO: ${{ github.repository }}
+          CI_SHA: ${{ github.sha }}
+          CI_RUN_ID: ${{ github.run_id }}
+          CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_WORKFLOW: ${{ github.workflow }}
+          CI_BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -z "$DISPATCH_PAT" ]; then
+            echo "::warning::SF_WATCH_DISPATCH_PAT not configured — Fleet CI Watch NOT dispatched for this failure (config#1593 operator step pending). The Telegram alert above still fired."
+            exit 0
+          fi
+          jq -n \
+            --arg repo "$CI_REPO" \
+            --arg sha "$CI_SHA" \
+            --arg run_id "$CI_RUN_ID" \
+            --arg run_url "$CI_RUN_URL" \
+            --arg workflow "$CI_WORKFLOW" \
+            --arg branch "$CI_BRANCH" \
+            '{event_type: "ci-main-failure", client_payload: {repo: $repo, sha: $sha, run_id: $run_id, run_url: $run_url, workflow: $workflow, branch: $branch}}' \
+          | curl -sS --fail-with-body -X POST \
+              -H "Authorization: token $DISPATCH_PAT" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/nousergon/alpha-engine-config/dispatches \
+              -d @-
+          echo "Dispatched ci-main-failure for $CI_REPO run $CI_RUN_ID"
