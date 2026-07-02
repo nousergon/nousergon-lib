@@ -1,0 +1,73 @@
+name: Config counterpart guard
+
+# Reusable (workflow_call) fleet primitive: block a consumer-repo PR from
+# merging while its alpha-engine-config LOCKSTEP COUNTERPART branch is still
+# unmerged (config#1592).
+#
+# The bug class: consumer repos with a branch-aware alpha-engine-config clone
+# (e.g. crucible-research ci.yml) validate PR CI against the SAME-NAMED config
+# branch, but the post-merge main run validates against config MAIN — so
+# "PR CI green" says nothing about "main CI green" until the counterpart
+# lands. Convention ("merge config first") was violated twice on 2026-07-02
+# alone (crucible-research #357/config#1590 at 17:23, #358/config#1601 at
+# 18:32), each turning main red with FileNotFoundError on config-owned
+# prompts. This check makes the ordering STRUCTURAL: it fails while a
+# same-named branch exists in alpha-engine-config, and passes once the
+# counterpart merges (branch auto-deletes on merge) and the check is re-run.
+#
+# Consumers: call from a `pull_request`-triggered workflow with
+# `secrets: inherit`, and add the resulting check context to the repo's
+# required status checks. Do NOT call on push/main runs — the guard's
+# question ("is the counterpart unmerged?") only makes sense pre-merge.
+#
+# Fork PRs: ALPHA_ENGINE_CONFIG_TOKEN is unavailable in fork contexts, so the
+# check cannot query the private config repo. It PASSES with a logged notice
+# — deliberate, documented degrade: lockstep pairs are an internal-workflow
+# convention (a fork branch cannot have a same-named counterpart authored as
+# part of the same change), and a hard fail would permanently block all
+# external PRs. The notice line in the run log is the recording surface.
+
+on:
+  workflow_call:
+    secrets:
+      ALPHA_ENGINE_CONFIG_TOKEN:
+        description: "Token able to read nousergon/alpha-engine-config refs (the same token consumer CIs use for the branch-aware clone). Absent only in fork-PR contexts."
+        required: false
+
+jobs:
+  check:
+    name: config-counterpart-merged
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail while a same-named alpha-engine-config branch exists
+        env:
+          TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          if [ -z "$BRANCH" ]; then
+            echo "::error::config-counterpart-guard called from a non-pull_request event (no head_ref) — call it only from pull_request workflows."
+            exit 1
+          fi
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::ALPHA_ENGINE_CONFIG_TOKEN unavailable (fork PR context) — counterpart check skipped; lockstep pairs are an internal convention, fork branches cannot be one."
+            exit 0
+          fi
+          set +e
+          git ls-remote --exit-code --heads \
+            "https://x-access-token:${TOKEN}@github.com/nousergon/alpha-engine-config.git" \
+            "refs/heads/${BRANCH}" > /dev/null
+          RC=$?
+          set -e
+          case $RC in
+            0)
+              echo "::error::Branch '${BRANCH}' still exists in nousergon/alpha-engine-config — this PR is half of a LOCKSTEP PAIR and merging it now would turn main CI red (config#1592). Merge the alpha-engine-config PR FIRST (its branch auto-deletes on merge), then RE-RUN this check (Re-run jobs on this workflow run) to unblock."
+              exit 1
+              ;;
+            2)
+              echo "No same-named branch in alpha-engine-config — not a pending lockstep pair. OK to merge."
+              ;;
+            *)
+              echo "::error::Could not query alpha-engine-config refs (git ls-remote exit ${RC}) — likely a token problem. Failing loud rather than passing blind."
+              exit 1
+              ;;
+          esac
