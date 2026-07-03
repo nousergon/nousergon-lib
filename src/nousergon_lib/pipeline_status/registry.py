@@ -88,6 +88,9 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # the parent name is the same in both SFs.
     # Post-close Trading SF
     "WaitForPostMarketData": "PostMarketData",
+    # Top-of-pipeline executor-checkout refresh chokepoint (config#1549) —
+    # the whole EOD run executes latest origin/main by construction.
+    "WaitForRefreshExecutorDeploy": "RefreshExecutorDeploy",
     "WaitForPostMarketArcticAppend": "PostMarketArcticAppend",  # data #... EOD append split (2026-06-16)
     "WaitForCaptureSnapshot": "CaptureSnapshot",
     "WaitForEOD": "EODReconcile",
@@ -485,6 +488,12 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     "StopTradingInstance": ArtifactReason(
         reason="EC2 stopInstances on the trading instance; no artifact — "
         "operational only."
+    ),
+    "RefreshExecutorDeploy": ArtifactReason(
+        reason="Top-of-pipeline executor-checkout git refresh chokepoint "
+        "(config#1549) — hoists deploy-freshness above postmarket → arctic → "
+        "snapshot → reconcile so the whole EOD run executes latest "
+        "origin/main by construction; no artifact — operational only."
     ),
     "StartTradingInstance": ArtifactReason(
         reason="EC2 startInstances re-runnability guard on the EOD SF "
