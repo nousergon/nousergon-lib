@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.81.1"
+version = "0.82.0"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -24,7 +24,7 @@ dependencies = [
     # ``krepis`` package in v0.66.0; ``nousergon_lib.<module>`` now
     # re-exports ``krepis.<module>`` for back-compat (see
     # tests/test_krepis_reexport.py). New code imports krepis directly.
-    "krepis>=0.2.0",
+    "krepis>=0.10.1",
     # Pydantic V2 evaluates field annotations at class-construction time
     # via get_type_hints, which on Python 3.9 cannot eval PEP 604 union
     # syntax (``str | None``) even when guarded by
