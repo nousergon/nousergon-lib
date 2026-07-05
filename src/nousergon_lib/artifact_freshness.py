@@ -93,11 +93,32 @@ from nousergon_lib.trading_calendar import (
 # expression AND the calendar-awareness rule. New symbols added here
 # require both a cycle-resolution rule in ``resolve_current_cycle`` and
 # a window-label rule in ``resolve_dedup_key``.
-CadenceSymbol = Literal["saturday_sf", "weekday_sf", "eod_sf", "continuous"]
+CadenceSymbol = Literal[
+    "saturday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"
+]
 
 CADENCE_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {"saturday_sf", "weekday_sf", "eod_sf", "continuous"}
+    {"saturday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"}
 )
+
+# ``event_driven`` is the cadence for artifacts written ONLY when a gated
+# producer decides to write (an optimizer that clears its ``_MIN_SAMPLES``
+# floor, a one-way latch, a challenger that beats its champion). Their
+# ABSENCE is correct, so they must NEVER self-page on age — the historical
+# workaround was ``grace_period_cycles: 999`` (a magic number that
+# permanently BLINDS the row: a row that never alerts on age also loses all
+# liveness signal, so a genuinely-dead producer is indistinguishable from
+# one that correctly declined to write). ``event_driven`` replaces that
+# whack-a-mole with an explicit, validator-enforced contract: the row's
+# own freshness short-circuits to ``fresh`` (never stale/missing on age),
+# and its producer-liveness is DELEGATED to an independent, separately
+# freshness-monitored proxy named by ``ArtifactSpec.liveness_via`` (e.g. an
+# unconditional per-run report the producer stage always writes). The
+# proxy going stale is what pages — so liveness is never silently lost, it
+# is relocated to a signal that CAN go stale. ``build_dependency_graph``
+# enforces that every ``event_driven`` row names a real, non-``event_driven``
+# anchor (so liveness can never chain into another never-paging row).
+# See config#1718 (this primitive) + config#1726 (registry application).
 
 # Cron-tick hours (UTC) per the live EventBridge rules. Source:
 # ``~/Development/CLAUDE.md`` § Architecture diagrams (Weekly Freshness SF at
@@ -218,6 +239,17 @@ class ArtifactSpec:
             cascade. An empty ``depends_on`` marks a DAG *root* — a miss
             there is its own root cause and pages as it does today, so
             unedged specs are behaviour-preserving. Default ``()``.
+        liveness_via: REQUIRED for ``cadence="event_driven"``, forbidden
+            otherwise. The ``artifact_id`` of the independent, separately
+            freshness-monitored proxy that carries this row's
+            producer-liveness (an unconditional per-run report the producer
+            stage always writes, regardless of whether it applied a change).
+            The event-driven row itself short-circuits to ``fresh`` (its
+            absence is correct), so its liveness rides this anchor: the
+            anchor going stale is what pages. :func:`build_dependency_graph`
+            enforces that the target exists and is NOT itself
+            ``event_driven`` (liveness cannot chain into another
+            never-paging row). ``None`` for every non-event-driven cadence.
     """
 
     artifact_id: str
@@ -237,6 +269,7 @@ class ArtifactSpec:
     active_hours_utc: tuple[int, int] | None = None
     produces: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
+    liveness_via: str | None = None
 
     def __post_init__(self) -> None:
         if self.cadence not in CADENCE_SYMBOLS:
@@ -244,6 +277,7 @@ class ArtifactSpec:
                 f"ArtifactSpec.cadence={self.cadence!r} not in "
                 f"{sorted(CADENCE_SYMBOLS)}"
             )
+        self._validate_liveness_via()
         if self.severity not in ("warning", "critical"):
             raise ValueError(
                 f"ArtifactSpec.severity={self.severity!r} must be "
@@ -267,6 +301,40 @@ class ArtifactSpec:
                 )
         self._validate_active_window()
         self._validate_lineage()
+
+    def _validate_liveness_via(self) -> None:
+        """Validate the ``event_driven`` ↔ ``liveness_via`` coupling.
+
+        Per-spec half of the invariant: an ``event_driven`` row MUST name a
+        liveness anchor (else it is silently blind — the exact
+        ``grace_period_cycles: 999`` failure this cadence replaces), and no
+        other cadence may carry one (it would be meaningless — those rows
+        self-page on their own age). The *referential* half (the anchor
+        exists and is itself non-``event_driven``) is registry-global, so it
+        is enforced in :func:`build_dependency_graph`, not here — a single
+        spec cannot see its siblings.
+        """
+        if self.cadence == "event_driven":
+            if not self.liveness_via or not isinstance(self.liveness_via, str):
+                raise ValueError(
+                    f"ArtifactSpec.cadence='event_driven' ({self.artifact_id!r}) "
+                    "requires liveness_via=<anchor artifact_id> — an "
+                    "event_driven row without a liveness anchor is silently "
+                    "blind (the grace_period_cycles=999 failure this cadence "
+                    "exists to replace)"
+                )
+            if self.liveness_via == self.artifact_id:
+                raise ValueError(
+                    f"ArtifactSpec.liveness_via for {self.artifact_id!r} "
+                    "references itself — an event_driven row cannot be its "
+                    "own liveness anchor"
+                )
+        elif self.liveness_via is not None:
+            raise ValueError(
+                f"ArtifactSpec.liveness_via is only valid for "
+                f"cadence='event_driven' (got cadence={self.cadence!r} on "
+                f"{self.artifact_id!r})"
+            )
 
     def _validate_lineage(self) -> None:
         """Validate (and normalize) the ``produces`` / ``depends_on`` DAG edges.
@@ -517,6 +585,17 @@ def resolve_current_cycle(
             bucket * spec.interval_minutes * 60, tz=timezone.utc,
         )
         return tick, f"continuous_{spec.interval_minutes}m_{bucket}"
+
+    if spec.cadence == "event_driven":
+        # Event-driven rows have no cron schedule — their absence is correct
+        # and they never self-page (see check_freshness step 0). This label
+        # is only consumed by resolve_dedup_key / canonical_key reporting, so
+        # a stable per-UTC-day window suffices to collapse enrichment retries.
+        day = now_utc.date()
+        tick = datetime(
+            day.year, day.month, day.day, 0, 0, tzinfo=timezone.utc,
+        )
+        return tick, f"event_driven_{day.isoformat()}"
 
     # Unreachable — __post_init__ validates the symbol set.
     raise ValueError(f"unknown cadence {spec.cadence!r}")
@@ -798,6 +877,13 @@ def _freshness_floor(
             timedelta(minutes=spec.interval_minutes)
             + timedelta(minutes=spec.sla_minutes_after_cron)
         )
+    if spec.cadence == "event_driven":
+        # Never classified by an age floor — check_freshness short-circuits
+        # event_driven to ``fresh`` before this is consulted. Return the
+        # unix epoch as a defensive far-past floor so that, on any path that
+        # does reach here, the newest instance (if one exists) is trivially
+        # ``>= floor`` ⇒ fresh, never stale on age.
+        return datetime(1970, 1, 1, tzinfo=timezone.utc)
     raise ValueError(f"unknown cadence {spec.cadence!r}")
 
 
@@ -915,6 +1001,29 @@ def check_freshness(
     """
     now_utc = _utc(now)
     cycle_tick, cycle_label = resolve_current_cycle(spec, now_utc)
+
+    # ── 0. Event-driven short-circuit ───────────────────────────────────
+    # An event_driven artifact is written only when a gated producer decides
+    # to write; its absence is CORRECT, so it must never self-page on age.
+    # Its producer-liveness rides an independent freshness-monitored proxy
+    # (``spec.liveness_via``, validated real + non-event_driven in
+    # build_dependency_graph) — the proxy going stale is what pages. So the
+    # row's own freshness is always ``fresh`` here: liveness is not lost, it
+    # is relocated to a signal that CAN go stale (config#1718/#1726). This
+    # replaces the ``grace_period_cycles: 999`` blind-spot with an explicit,
+    # enforced contract.
+    if spec.cadence == "event_driven":
+        return CheckResult(
+            state="fresh",
+            reason=(
+                f"event_driven — absence is correct for gated writes; "
+                f"producer-liveness delegated to freshness proxy "
+                f"{spec.liveness_via!r}"
+            ),
+            canonical_key=_format_key(
+                spec.s3_key_template, cycle_label, cycle_tick,
+            ),
+        )
 
     # ── 1. Grace period ─────────────────────────────────────────────────
     cycle_seconds = _cycle_length_seconds(spec)
@@ -1077,6 +1186,11 @@ def _cycle_length_seconds(spec: ArtifactSpec) -> float:
     if spec.cadence == "continuous":
         assert spec.interval_minutes is not None
         return spec.interval_minutes * 60
+    if spec.cadence == "event_driven":
+        # Coarse cold-start unit only (event_driven short-circuits the
+        # grace-period arithmetic in check_freshness); a nominal day keeps
+        # this non-raising for any incidental caller.
+        return 24 * 3600
     raise ValueError(f"unknown cadence {spec.cadence!r}")
 
 
@@ -1392,6 +1506,37 @@ def build_dependency_graph(specs: Iterable[ArtifactSpec]) -> DependencyGraph:
                     f"dangling lineage edge (not an artifact_id in the registry)"
                 )
             dependents[up].append(aid)
+
+    # ── event_driven liveness-anchor referential integrity ──────────────
+    # Every event_driven row delegates its liveness to a proxy named by
+    # ``liveness_via``. The per-spec validator (_validate_liveness_via)
+    # guarantees the field is present and non-self; the registry-global
+    # invariants — enforceable only with all specs in hand — are:
+    #   (1) the anchor is a real artifact_id in the registry (a dangling
+    #       anchor silently blinds the row, the failure this cadence exists
+    #       to prevent); and
+    #   (2) the anchor is NOT itself event_driven (liveness must not chain
+    #       into another never-paging row, or the whole chain is blind).
+    cadence_by_id = {spec.artifact_id: spec.cadence for spec in specs}
+    for spec in specs:
+        if spec.cadence != "event_driven":
+            continue
+        anchor = spec.liveness_via
+        if anchor not in all_ids:
+            raise ValueError(
+                f"event_driven artifact {spec.artifact_id!r} names "
+                f"liveness_via={anchor!r} which is not an artifact_id in the "
+                f"registry — dangling liveness anchor (the row would be "
+                f"silently blind)"
+            )
+        if cadence_by_id[anchor] == "event_driven":
+            raise ValueError(
+                f"event_driven artifact {spec.artifact_id!r} names "
+                f"liveness_via={anchor!r} which is itself event_driven — "
+                f"liveness cannot chain into another never-paging row; the "
+                f"anchor must be an independently freshness-monitored "
+                f"(non-event_driven) deliverable"
+            )
 
     _raise_on_cycle(depends_on)
 

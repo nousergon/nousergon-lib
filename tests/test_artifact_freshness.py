@@ -31,7 +31,6 @@ the third).
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
@@ -676,9 +675,14 @@ class TestCheckFreshnessRecovery:
 
 def test_cadence_symbols_match_documented_set():
     """The set is closed by plan §4. Adding a symbol here without adding
-    a cycle-resolution + dedup-key-label branch is the failure mode."""
+    a cycle-resolution + dedup-key-label branch is the failure mode.
+
+    ``event_driven`` (config#1718) is a first-class member: it carries a
+    cycle-resolution branch (per-UTC-day label), a dedup-key label, a
+    freshness-floor branch, and a check_freshness short-circuit — see
+    TestEventDriven* below."""
     assert CADENCE_SYMBOLS == frozenset(
-        {"saturday_sf", "weekday_sf", "eod_sf", "continuous"}
+        {"saturday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"}
     )
 
 
@@ -1128,6 +1132,162 @@ class TestBuildDependencyGraph:
     def test_duplicate_id_raises(self):
         with pytest.raises(ValueError, match="duplicate artifact_id"):
             build_dependency_graph([_node("a"), _node("a")])
+
+
+# ── event_driven cadence (config#1718) ────────────────────────────────────────
+
+
+def _event_spec(**overrides) -> ArtifactSpec:
+    """An event_driven config-row spec with a proxy liveness anchor."""
+    defaults = dict(
+        cadence="event_driven",
+        liveness_via="optimizer_run_report",
+        # event_driven rows never self-page; grace/interval are moot.
+        grace_period_cycles=0,
+    )
+    defaults.update(overrides)
+    return _spec(**defaults)
+
+
+class TestEventDrivenSpecValidation:
+    """The event_driven ↔ liveness_via coupling is the per-spec chokepoint
+    that replaces the grace_period_cycles=999 blind-spot with a contract."""
+
+    def test_event_driven_in_cadence_symbols(self):
+        assert "event_driven" in CADENCE_SYMBOLS
+
+    def test_event_driven_requires_liveness_via(self):
+        with pytest.raises(ValueError, match="requires liveness_via"):
+            _spec(cadence="event_driven", liveness_via=None)
+
+    def test_event_driven_rejects_empty_liveness_via(self):
+        with pytest.raises(ValueError, match="requires liveness_via"):
+            _spec(cadence="event_driven", liveness_via="")
+
+    def test_event_driven_rejects_self_anchor(self):
+        with pytest.raises(ValueError, match="references itself"):
+            _spec(
+                artifact_id="cfg", cadence="event_driven", liveness_via="cfg"
+            )
+
+    def test_non_event_driven_rejects_liveness_via(self):
+        with pytest.raises(ValueError, match="only valid for"):
+            _spec(cadence="saturday_sf", liveness_via="proxy")
+
+    def test_valid_event_driven_spec(self):
+        s = _event_spec(artifact_id="config_research_params")
+        assert s.cadence == "event_driven"
+        assert s.liveness_via == "optimizer_run_report"
+
+    def test_event_driven_does_not_require_interval(self):
+        # Unlike continuous, event_driven carries no interval — construction
+        # must not demand one.
+        s = _event_spec()
+        assert s.interval_minutes is None
+
+
+class TestEventDrivenCheckFreshness:
+    """The core acceptance: an event_driven row never self-pages on age
+    ('producer ran and correctly declined to write' ⇒ no alert), while a
+    genuinely-dead producer is caught via the liveness_via PROXY going
+    stale (not via the event_driven row itself)."""
+
+    def test_declined_to_write_no_artifact_is_fresh_not_missing(self):
+        # The producer evaluated its gate and correctly wrote nothing — the
+        # config key is 63 days old / absent. Pre-fix this false-alarmed
+        # (or needed grace=999); now it short-circuits to fresh.
+        spec = _event_spec(artifact_id="config_research_params")
+        now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), spec, now)  # empty S3 → no object
+        assert result.state == "fresh"
+        assert "optimizer_run_report" in result.reason
+        assert "absence is correct" in result.reason
+
+    def test_stale_artifact_still_fresh_never_pages_on_age(self):
+        # Even a 63-day-old written instance must NOT read stale: the row's
+        # own age is never the liveness signal.
+        spec = _event_spec(artifact_id="config_research_params")
+        now = datetime(2026, 7, 4, 18, 0, tzinfo=timezone.utc)
+        old = datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc)  # ~63d stale
+        s3 = _fake_s3(objects={"path/2026-05-02/file.json": old})
+        result = check_freshness(s3, spec, now)
+        assert result.state == "fresh"
+
+    def test_liveness_rides_the_proxy_which_can_go_stale(self):
+        # The proxy is an ordinary saturday_sf row: when the optimizer STAGE
+        # itself stops running, the run-report ages out → the proxy pages.
+        # This is the "producer never ran in N cycles → alert" case, now
+        # carried by a signal that CAN go stale.
+        proxy = _spec(
+            artifact_id="optimizer_run_report",
+            s3_key_template="optimizer_run/{date}/report.json",
+        )
+        now = datetime(2026, 7, 4, 18, 0, tzinfo=timezone.utc)
+        stale = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)  # >10d old
+        s3 = _fake_s3(objects={"optimizer_run/2026-06-01/report.json": stale})
+        result = check_freshness(s3, proxy, now)
+        assert result.state == "stale"
+
+    def test_event_driven_dedup_key_is_stable_per_day(self):
+        spec = _event_spec()
+        now = datetime(2026, 7, 4, 3, 0, tzinfo=timezone.utc)
+        later = datetime(2026, 7, 4, 21, 0, tzinfo=timezone.utc)
+        assert resolve_dedup_key(spec, now) == resolve_dedup_key(spec, later)
+        assert "2026-07-04" in resolve_dedup_key(spec, now)
+
+    def test_event_driven_counts_as_satisfied_in_cycle_completion(self):
+        # An event_driven required member must not drag a cycle to
+        # 'incomplete' just because it correctly declined to write.
+        proxy = _spec(
+            artifact_id="optimizer_run_report",
+            severity="critical",
+            s3_key_template="optimizer_run/{date}/report.json",
+        )
+        cfg = _event_spec(
+            artifact_id="config_research_params", severity="critical"
+        )
+        now = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
+        fresh_lm = datetime(2026, 5, 30, 11, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(objects={
+            "optimizer_run/2026-05-30/report.json": fresh_lm,  # proxy fresh
+        })
+        pairs = [
+            (proxy, check_freshness(s3, proxy, now)),
+            (cfg, check_freshness(s3, cfg, now)),  # event_driven → fresh
+        ]
+        cc = cycle_completion(pairs)
+        assert cc.n_required == 2
+        assert cc.n_satisfied == 2
+        assert cc.state == "complete"
+        assert cfg.artifact_id not in cc.stale
+        assert cfg.artifact_id not in cc.missing
+
+
+class TestEventDrivenLivenessAnchorReferentialIntegrity:
+    """The registry-global half: build_dependency_graph enforces that every
+    event_driven row's liveness_via names a real, non-event_driven anchor —
+    so a dangling or chained anchor can never silently blind the fleet."""
+
+    def test_valid_anchor_builds(self):
+        specs = [
+            _node("optimizer_run_report"),
+            _event_spec(artifact_id="cfg", liveness_via="optimizer_run_report"),
+        ]
+        g = build_dependency_graph(specs)
+        assert "cfg" in g.depends_on
+
+    def test_dangling_anchor_raises(self):
+        specs = [_event_spec(artifact_id="cfg", liveness_via="ghost")]
+        with pytest.raises(ValueError, match="dangling liveness anchor"):
+            build_dependency_graph(specs)
+
+    def test_anchor_that_is_itself_event_driven_raises(self):
+        specs = [
+            _event_spec(artifact_id="proxy", liveness_via="cfg"),
+            _event_spec(artifact_id="cfg", liveness_via="proxy"),
+        ]
+        with pytest.raises(ValueError, match="itself event_driven"):
+            build_dependency_graph(specs)
 
 
 class TestLeafAlertDecisions:
