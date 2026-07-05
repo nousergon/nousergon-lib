@@ -38,6 +38,7 @@ def test_notifier_dicts_use_env_thread_ids_and_severity_gates():
     assert critical["message_thread_id"] == "${FLOW_DOCTOR_TELEGRAM_THREAD_CRITICAL}"
     assert critical["notify_on"] == ["critical"]
     assert ops["notify_on"] == ["error", "warning"]
+    assert ops["notify_on_category"] == ["TRANSIENT", "EXTERNAL", "INFRA"]
     assert trades["notify_on"] == ["info"]
     assert trades["message_thread_id"] == "${FLOW_DOCTOR_TELEGRAM_THREAD_TRADES}"
 

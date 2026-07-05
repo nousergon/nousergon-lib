@@ -76,21 +76,28 @@ def test_import_helper_raises_runtimeerror_when_arcticdb_missing(monkeypatch):
 
 
 class _StubArctic:
-    """Stub that raises on get_library to exercise the error wrapper."""
+    """Stub that raises on get_library to exercise the error wrapper.
+
+    Records the ``create_if_missing`` value it was called with so tests can
+    assert the flag is threaded through unchanged.
+    """
 
     def __init__(self, raise_on_get: bool = False):
         self._raise = raise_on_get
+        self.last_create_if_missing = None
 
-    def get_library(self, name):
+    def get_library(self, name, create_if_missing=False):
+        self.last_create_if_missing = create_if_missing
         if self._raise:
             raise RuntimeError(f"fake get_library failure for {name}")
-        return _StubLibrary(name)
+        return _StubLibrary(name, create_if_missing=create_if_missing)
 
 
 class _StubLibrary:
-    def __init__(self, name, symbols=None):
+    def __init__(self, name, symbols=None, create_if_missing=False):
         self._name = name
         self._symbols = symbols if symbols is not None else ["A", "B", "C"]
+        self.create_if_missing = create_if_missing
 
     def list_symbols(self):
         return list(self._symbols)
@@ -135,6 +142,58 @@ def test_open_universe_lib_returns_library_on_success(monkeypatch):
     assert lib._name == "universe"
 
 
+# ── create_if_missing pass-through ───────────────────────────────────────────
+
+
+def test_open_universe_lib_defaults_create_if_missing_false(monkeypatch):
+    """Read-only consumers (the default) must NOT create the library —
+    ``create_if_missing`` defaults to ``False`` and is threaded to
+    ``get_library`` unchanged."""
+    stub = _StubArctic(raise_on_get=False)
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: stub
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+    lib = ae_arctic.open_universe_lib("test-bucket")
+    assert stub.last_create_if_missing is False
+    assert lib.create_if_missing is False
+
+
+def test_open_universe_lib_passes_create_if_missing_true(monkeypatch):
+    """Producer cold-start path: ``create_if_missing=True`` must reach
+    ``get_library`` so a fresh bucket bootstraps the library."""
+    stub = _StubArctic(raise_on_get=False)
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: stub
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+    lib = ae_arctic.open_universe_lib("test-bucket", create_if_missing=True)
+    assert stub.last_create_if_missing is True
+    assert lib.create_if_missing is True
+
+
+def test_open_macro_lib_defaults_create_if_missing_false(monkeypatch):
+    stub = _StubArctic(raise_on_get=False)
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: stub
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+    lib = ae_arctic.open_macro_lib("test-bucket")
+    assert stub.last_create_if_missing is False
+    assert lib.create_if_missing is False
+
+
+def test_open_macro_lib_passes_create_if_missing_true(monkeypatch):
+    stub = _StubArctic(raise_on_get=False)
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: stub
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+    lib = ae_arctic.open_macro_lib("test-bucket", create_if_missing=True)
+    assert stub.last_create_if_missing is True
+    assert lib.create_if_missing is True
+
+
 # ── get_universe_symbols ─────────────────────────────────────────────────────
 
 
@@ -152,7 +211,7 @@ def test_get_universe_symbols_raises_if_list_fails(monkeypatch):
 
     mod = types.ModuleType("arcticdb")
     class _ArcticWithBrokenLib:
-        def get_library(self, name):
+        def get_library(self, name, create_if_missing=False):
             return _BrokenLibrary(name)
     mod.Arctic = lambda uri: _ArcticWithBrokenLib()
     monkeypatch.setitem(sys.modules, "arcticdb", mod)
@@ -197,7 +256,7 @@ def _stub_arctic_with_ohlcv(monkeypatch, frames, symbols=None):
             return _ReadResult(df.copy())
 
     class _Arctic:
-        def get_library(self, name):
+        def get_library(self, name, create_if_missing=False):
             return _Lib()
 
     mod = types.ModuleType("arcticdb")
@@ -273,7 +332,7 @@ def test_load_universe_ohlcv_skips_failures_partial_load(monkeypatch):
             return _ReadResult(good.copy())
 
     class _Arctic:
-        def get_library(self, name):
+        def get_library(self, name, create_if_missing=False):
             return _Lib()
 
     mod = types.ModuleType("arcticdb")
@@ -342,7 +401,7 @@ def test_load_macro_series_partial_load_skips_failures(monkeypatch):
             return _Res(good.copy())
 
     class _Arctic:
-        def get_library(self, name):
+        def get_library(self, name, create_if_missing=False):
             return _Lib()
 
     mod = types.ModuleType("arcticdb")
