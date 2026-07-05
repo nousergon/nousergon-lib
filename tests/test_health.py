@@ -187,15 +187,30 @@ def test_last_success_nulled_on_failed():
 
 
 def test_health_keys_cover_the_five_modules():
-    assert set(HEALTH_KEYS) == {
+    assert set(HEALTH_KEYS) >= {
         "data",
         "research",
         "predictor",
         "backtester",
         "executor",
     }
-    for mod, key in HEALTH_KEYS.items():
-        assert key == f"health/{mod}.json"
+    # Registry-aligned primary keys (config#1728 — live producers, not stale shorthands)
+    assert HEALTH_KEYS["data"] == "health/daily_data.json"
+    assert HEALTH_KEYS["predictor"] == "health/predictor_inference.json"
+    assert HEALTH_KEYS["research"] == "health/research.json"
+
+
+def test_registry_health_artifacts_match_health_keys_values():
+    from nousergon_lib.health import REGISTRY_HEALTH_ARTIFACTS
+
+    registry_values = set(REGISTRY_HEALTH_ARTIFACTS.values())
+    health_key_values = {
+        HEALTH_KEYS["data"],
+        HEALTH_KEYS["research"],
+        HEALTH_KEYS["predictor"],
+        HEALTH_KEYS["backtester"],
+    }
+    assert registry_values == health_key_values
 
 
 def test_health_key_falls_back_for_unknown_module():
@@ -213,7 +228,7 @@ def test_write_read_round_trip():
         Deliverable(name="debug_dump", required=False, produced=False, detail="skipped"),
     ]
     written = write_health(
-        module_name="predictor",
+        module_name="predictor_inference",
         deliverables=deliverables,
         run_date="2026-07-05",
         duration_seconds=8.0,
@@ -229,16 +244,15 @@ def test_write_read_round_trip():
     assert s3.put_calls == [
         {
             "Bucket": DEFAULT_HEALTH_BUCKET,
-            "Key": "health/predictor.json",
+            "Key": "health/predictor_inference.json",
             "ContentType": "application/json",
         }
     ]
 
-    got = read_health("predictor", s3_client=s3)
+    got = read_health("predictor_inference", s3_client=s3)
     assert got == written
-    # bytes on the wire are valid indented JSON with the full schema
-    raw = json.loads(s3.store[(DEFAULT_HEALTH_BUCKET, "health/predictor.json")])
-    assert raw["module"] == "predictor"
+    raw = json.loads(s3.store[(DEFAULT_HEALTH_BUCKET, "health/predictor_inference.json")])
+    assert raw["module"] == "predictor_inference"
     assert raw["summary"] == {"rows": 512}
     assert len(raw["deliverables"]) == 2
 
@@ -327,7 +341,7 @@ def test_check_upstream_health_flags_old_stamp_as_stale():
         "error": None,
         "deliverables": [],
     }
-    s3.store[(DEFAULT_HEALTH_BUCKET, "health/data.json")] = json.dumps(
+    s3.store[(DEFAULT_HEALTH_BUCKET, "health/daily_data.json")] = json.dumps(
         stale_payload
     ).encode("utf-8")
 

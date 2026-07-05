@@ -75,15 +75,53 @@ STATUSES: Final[tuple[str, ...]] = ("failed", "degraded", "ok")
 #: ``data`` is the ``nousergon-data`` weekly collector's module name (its
 #: inline ``_write_module_health`` is called with ``module_name="daily_data"``
 #: on the daily path and per-phase names elsewhere; ``data`` is the umbrella
-#: entry the dashboard groups under). The four ``crucible-*`` modules write
-#: under their short names.
+#: entry the dashboard groups under). Values match the live
+#: ``ARTIFACT_REGISTRY.yaml`` ``health_*`` rows (config#1728) — NOT the stale
+#: ``health/{module}.json`` shorthand that was never written for data/predictor.
 HEALTH_KEYS: Final[dict[str, str]] = {
-    "data": "health/data.json",
+    "data": "health/daily_data.json",
+    "daily_data": "health/daily_data.json",
     "research": "health/research.json",
-    "predictor": "health/predictor.json",
+    "predictor": "health/predictor_inference.json",
+    "predictor_inference": "health/predictor_inference.json",
+    "predictor_training": "health/predictor_training.json",
+    "predictor_health_check": "health/predictor_health_check.json",
     "backtester": "health/backtester.json",
     "executor": "health/executor.json",
+    "eod_reconcile": "health/eod_reconcile.json",
 }
+
+#: ``health_*`` rows in ``ARTIFACT_REGISTRY.yaml`` — artifact_id → S3 key.
+#: Single source for registry validator + dashboard alignment tests (config#1728).
+REGISTRY_HEALTH_ARTIFACTS: Final[dict[str, str]] = {
+    "health_alpha_engine_data": "health/daily_data.json",
+    "health_alpha_engine_research": "health/research.json",
+    "health_alpha_engine_predictor": "health/predictor_inference.json",
+    "health_alpha_engine_backtester": "health/backtester.json",
+}
+
+#: Candidate ``health/`` filenames per logical module for staleness checks.
+#: Used by ``alpha-engine-dashboard/health_checker.py`` (config#1728).
+HEALTH_CHECK_CANDIDATES: Final[dict[str, tuple[str, ...]]] = {
+    "data": ("daily_data.json", "data_phase1.json", "data_phase2.json"),
+    "executor": ("executor.json",),
+    "predictor": (
+        "predictor_inference.json",
+        "predictor_training.json",
+        "predictor_health_check.json",
+    ),
+    "research": ("research.json",),
+    "backtester": ("backtester.json",),
+}
+
+#: Modules shown on the dashboard System Health panel — (module_name, bucket, stale_hrs).
+DASHBOARD_HEALTH_MODULES: Final[tuple[tuple[str, str, int], ...]] = (
+    ("research", "research", 8 * 24),
+    ("predictor_training", "research", 8 * 24),
+    ("predictor_inference", "research", 4 * 24),
+    ("executor", "research", 4 * 24),
+    ("eod_reconcile", "trades", 4 * 24),
+)
 
 
 def health_key(module_name: str) -> str:
