@@ -74,15 +74,22 @@ def open_arctic(bucket: str, *, region: str | None = None):
     return adb.Arctic(arctic_uri(bucket, region=region))
 
 
-def open_universe_lib(bucket: str, *, region: str | None = None) -> "Library":
+def open_universe_lib(
+    bucket: str, *, region: str | None = None, create_if_missing: bool = False
+) -> "Library":
     """Open the ``universe`` library on ``bucket``.
 
     Raises ``RuntimeError`` on any library-open failure, with bucket and
     URI in the message so the operator can see which endpoint is failing.
+
+    ``create_if_missing`` defaults to ``False`` so read-only consumers keep
+    strict "must already exist" semantics; producer modules that bootstrap
+    the library on a fresh bucket (cold start) pass ``True`` to preserve
+    create-on-missing behavior.
     """
     arctic = open_arctic(bucket, region=region)
     try:
-        return arctic.get_library(UNIVERSE_LIB)
+        return arctic.get_library(UNIVERSE_LIB, create_if_missing=create_if_missing)
     except Exception as exc:
         raise RuntimeError(
             f"ArcticDB {UNIVERSE_LIB!r} library open failed on bucket "
@@ -90,14 +97,21 @@ def open_universe_lib(bucket: str, *, region: str | None = None) -> "Library":
         ) from exc
 
 
-def open_macro_lib(bucket: str, *, region: str | None = None) -> "Library":
+def open_macro_lib(
+    bucket: str, *, region: str | None = None, create_if_missing: bool = False
+) -> "Library":
     """Open the ``macro`` library on ``bucket``.
 
     Raises ``RuntimeError`` on any library-open failure.
+
+    ``create_if_missing`` defaults to ``False`` so read-only consumers keep
+    strict "must already exist" semantics; producer modules that bootstrap
+    the library on a fresh bucket (cold start) pass ``True`` to preserve
+    create-on-missing behavior.
     """
     arctic = open_arctic(bucket, region=region)
     try:
-        return arctic.get_library(MACRO_LIB)
+        return arctic.get_library(MACRO_LIB, create_if_missing=create_if_missing)
     except Exception as exc:
         raise RuntimeError(
             f"ArcticDB {MACRO_LIB!r} library open failed on bucket "
