@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 
 class FleetTelegramTopic(str, Enum):
@@ -35,6 +35,7 @@ class FleetTelegramTopicSpec:
     thread_id_env: str
     ssm_param: str
     notify_on: Tuple[str, ...]
+    notify_on_category: Tuple[str, ...] = ()
     disable_notification: bool = False
     parse_mode: str = "Markdown"
 
@@ -67,6 +68,7 @@ _FLEET_TELEGRAM_TOPIC_SPECS: Mapping[FleetTelegramTopic, FleetTelegramTopicSpec]
         thread_id_env="FLOW_DOCTOR_TELEGRAM_THREAD_OPS_HEALTH",
         ssm_param="/alpha-engine/FLOW_DOCTOR_TELEGRAM_THREAD_OPS_HEALTH",
         notify_on=("error", "warning"),
+        notify_on_category=("TRANSIENT", "EXTERNAL", "INFRA"),
         disable_notification=False,
     ),
     FleetTelegramTopic.GROOM: FleetTelegramTopicSpec(
@@ -118,7 +120,7 @@ def fleet_telegram_notifier_dict(
 ) -> Dict[str, Any]:
     """Build one flow-doctor yaml-compatible telegram notifier dict."""
     spec = fleet_telegram_topic_spec(topic)
-    return {
+    out: Dict[str, Any] = {
         "type": "telegram",
         "bot_token": bot_token,
         "chat_id": chat_id,
@@ -127,6 +129,9 @@ def fleet_telegram_notifier_dict(
         "disable_notification": spec.disable_notification,
         "notify_on": list(spec.notify_on),
     }
+    if spec.notify_on_category:
+        out["notify_on_category"] = list(spec.notify_on_category)
+    return out
 
 
 def fleet_telegram_notifier_dicts(
