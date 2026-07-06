@@ -83,6 +83,8 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForChronicGap": "ChronicGapSelfHeal",  # L4604 fail-soft heal split
     "WaitForMorningArcticAppend": "MorningArcticAppend",  # L4608 daily_append split
     "WaitForInstanceReady": "StartExecutorEC2",
+    # config#1811 code-freshness poll loop (ssm-liveness-poller iterations).
+    "WaitForCodeFreshness": "CodeFreshnessGate",
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
     # the Saturday map above (same state name). Lookup-by-name is OK because
     # the parent name is the same in both SFs.
@@ -180,7 +182,7 @@ RegistryEntry = Annotated[
 # walked). Reviewed against ROADMAP L3050 + the post-2026-05-15
 # artifact-archive pages (dashboard #86: pages 16-22).
 STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] = {
-    # ── Weekly Freshness SF (24 substantive Task steps) ──────────────────────────
+    # ── Weekly Freshness SF (26 substantive Task steps) ──────────────────────────
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
         "no per-run rendered artifact — substrate for downstream stages."
@@ -299,6 +301,21 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "parity + the MIN_LIB_VERSION floor before any spot launch; blocks the "
         "run on drift. No per-run rendered artifact — a preventive guard.",
     ),
+    # config#1824 (2026-07-06): run-day gate mirroring the weekday
+    # TradingDayGate (config#1430) — predictor Lambda action=
+    # check_weekly_run_day, pure NYSE-calendar math, true iff yesterday was
+    # the week's last trading session (Sat normally; Fri/Thu on
+    # holiday-shortened weeks, real precedent Fri 2026-07-03).
+    "WeeklyRunDayGate": ArtifactReason(
+        reason="Weekly run-day gate — predictor Lambda invoke (action="
+        "check_weekly_run_day), pure calendar math run before preflight; "
+        "no artifact — gate outcome is encoded in the SF branch taken."
+    ),
+    "WeeklyRunDayGateFailed": ArtifactReason(
+        reason="Weekly run-day gate Lambda failed for infrastructure reasons "
+        "(not a run-day determination) — SNS alert, pipeline proceeds as a "
+        "run day; no persisted artifact (the email IS the surface)."
+    ),
     "Backtester": ArchivePageRef(
         page="21_Backtester_Evaluator_Archive",
         artifact_label="Backtester consolidated report",
@@ -380,7 +397,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "serves while the zoo arc is degraded. No persisted artifact (the email IS "
         "the surface)."
     ),
-    # ── Pre-open Trading SF (13 substantive Task steps) ───────────────────────────
+    # ── Pre-open Trading SF (16 substantive Task steps) ───────────────────────────
     "DeployDriftCheck": ArchivePageRef(
         page="4_System_Health",
         artifact_label="Deploy-drift assertions",
@@ -410,6 +427,30 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     "NotifyHolidaySkip": ArtifactReason(
         reason="Holiday-skip SNS publish; no persisted artifact (the email IS "
         "the surface)."
+    ),
+    # config#1811 Part A (2026-07-06 pre-open wedge incident): verify the
+    # three repo checkouts on ae-trading are at origin/main's SHA before any
+    # pipeline work runs, with one in-place self-heal attempt.
+    "CodeFreshnessGate": ArtifactReason(
+        reason="Box code-freshness gate — SSM check that the ae-trading "
+        "checkouts (executor/data/config) are on main @ origin/main before "
+        "pipeline work, one self-heal retry; no artifact — gate outcome is "
+        "encoded in the SF branch taken."
+    ),
+    # config#1807 (2026-07-06): pre-open data phase decoupled onto a daily
+    # data spot; launch is fire-and-forget from the dashboard dispatcher.
+    "LaunchDailyDataSpot": ArtifactReason(
+        reason="Fire-and-forget spot_data_weekly.sh --launch-only dispatch "
+        "for the daily data spot (krepis.ec2_spot rotation + dead-man "
+        "watchdog); instance id lands in ops/daily_data_spot/{date}.json — "
+        "operational only, no rendered artifact."
+    ),
+    # config#1811 Part B: the external ssm-liveness-poller's unresponsive-box
+    # branch (≥3 consecutive SSM ping misses) force-stops the wedged instance.
+    "ForceStopUnresponsiveInstance": ArtifactReason(
+        reason="EC2 stopInstances on an SSM-unresponsive (wedged) trading "
+        "box, dispatched by the liveness-watchdog branch before HandleFailure; "
+        "no artifact — operational only."
     ),
     # MorningEnrich (weekday) — same state name as Saturday; same entry above wins.
     "PredictorInference": ArchivePageRef(
