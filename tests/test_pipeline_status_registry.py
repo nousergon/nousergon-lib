@@ -121,6 +121,7 @@ def test_registry_covers_known_saturday_substantive_states():
         "WeeklySubstrateHealthCheck",
         "NotifyComplete",
         "HandleFailure",
+        "WeeklyRunDayGate",  # config#1824 run-day gate (2026-07-06)
     }
     missing = required - set(registry.STATE_TO_ARCHIVE_PAGE.keys())
     assert not missing, f"Saturday substantive states missing from registry: {missing}"
@@ -136,6 +137,9 @@ def test_registry_covers_known_weekday_substantive_states():
         "RunMorningPlanner",
         "RunDaemon",
         "HandleFailure",
+        "CodeFreshnessGate",  # config#1811 Part A (2026-07-06)
+        "ForceStopUnresponsiveInstance",  # config#1811 Part B watchdog branch
+        "LaunchDailyDataSpot",  # config#1807 daily data spot decouple
     }
     missing = required - set(registry.STATE_TO_ARCHIVE_PAGE.keys())
     assert not missing, f"Weekday substantive states missing from registry: {missing}"
