@@ -12,6 +12,15 @@ single source of truth for those schemas:
   the config#1483 replacement for wide horizon-suffixed ``score_performance``
   columns). NOT a product SLOT (R/M/S) — it's a cross-repo eval-storage contract,
   so it lives in :data:`CONTRACT_SCHEMAS` but not :data:`SLOT_SCHEMAS`.
+- ``attractiveness_eval`` — universe-board attractiveness vs realized forward
+  alpha (crucible-backtester → crucible-evaluator) →
+  ``backtest/{date}/attractiveness_eval.json``. Eval-storage contract, not a
+  slot. v2 renames ``counterfactual.*.mean_alpha_21d`` → ``mean_alpha``
+  (horizon-is-a-parameter, config#1861).
+- ``apply_audit`` — one record per auto-apply loop, emitted every evaluate run
+  so a blocked/starved apply loop is impossible to miss (crucible-backtester →
+  crucible-evaluator) → ``config/apply_audit/{date}.json``. Eval-storage
+  contract, not a slot.
 
 Producers validate a representative emitted artifact in CI; consumers validate
 the fixtures their readers are tested against; external slot implementations
@@ -51,6 +60,8 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     "predictions": "predictions.schema.json",
     "outcome_record": "outcome_record.schema.json",
     "research_intel": "research_intel.schema.json",
+    "attractiveness_eval": "attractiveness_eval.schema.json",
+    "apply_audit": "apply_audit.schema.json",
 }
 
 # The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
@@ -69,6 +80,8 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "predictions": 1,
     "outcome_record": 1,
     "research_intel": 1,
+    "attractiveness_eval": 2,
+    "apply_audit": 1,
 }
 
 
