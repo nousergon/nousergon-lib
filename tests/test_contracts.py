@@ -362,6 +362,204 @@ class TestOutcomeRecordContract:
         contracts.validate("outcome_record", _outcome_record(some_future_field=1.23))
 
 
+def _ic_block(**overrides):
+    block = {
+        "date_ic_mean": 0.06,
+        "date_ic_t": 2.1,
+        "date_ic_p": 0.04,
+        "n_eval_dates": 9,
+        "pooled_ic": 0.05,
+        "pooled_ic_p": 0.01,
+        "n": 430,
+    }
+    block.update(overrides)
+    return block
+
+
+def _trajectory_ic_block(**overrides):
+    block = _ic_block(status="ok")
+    block.update(overrides)
+    return block
+
+
+def _attractiveness_eval(**overrides):
+    payload = {
+        "schema_version": 2,
+        "status": "ok",
+        "as_of": "2026-07-06",
+        "horizon_days": 21,
+        "composite_ic": _ic_block(),
+        "pillar_ic": {
+            "quality": {"date_ic_mean": 0.04, "date_ic_p": 0.06, "n_eval_dates": 9},
+        },
+        "suggested_pillar_weights": {"quality": 0.55, "value": 0.45},
+        "shrinkage": {"method": "demiguel_1overN", "lambda": 0.9, "n_eval_dates": 9},
+        "trajectory_ic": {
+            "pre_repricing_score": _trajectory_ic_block(),
+            "attr_slope_z": _trajectory_ic_block(status="accruing"),
+        },
+        "counterfactual": {
+            "top_n": [
+                {"n": 10, "sector_balanced": False, "capture_rate": 0.34, "mean_alpha": 0.0182},
+                {"n": 25, "sector_balanced": True, "capture_rate": 0.49, "mean_alpha": 0.0114},
+            ],
+            "live_gate": {"capture_rate": 0.41, "mean_alpha": 0.0063, "n_survivors": 27},
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestAttractivenessEvalContract:
+    def test_minimal_conforming_payload(self):
+        contracts.validate("attractiveness_eval", _attractiveness_eval())
+
+    def test_is_registered_at_v2(self):
+        assert contracts.SCHEMA_VERSIONS["attractiveness_eval"] == 2
+        schema = contracts.load_schema("attractiveness_eval")
+        assert schema["properties"]["schema_version"]["const"] == 2
+        assert "v2" in schema["$id"]
+
+    def test_not_a_slot_boundary(self):
+        # eval-storage contract, not an R/M/S product slot
+        assert "attractiveness_eval" not in contracts.SLOT_SCHEMAS
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "schema_version",
+            "status",
+            "as_of",
+            "horizon_days",
+            "composite_ic",
+            "counterfactual",
+            "shrinkage",
+            "trajectory_ic",
+        ],
+    )
+    def test_missing_required_top_level_fails(self, missing):
+        payload = _attractiveness_eval()
+        del payload[missing]
+        errors = contracts.conformance_errors("attractiveness_eval", payload)
+        assert errors and missing in " ".join(errors)
+
+    def test_v2_uses_mean_alpha_not_horizon_suffixed_name(self):
+        # The v2 rename: mean_alpha is REQUIRED; the legacy horizon-suffixed
+        # field name is no longer part of the contract (config#1861).
+        payload = _attractiveness_eval()
+        entry = payload["counterfactual"]["top_n"][0]
+        entry["mean_alpha_21d"] = entry.pop("mean_alpha")
+        errors = contracts.conformance_errors("attractiveness_eval", payload)
+        assert errors and "mean_alpha" in " ".join(errors)
+
+    def test_legacy_v1_stamp_rejected(self):
+        # A v1 (schema_version=1) artifact must not silently validate as v2.
+        assert contracts.conformance_errors(
+            "attractiveness_eval", _attractiveness_eval(schema_version=1)
+        )
+
+    def test_null_alpha_and_capture_tolerated(self):
+        payload = _attractiveness_eval()
+        payload["counterfactual"]["top_n"][0]["mean_alpha"] = None
+        payload["counterfactual"]["top_n"][0]["capture_rate"] = None
+        payload["counterfactual"]["live_gate"]["mean_alpha"] = None
+        contracts.validate("attractiveness_eval", payload)
+
+    def test_insufficient_data_shape_is_additive(self):
+        contracts.validate("attractiveness_eval", _attractiveness_eval(reason="warming up"))
+
+    def test_additive_fields_pass(self):
+        payload = _attractiveness_eval(brand_new_top_level={"x": 1})
+        payload["counterfactual"]["top_n"][0]["n_cycles"] = 4
+        contracts.validate("attractiveness_eval", payload)
+
+
+def _loop_record(**overrides):
+    record = {
+        "outcome": "promoted",
+        "blocked_by": None,
+        "consecutive_blocked_weeks": 0,
+        "detail": "live config written this run",
+    }
+    record.update(overrides)
+    return record
+
+
+def _apply_audit(**overrides):
+    payload = {
+        "schema_version": 1,
+        "as_of": "2026-07-06",
+        "loops": {
+            "scoring_weights": _loop_record(),
+            "executor_params": _loop_record(
+                outcome="blocked",
+                blocked_by=["min_trades_to_promote"],
+                consecutive_blocked_weeks=3,
+                detail="too few trades to promote",
+            ),
+            "predictor_params": _loop_record(outcome="insufficient_data", detail="thin inputs"),
+            "research_params": _loop_record(outcome="disabled", detail="enforce flag off"),
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestApplyAuditContract:
+    def test_minimal_conforming_payload(self):
+        contracts.validate("apply_audit", _apply_audit())
+
+    def test_is_registered_at_v1(self):
+        assert contracts.SCHEMA_VERSIONS["apply_audit"] == 1
+        schema = contracts.load_schema("apply_audit")
+        assert "v1" in schema["$id"]
+        assert "apply_audit" not in contracts.SLOT_SCHEMAS
+
+    @pytest.mark.parametrize("missing", ["schema_version", "as_of", "loops"])
+    def test_missing_required_top_level_fails(self, missing):
+        payload = _apply_audit()
+        del payload[missing]
+        errors = contracts.conformance_errors("apply_audit", payload)
+        assert errors and missing in " ".join(errors)
+
+    @pytest.mark.parametrize(
+        "loop", ["scoring_weights", "executor_params", "predictor_params", "research_params"]
+    )
+    def test_all_four_loops_required(self, loop):
+        payload = _apply_audit()
+        del payload["loops"][loop]
+        assert contracts.conformance_errors("apply_audit", payload)
+
+    @pytest.mark.parametrize("field", ["outcome", "blocked_by", "consecutive_blocked_weeks", "detail"])
+    def test_missing_required_loop_field_fails(self, field):
+        payload = _apply_audit()
+        del payload["loops"]["scoring_weights"][field]
+        assert contracts.conformance_errors("apply_audit", payload)
+
+    def test_unknown_outcome_rejected(self):
+        payload = _apply_audit()
+        payload["loops"]["scoring_weights"]["outcome"] = "vetoed"
+        assert contracts.conformance_errors("apply_audit", payload)
+
+    def test_unknown_blocked_by_slug_rejected(self):
+        payload = _apply_audit()
+        payload["loops"]["executor_params"]["blocked_by"] = ["mystery_gate"]
+        assert contracts.conformance_errors("apply_audit", payload)
+
+    def test_empty_blocked_by_array_rejected(self):
+        # blocked_by is either null or a non-empty array (minItems 1)
+        payload = _apply_audit()
+        payload["loops"]["executor_params"]["blocked_by"] = []
+        assert contracts.conformance_errors("apply_audit", payload)
+
+    def test_extra_loop_via_additional_properties(self):
+        # additionalProperties on loops is itself a loop_record — a new named
+        # loop is additive, not a break.
+        payload = _apply_audit()
+        payload["loops"]["some_new_loop"] = _loop_record()
+        contracts.validate("apply_audit", payload)
+
+
 class TestConformanceKitApi:
     def test_validate_raises_with_full_error_list(self):
         payload = _predictions_payload()
