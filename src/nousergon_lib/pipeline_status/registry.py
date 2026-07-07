@@ -182,7 +182,7 @@ RegistryEntry = Annotated[
 # walked). Reviewed against ROADMAP L3050 + the post-2026-05-15
 # artifact-archive pages (dashboard #86: pages 16-22).
 STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] = {
-    # ── Weekly Freshness SF (26 substantive Task steps) ──────────────────────────
+    # ── Weekly Freshness SF (27 substantive Task steps) ──────────────────────────
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
         "no per-run rendered artifact — substrate for downstream stages."
@@ -301,6 +301,17 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "parity + the MIN_LIB_VERSION floor before any spot launch; blocks the "
         "run on drift. No per-run rendered artifact — a preventive guard.",
     ),
+    # L4595 / config#693: PIPELINE_CONTRACT.yaml preflight — sibling to
+    # LibPinDriftCheck, runs right after it in the pre-spend preflight chain.
+    # Re-runs the validate_pipeline_contract.py invariants at SF start so a
+    # contract break made outside PR CI halts in seconds, before spot spend.
+    "PipelineContractCheck": ArtifactReason(
+        reason="Pre-spend PIPELINE_CONTRACT.yaml self-consistency gate "
+        "(L4595/config#693) — asserts the contract parses and every "
+        "artifact_id resolves in ARTIFACT_REGISTRY.yaml before any spot "
+        "launch. No per-run rendered artifact — a preventive guard "
+        "(fail-open on fetch/parse misses, mirroring LibPinDriftCheck).",
+    ),
     # config#1824 (2026-07-06): run-day gate mirroring the weekday
     # TradingDayGate (config#1430) — predictor Lambda action=
     # check_weekly_run_day, pure NYSE-calendar math, true iff yesterday was
@@ -397,7 +408,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "serves while the zoo arc is degraded. No persisted artifact (the email IS "
         "the surface)."
     ),
-    # ── Pre-open Trading SF (16 substantive Task steps) ───────────────────────────
+    # ── Pre-open Trading SF (17 substantive Task steps) ───────────────────────────
     "DeployDriftCheck": ArchivePageRef(
         page="4_System_Health",
         artifact_label="Deploy-drift assertions",
@@ -472,6 +483,17 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     "PredictorHealthCheck": ArchivePageRef(
         page="4_System_Health",
         artifact_label="Predictor health check",
+    ),
+    # config#1853 (closing config#1282 / crucible-predictor#305): daily
+    # prediction-health producer — action=check_drift AFTER PredictorHealthCheck
+    # so trading_day's predictions exist to score. Fail-soft observability
+    # producer, never a trading gate.
+    "PredictorDriftCheck": ArtifactReason(
+        reason="Daily prediction-drift producer (config#1853) — writes "
+        "predictor/metrics/drift_{trading_day}.json (artifact_id "
+        "predictor_drift_detection; freshness tracked on page 26). Fail-soft "
+        "observability, never blocks the morning planner — no dedicated "
+        "archive page yet.",
     ),
     "RunMorningPlanner": ArchivePageRef(
         page="16_Order_Book_Rationale",
