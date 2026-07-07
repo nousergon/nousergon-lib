@@ -145,3 +145,69 @@ class TestDecideSlot:
     def test_record_shape(self):
         rec = decide_slot("mid", {"low": 0, "mid": 9, "high": 0}).as_record()
         assert set(rec) == {"launch", "tiers", "issue_filter", "model", "reason"}
+
+
+class TestDecideTrigger:
+    def _launches(self, counts, **kw):
+        from nousergon_lib.groom_eligibility import decide_trigger
+        return decide_trigger(counts, **kw)
+
+    def test_brians_8_9_10_all_three_spin_up_same_trigger(self):
+        ls = [l for l in self._launches({"low": 8, "mid": 9, "high": 10}) if l.launch]
+        assert [(l.issue_filter, l.model) for l in sorted(ls, key=lambda x: x.issue_filter)] == [
+            ("high-only", "claude-opus-4-8"),
+            ("low-only", "claude-haiku-4-5"),
+            ("mid-only", "claude-sonnet-5"),
+        ]
+
+    def test_thin_low_attaches_to_nearest_standalone_above(self):
+        ls = [l for l in self._launches({"low": 6, "mid": 9, "high": 10}) if l.launch]
+        filters = {l.issue_filter for l in ls}
+        assert filters == {"mid+low", "high-only"}  # low rides mid, not high
+
+    def test_leftover_thin_pool_launches_at_highest_model_when_over_floor(self):
+        ls = [l for l in self._launches({"low": 4, "mid": 5, "high": 2}) if l.launch]
+        assert len(ls) == 1
+        assert ls[0].issue_filter == "high+mid+low"
+        assert ls[0].model == "claude-opus-4-8"  # high present in pool
+
+    def test_thin_pool_under_floor_skips_with_reason(self):
+        ls = self._launches({"low": 1, "mid": 2, "high": 1})
+        assert len(ls) == 1 and not ls[0].launch
+        assert "deferred" in ls[0].reason
+
+    def test_thin_pool_p0_valve(self):
+        ls = [l for l in self._launches({"low": 1, "mid": 2, "high": 0}, p0_tiers=["mid"]) if l.launch]
+        assert len(ls) == 1 and ls[0].model == "claude-sonnet-5"  # no high -> Sonnet
+
+    def test_thin_pool_age_valve(self):
+        ls = [l for l in self._launches({"low": 3, "mid": 0, "high": 0},
+                                        oldest_wait_hours={"low": 96.0}) if l.launch]
+        assert len(ls) == 1 and ls[0].model == "claude-haiku-4-5"
+
+    def test_high_never_rides_below_opus(self):
+        # standalone low, thin high: high must NOT attach downward.
+        ls = [l for l in self._launches({"low": 9, "mid": 0, "high": 2}) if l.launch]
+        by_filter = {l.issue_filter: l for l in ls}
+        assert "low-only" in by_filter
+        assert all("high" not in f or l.model == "claude-opus-4-8" for f, l in by_filter.items())
+
+    def test_empty_backlog_no_launches(self):
+        assert all(not l.launch for l in self._launches({"low": 0, "mid": 0, "high": 0}))
+
+
+class TestFreshSkip:
+    def test_recent_engagement_no_activity_skips(self):
+        from nousergon_lib.groom_eligibility import fresh_skip_active
+        now = 1_000_000.0
+        assert fresh_skip_active(now - 3600, now - 3600, now)
+
+    def test_new_activity_readmits(self):
+        from nousergon_lib.groom_eligibility import fresh_skip_active
+        now = 1_000_000.0
+        assert not fresh_skip_active(now - 3600, now - 60, now)
+
+    def test_old_engagement_expires(self):
+        from nousergon_lib.groom_eligibility import fresh_skip_active
+        now = 1_000_000.0
+        assert not fresh_skip_active(now - 80 * 3600, now - 80 * 3600, now)
