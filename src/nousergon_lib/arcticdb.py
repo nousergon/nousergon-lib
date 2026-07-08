@@ -28,6 +28,8 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
+    from datetime import date
+
     from arcticdb.version_store.library import Library
 
 log = logging.getLogger(__name__)
@@ -36,6 +38,20 @@ log = logging.getLogger(__name__)
 # Centralized so a rename propagates from one place.
 UNIVERSE_LIB = "universe"
 MACRO_LIB = "macro"
+
+# Point-in-time constituent membership map, written weekly by
+# alpha-engine-data ``collectors/historical_constituents.py`` (#490/#645) to
+# the SAME bucket that backs ArcticDB, as a plain S3 JSON object (NOT an
+# ArcticDB symbol). The document shape is::
+#
+#     {"schema_version": 1, "membership": {"YYYY-MM-DD": [tickers], ...}, ...}
+#
+# where each ``membership`` key is an index *change date* and its value is the
+# roster that held *immediately before* that change took effect (see the
+# producer's ``build_pit_membership`` docstring). The as-of lookup semantics
+# in :func:`pit_membership_as_of` follow directly from that "before-the-change"
+# keying.
+HISTORICAL_CONSTITUENTS_KEY = "market_data/historical_constituents.json"
 
 
 def arctic_uri(bucket: str, *, region: str | None = None) -> str:
@@ -119,18 +135,156 @@ def open_macro_lib(
         ) from exc
 
 
-def get_universe_symbols(bucket: str, *, region: str | None = None) -> set[str]:
-    """Return the set of symbols currently present in the universe library.
+def _load_constituent_membership(
+    bucket: str, *, s3_client=None
+) -> dict[str, list[str]]:
+    """Read the PIT constituent membership map from S3.
 
-    Common use case: filtering tickers against "what's actually in
-    ArcticDB right now" before passing to downstream code that hard-fails
-    on missing symbols (e.g. the executor's load_daily_vwap / load_atr_14_pct
-    guards, or the backtester's simulate replay of historical signals).
+    Returns the ``{change_date: [tickers]}`` ``membership`` sub-dict of
+    ``market_data/historical_constituents.json`` (see
+    :data:`HISTORICAL_CONSTITUENTS_KEY`). ``s3_client`` is an optional
+    boto3-like client injection point for tests; when ``None`` a
+    ``boto3.client("s3")`` is constructed (region resolves from the standard
+    AWS env, matching the producer collector).
 
-    Raises ``RuntimeError`` on library-open or list failure — an
-    ArcticDB health problem is a pipeline-level precondition, not
-    something to silently paper over with an empty set.
+    Raises ``RuntimeError`` if the object is missing or malformed — an
+    ``as_of`` backtest that silently fell back to the current roster would
+    reintroduce exactly the survivorship bias this map exists to remove, so
+    a missing PIT map is a hard precondition failure, not a soft fallback.
     """
+    if s3_client is None:
+        try:
+            import boto3
+        except ImportError as exc:  # pragma: no cover - boto3 is a core dep
+            raise RuntimeError(
+                f"boto3 is required to read {HISTORICAL_CONSTITUENTS_KEY}: {exc}"
+            ) from exc
+        s3_client = boto3.client("s3")
+
+    import json
+
+    try:
+        resp = s3_client.get_object(
+            Bucket=bucket, Key=HISTORICAL_CONSTITUENTS_KEY
+        )
+        doc = json.loads(resp["Body"].read())
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read PIT constituent map "
+            f"s3://{bucket}/{HISTORICAL_CONSTITUENTS_KEY}: {exc}. The weekly "
+            f"producer (alpha-engine-data historical_constituents) must have "
+            f"written it before an as_of backtest can run."
+        ) from exc
+
+    membership = doc.get("membership")
+    if not isinstance(membership, dict) or not membership:
+        raise RuntimeError(
+            f"PIT constituent map s3://{bucket}/{HISTORICAL_CONSTITUENTS_KEY} "
+            f"has no usable 'membership' object (got {type(membership).__name__})."
+        )
+    return membership
+
+
+def pit_membership_as_of(
+    membership: dict[str, "list[str] | set[str]"], as_of: "date"
+) -> set[str] | None:
+    """Resolve as-of-date index membership from a PIT ``membership`` map.
+
+    ``membership`` is ``{change_date: tickers}`` where each key is an index
+    change date and its value is the roster that held *immediately before*
+    that change (the producer's ``build_pit_membership`` keying). So the
+    roster in effect *on* ``as_of`` is the snapshot for the **earliest change
+    date strictly greater than** ``as_of``:
+
+      * for change dates ``D1 < D2 < D3``, ``membership[D2]`` is "after D1,
+        before D2", i.e. the roster for any day in ``[D1, D2)``;
+      * an ``as_of`` before the first change date -> ``membership[D1]``;
+      * an ``as_of`` on/after the latest change date -> ``None`` (the map
+        only stores pre-change snapshots; the roster after the last change is
+        the *current* roster, which lives in ArcticDB, not this map). Callers
+        treat ``None`` as "use the current universe".
+
+    Pure (no IO) so it is cheaply unit-testable and can be called per-date in
+    a tight backtest loop.
+    """
+    from datetime import date as _date, datetime as _datetime
+
+    if isinstance(as_of, _datetime):
+        as_of = as_of.date()
+
+    def _parse(key: str) -> "_date":
+        return _datetime.strptime(key, "%Y-%m-%d").date()
+
+    # Smallest change date strictly greater than as_of -> that snapshot is
+    # "membership before this change" == membership as of as_of.
+    best_key: str | None = None
+    best_dt: "_date | None" = None
+    for key in membership:
+        try:
+            dt = _parse(key)
+        except (ValueError, TypeError):
+            continue
+        if dt > as_of and (best_dt is None or dt < best_dt):
+            best_dt = dt
+            best_key = key
+
+    if best_key is None:
+        return None
+    return {str(t).upper() for t in membership[best_key]}
+
+
+def get_universe_symbols(
+    bucket: str,
+    *,
+    as_of: "date | None" = None,
+    region: str | None = None,
+    s3_client=None,
+) -> set[str]:
+    """Return the set of universe symbols, optionally as-of a past date.
+
+    Default (``as_of=None``) — behavior is **identical** to before: return
+    the symbols currently present in the ArcticDB universe library
+    (``list_symbols()``). Common use case: filtering tickers against "what's
+    actually in ArcticDB right now" before passing to downstream code that
+    hard-fails on missing symbols (e.g. the executor's load_daily_vwap /
+    load_atr_14_pct guards, or the backtester's simulate replay of historical
+    signals).
+
+    ``as_of`` (a ``datetime.date``) — return the **point-in-time** index
+    membership that held on that date, read from the weekly PIT constituent
+    map (:data:`HISTORICAL_CONSTITUENTS_KEY`). This removes look-ahead
+    *inclusion* survivorship bias: a backtest date no longer sees today's
+    constituent snapshot applied to all history. When ``as_of`` falls
+    on/after the most recent recorded index change (i.e. the PIT map has no
+    pre-change snapshot past it), the membership *is* the current roster, so
+    this falls back to the live ``list_symbols()`` set — identical to the
+    default. ``s3_client`` is an optional boto3-like injection point for the
+    PIT-map read (tests).
+
+    Raises ``RuntimeError`` on library-open or list failure, or (with
+    ``as_of``) on a missing/malformed PIT map — an ArcticDB health problem or
+    an absent survivorship map is a pipeline-level precondition, not
+    something to silently paper over with an empty or biased set.
+    """
+    if as_of is not None:
+        membership = _load_constituent_membership(bucket, s3_client=s3_client)
+        pit = pit_membership_as_of(membership, as_of)
+        if pit is not None:
+            log.info(
+                "ArcticDB %s PIT membership as_of %s: %d symbols",
+                UNIVERSE_LIB,
+                as_of,
+                len(pit),
+            )
+            return pit
+        # as_of is on/after the latest recorded change -> current roster.
+        log.info(
+            "PIT membership as_of %s is on/after the latest index change — "
+            "using current ArcticDB %s roster",
+            as_of,
+            UNIVERSE_LIB,
+        )
+
     lib = open_universe_lib(bucket, region=region)
     try:
         symbols = set(lib.list_symbols())
