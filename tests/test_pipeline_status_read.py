@@ -265,7 +265,7 @@ def test_materialize_tasks_attaches_registry_entry_to_each_row():
     ]
     rows = {r.state_name: r for r in _materialize_tasks(events)}
     assert isinstance(rows["Research"].archive, ArchivePageRef)
-    assert rows["Research"].archive.page == "17_Research_Briefing_Archive"
+    assert rows["Research"].archive.page == "host_research_signals?tab=Briefing+Archive"
     assert isinstance(rows["DataPhase1"].archive, ArtifactReason)
 
 
@@ -511,7 +511,7 @@ def test_task_row_archive_round_trips_through_json_for_archive_page_ref():
         "round-trip — otherwise page 25's isinstance check falls through "
         "to the registry-drift sentinel for every state."
     )
-    assert round_tripped_task.archive.page == "17_Research_Briefing_Archive"
+    assert round_tripped_task.archive.page == "host_research_signals?tab=Briefing+Archive"
 
 
 def test_task_row_archive_round_trips_through_json_for_artifact_reason():

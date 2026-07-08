@@ -140,6 +140,9 @@ def test_registry_covers_known_weekday_substantive_states():
         "CodeFreshnessGate",  # config#1811 Part A (2026-07-06)
         "ForceStopUnresponsiveInstance",  # config#1811 Part B watchdog branch
         "LaunchDailyDataSpot",  # config#1807 daily data spot decouple
+        "LaunchMorningEnrichSpot",  # config#1687 per-stage data spots
+        "LaunchMorningArcticAppendSpot",  # config#1687
+        "PublishDataSpotFailureImmediate",  # config#1687 fail-open alert
     }
     missing = required - set(registry.STATE_TO_ARCHIVE_PAGE.keys())
     assert not missing, f"Weekday substantive states missing from registry: {missing}"
@@ -153,6 +156,9 @@ def test_registry_covers_known_eod_substantive_states():
         "DailySubstrateHealthCheck",
         "StopTradingInstance",
         "HandleFailure",
+        "LaunchPostMarketDataSpot",  # config#1687 per-stage data spots
+        "LaunchPostMarketArcticAppendSpot",  # config#1687
+        "PublishDataSpotFailureImmediate",  # config#1687 fail-open alert
     }
     missing = required - set(registry.STATE_TO_ARCHIVE_PAGE.keys())
     assert not missing, f"EOD substantive states missing from registry: {missing}"
@@ -168,7 +174,7 @@ def test_lookup_registry_returns_none_for_unknown_state():
 def test_lookup_registry_returns_entry_for_known_state():
     entry = registry.lookup_registry("Research")
     assert isinstance(entry, registry.ArchivePageRef)
-    assert entry.page == "17_Research_Briefing_Archive"
+    assert entry.page == "host_research_signals?tab=Briefing+Archive"
 
 
 def test_archive_page_ref_is_frozen():
