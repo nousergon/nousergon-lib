@@ -603,3 +603,146 @@ class TestCli:
         good.write_text(json.dumps(_outcome_record()))
         assert main(["validate", "outcome_record", str(good)]) == 0
         assert "OK" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# experiment.v1 (Crucible manifest — Phase A, config#1966)
+# ---------------------------------------------------------------------------
+
+def _manifest(**overrides):
+    payload = {
+        "schema_version": 1,
+        "experiment": {
+            "id": "single-agent-sonnet-baseline",
+            "window": {"start": "2026-01-05", "end": "2026-06-26"},
+            "universe": "sp500_400",
+        },
+        "slots": {
+            "research": {"impl": "command", "run": "python my_agent.py --out ./out"},
+            "model": {"impl": "stock"},
+            "strategy": {"impl": "entry_point", "ref": "mypkg.rules:MyTrailingStop"},
+        },
+        "evaluation": {"horizons": ["21d", "5d"], "rubrics": ["default"], "gates": ["default"]},
+        "data": {"snapshot": "latest"},
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestExperimentContract:
+    def test_full_conforming_manifest(self):
+        assert contracts.conformance_errors("experiment", _manifest()) == []
+
+    def test_all_stock_minimal_manifest(self):
+        # Run = config: the all-stock manifest needs zero code and zero
+        # optional sections.
+        payload = {
+            "schema_version": 1,
+            "experiment": {"id": "reference-rate",
+                           "window": {"start": "2026-03-09", "end": "2026-07-07"}},
+            "slots": {},
+        }
+        assert contracts.conformance_errors("experiment", payload) == []
+
+    @pytest.mark.parametrize("missing", ["schema_version", "experiment", "slots"])
+    def test_missing_required_top_level_fails(self, missing):
+        payload = _manifest()
+        payload.pop(missing)
+        assert contracts.conformance_errors("experiment", payload)
+
+    def test_artifact_impl_requires_path(self):
+        payload = _manifest()
+        payload["slots"]["research"] = {"impl": "artifact"}  # no path
+        assert contracts.conformance_errors("experiment", payload)
+
+    def test_command_impl_requires_run(self):
+        payload = _manifest()
+        payload["slots"]["model"] = {"impl": "command"}  # no run
+        assert contracts.conformance_errors("experiment", payload)
+
+    def test_entry_point_ref_shape_enforced(self):
+        payload = _manifest()
+        payload["slots"]["strategy"] = {"impl": "entry_point", "ref": "not a ref"}
+        assert contracts.conformance_errors("experiment", payload)
+
+    def test_strategy_rejects_artifact_impl(self):
+        # Slot S is a code contract — artifact/command bindings are R/M-only.
+        payload = _manifest()
+        payload["slots"]["strategy"] = {"impl": "artifact", "path": "./x"}
+        assert contracts.conformance_errors("experiment", payload)
+
+    def test_unknown_slot_key_rejected(self):
+        # slots is the ONE closed map in the manifest: a typo'd slot name must
+        # fail loudly, not silently no-op the user's binding.
+        payload = _manifest()
+        payload["slots"]["resarch"] = {"impl": "stock"}
+        assert contracts.conformance_errors("experiment", payload)
+
+    def test_bad_horizon_shape_fails(self):
+        payload = _manifest()
+        payload["evaluation"]["horizons"] = ["21days"]
+        assert contracts.conformance_errors("experiment", payload)
+
+
+# ---------------------------------------------------------------------------
+# experiment_record.v1 (Crucible run index — Phase A, config#1966)
+# ---------------------------------------------------------------------------
+
+def _run_record(**overrides):
+    payload = {
+        "schema_version": 1,
+        "experiment_id": "reference-rate",
+        "run_date": "2026-07-04",
+        "generated_at": "2026-07-04T12:00:00+00:00",
+        "status": "partial",
+        "manifest": {"hash": "a41f9c2e", "inline": _manifest()},
+        "slots": [
+            {"slot": "research", "impl": "stock", "fingerprint": "stock@abc1234"},
+            {"slot": "model", "impl": "stock", "fingerprint": "stock@def5678"},
+        ],
+        "data_snapshot": "2026-07-04T09:00Z",
+        "git": {"crucible-research": "abc1234"},
+        "artifacts": [
+            {"name": "report_card", "status": "emitted",
+             "key": "evaluator/2026-07-04/report_card.json"},
+            {"name": "pit_parity", "status": "absent",
+             "reason": "parity pass skipped: OOM guard on the spot instance"},
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestExperimentRecordContract:
+    def test_conforming_record(self):
+        assert contracts.conformance_errors("experiment_record", _run_record()) == []
+
+    @pytest.mark.parametrize(
+        "missing",
+        ["schema_version", "experiment_id", "run_date", "status", "manifest", "slots", "artifacts"],
+    )
+    def test_missing_required_fails(self, missing):
+        payload = _run_record()
+        payload.pop(missing)
+        assert contracts.conformance_errors("experiment_record", payload)
+
+    def test_emitted_artifact_requires_key(self):
+        payload = _run_record()
+        payload["artifacts"] = [{"name": "report_card", "status": "emitted"}]
+        assert contracts.conformance_errors("experiment_record", payload)
+
+    def test_absent_artifact_requires_reason(self):
+        # Honest absence is the contract: an absent artifact without a reason
+        # is exactly the silent omission the record exists to prevent.
+        payload = _run_record()
+        payload["artifacts"] = [{"name": "pit_parity", "status": "absent"}]
+        assert contracts.conformance_errors("experiment_record", payload)
+
+    def test_bad_status_enum_fails(self):
+        assert contracts.conformance_errors("experiment_record", _run_record(status="ok"))
+
+    def test_envelope_contracts_are_not_slots(self):
+        assert "experiment" in contracts.CONTRACT_SCHEMAS
+        assert "experiment_record" in contracts.CONTRACT_SCHEMAS
+        assert "experiment" not in contracts.SLOT_SCHEMAS
+        assert "experiment_record" not in contracts.SLOT_SCHEMAS

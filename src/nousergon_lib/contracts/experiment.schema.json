@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nousergon.ai/schemas/crucible/experiment.v1.json",
+  "title": "Crucible Experiment Manifest (experiment.v1)",
+  "description": "The declarative experiment manifest — the user-facing input contract of the Crucible harness (crucible_ux_output_plan_260708.md §3.1, ratified 2026-07-08; Phase A, config#1966). An experiment is DECLARED, not coded: each slot (R research / M model / S strategy) independently resolves to the stock reference implementation, a user artifact/command (R/M, validated against signals.v1 / predictions.v1), or a Python entry point (S, validated by the Slot S conformance kit). Deliberately NOT a DSL: no templating, no inheritance — it names things that exist and binds slots. Tuned beliefs (thresholds, prompts, weights) stay in private experiment bundles per the harness/experiment line (ARCHITECTURE §33); this manifest only declares WHICH experiment runs. Evolution is ADDITIVE-ONLY: new optional fields may appear at any time (additionalProperties stays true); removing or renaming a required field is a breaking change requiring a v2 schema.",
+  "type": "object",
+  "required": ["schema_version", "experiment", "slots"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Manifest contract version stamp (required from birth — this contract has no pre-versioned legacy artifacts)"
+    },
+    "experiment": {
+      "type": "object",
+      "required": ["id", "window"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+          "description": "Slug identity; becomes the experiments/{id}/ S3 namespace at M3"
+        },
+        "description": {"type": "string"},
+        "owner": {"type": "string"},
+        "window": {
+          "type": "object",
+          "required": ["start", "end"],
+          "properties": {
+            "start": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+            "end": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"}
+          },
+          "additionalProperties": true
+        },
+        "universe": {
+          "type": "string",
+          "description": "Named universe from the data platform (e.g. sp500_400)"
+        }
+      },
+      "additionalProperties": true
+    },
+    "slots": {
+      "type": "object",
+      "description": "Per-slot implementation binding. Absent slot key = stock.",
+      "properties": {
+        "research": {"$ref": "#/$defs/artifact_slot"},
+        "model": {"$ref": "#/$defs/artifact_slot"},
+        "strategy": {"$ref": "#/$defs/code_slot"}
+      },
+      "additionalProperties": false
+    },
+    "evaluation": {
+      "type": "object",
+      "properties": {
+        "horizons": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^\\d+d$"},
+          "description": "HorizonPolicy names — a parameter, never a column suffix (ARCH §48)"
+        },
+        "rubrics": {"type": "array", "items": {"type": "string"}},
+        "gates": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": true
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "snapshot": {
+          "type": "string",
+          "description": "PIT pin: 'latest' or a dated snapshot id; a dated id reproduces a run exactly"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "artifact_slot": {
+      "type": "object",
+      "description": "Slot R/M binding — an artifact contract (signals.v1 / predictions.v1): stock, a pre-produced artifact path, or a command the harness invokes then validates.",
+      "required": ["impl"],
+      "oneOf": [
+        {
+          "properties": {"impl": {"const": "stock"}},
+          "required": ["impl"]
+        },
+        {
+          "properties": {
+            "impl": {"const": "artifact"},
+            "path": {"type": "string", "minLength": 1}
+          },
+          "required": ["impl", "path"]
+        },
+        {
+          "properties": {
+            "impl": {"const": "command"},
+            "run": {"type": "string", "minLength": 1}
+          },
+          "required": ["impl", "run"]
+        }
+      ],
+      "properties": {
+        "impl": {"enum": ["stock", "artifact", "command"]},
+        "path": {"type": "string"},
+        "run": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "code_slot": {
+      "type": "object",
+      "description": "Slot S binding — a code contract (ExitRule protocol via the alpha_engine.exit_rules entry-point group; conformance = the Slot S kit C1–C5).",
+      "required": ["impl"],
+      "oneOf": [
+        {
+          "properties": {"impl": {"const": "stock"}},
+          "required": ["impl"]
+        },
+        {
+          "properties": {
+            "impl": {"const": "entry_point"},
+            "ref": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][\\w.]*:[A-Za-z_]\\w*$",
+              "description": "module.path:ObjectName on the alpha_engine.exit_rules group"
+            }
+          },
+          "required": ["impl", "ref"]
+        }
+      ],
+      "properties": {
+        "impl": {"enum": ["stock", "entry_point"]},
+        "ref": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

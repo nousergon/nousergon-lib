@@ -21,6 +21,14 @@ single source of truth for those schemas:
   so a blocked/starved apply loop is impossible to miss (crucible-backtester →
   crucible-evaluator) → ``config/apply_audit/{date}.json``. Eval-storage
   contract, not a slot.
+- ``experiment`` — the Crucible declarative experiment MANIFEST (input
+  envelope: per-slot stock|artifact|command|entry_point binding, window,
+  universe, evaluation config). Phase A of crucible_ux_output_plan_260708.md
+  (config#1966). Envelope contract, not a slot.
+- ``experiment_record`` — the per-run INDEX a Crucible run emits (manifest
+  hash + slot fingerprints + typed artifact link table with honest absences);
+  the results renderer consumes this record, never a directory listing.
+  Envelope contract, not a slot.
 
 Producers validate a representative emitted artifact in CI; consumers validate
 the fixtures their readers are tested against; external slot implementations
@@ -62,6 +70,13 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     "research_intel": "research_intel.schema.json",
     "attractiveness_eval": "attractiveness_eval.schema.json",
     "apply_audit": "apply_audit.schema.json",
+    # Crucible harness envelope contracts (Phase A of the ratified
+    # crucible_ux_output_plan_260708.md — config#1966). Not slot boundaries:
+    # ``experiment`` DECLARES which slot implementations run (the manifest);
+    # ``experiment_record`` indexes what a run emitted (the results renderer
+    # consumes the record, never a directory listing).
+    "experiment": "experiment.schema.json",
+    "experiment_record": "experiment_record.schema.json",
 }
 
 # The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
@@ -82,6 +97,8 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "research_intel": 1,
     "attractiveness_eval": 2,
     "apply_audit": 1,
+    "experiment": 1,
+    "experiment_record": 1,
 }
 
 
