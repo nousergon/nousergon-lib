@@ -117,14 +117,19 @@ class ArchivePageRef(BaseModel):
     """Deep-link target for a substantive Task state that produces an
     operator-readable artifact.
 
-    The ``page`` slug is the dashboard page module name (e.g.
-    ``"19_EOD_Reconcile_Archive"`` — corresponds to
-    ``alpha-engine-dashboard/pages/19_EOD_Reconcile_Archive.py``). The
-    dashboard consumer constructs the full URL from its base host +
-    page slug at render time; the lib does not bake URL hosts because the
-    same page is reachable at ``console.nousergon.ai`` (private) and may
-    or may not be reachable at ``live.nousergon.ai`` (public) depending
-    on the page.
+    The ``page`` value is a **console URL path** relative to the console
+    host root — either a registered ``st.Page`` slug (a pinned
+    ``url_path`` like ``"eod-report"`` / ``"fleet-status"``, or a
+    filename-derived default like ``"Report_Card"``) or a lazy-host tab
+    deep-link (``"host_execution?tab=Order+Book"``). This replaced the
+    pre-nav-collapse "page module name" contract (console-IA sync,
+    alpha-engine-config#1990): after crucible-dashboard#273 collapsed
+    most pages into ``view_host`` tabs, bare module names stopped
+    resolving as URLs. The dashboard consumer renders the value as a
+    relative markdown link; the lib does not bake URL hosts because the
+    same console serves at ``console.nousergon.ai`` behind Cloudflare
+    Access. A dashboard-side guard test pins every ``page`` value
+    against the live nav registration + host tab lists.
 
     ``artifact_label`` is the human-readable label for the deep-link cell
     on page 25 — e.g. "Morning briefing" rather than the bare page slug.
@@ -207,15 +212,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "substrate-only — consumed at Research time."
     ),
     "RegimeSubstrate": ArchivePageRef(
-        page="15_Regime",
+        page="host_predictor?tab=Regime",
         artifact_label="Regime substrate",
     ),
     "RegimeRetrospectiveEval": ArchivePageRef(
-        page="15_Regime",
+        page="host_predictor?tab=Regime",
         artifact_label="Regime retrospective eval",
     ),
     "Research": ArchivePageRef(
-        page="17_Research_Briefing_Archive",
+        page="host_research_signals?tab=Briefing+Archive",
         artifact_label="Morning research briefing",
     ),
     "DataPhase2": ArtifactReason(
@@ -223,11 +228,11 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "rendered artifact."
     ),
     "EvalJudgeSubmitFirstSaturday": ArchivePageRef(
-        page="8_Eval_Quality",
+        page="host_eval_backtester?tab=Eval+Quality",
         artifact_label="Eval judge (first Saturday batch)",
     ),
     "EvalJudgeSubmitWeekly": ArchivePageRef(
-        page="8_Eval_Quality",
+        page="host_eval_backtester?tab=Eval+Quality",
         artifact_label="Eval judge (weekly batch)",
     ),
     "EvalJudgePoll": ArtifactReason(
@@ -235,11 +240,11 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "see EvalJudgeProcess for the materialized rubric output."
     ),
     "EvalJudgeProcess": ArchivePageRef(
-        page="8_Eval_Quality",
+        page="host_eval_backtester?tab=Eval+Quality",
         artifact_label="Eval judge processed rubrics",
     ),
     "EvalRollingMean": ArchivePageRef(
-        page="8_Eval_Quality",
+        page="host_eval_backtester?tab=Eval+Quality",
         artifact_label="Eval 4-week rolling mean",
     ),
     "RationaleClustering": ArtifactReason(
@@ -255,11 +260,11 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "inline in Backtester evaluator report (page 21)."
     ),
     "AggregateCosts": ArchivePageRef(
-        page="23_LLM_Cost",
+        page="host_cost_usage?tab=LLM+Cost",
         artifact_label="LLM cost telemetry (daily aggregate)",
     ),
     "PredictorTraining": ArchivePageRef(
-        page="20_Predictor_Training_Archive",
+        page="host_predictor?tab=Archives",
         artifact_label="Predictor training summary",
     ),
     # L4544/L4571: after PredictorTraining, the model-zoo rotation trains the
@@ -267,7 +272,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     # predictor/model_zoo/leaderboard/{date}.json. Surfaced on the Predictor
     # console's "Model Zoo — Weekly Selection" panel (dashboard #170).
     "ModelZooRotation": ArchivePageRef(
-        page="7_Predictor",
+        page="model-zoo",
         artifact_label="Model-zoo selection leaderboard",
     ),
     # config#1083 PARALLEL fan-out (decomposes the monolithic ModelZooRotation):
@@ -289,7 +294,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "dispatch step.",
     ),
     "ModelZooSelect": ArchivePageRef(
-        page="7_Predictor",
+        page="model-zoo",
         artifact_label="Model-zoo selection leaderboard",
     ),
     # L4517: preventive cross-repo nousergon-lib pin-drift gate — runs before
@@ -328,7 +333,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "run day; no persisted artifact (the email IS the surface)."
     ),
     "Backtester": ArchivePageRef(
-        page="21_Backtester_Evaluator_Archive",
+        page="analysis",
         artifact_label="Backtester consolidated report",
     ),
     # L4472 phase-split (2026-05-31): the monolithic Backtester state was
@@ -336,31 +341,31 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     # OptimizerBacktest. All three write into the same backtest/{date}/ prefix
     # surfaced on the consolidated evaluator archive page.
     "PredictorBacktest": ArchivePageRef(
-        page="21_Backtester_Evaluator_Archive",
+        page="analysis",
         artifact_label="Predictor backtest + Phase 4 report",
     ),
     "PortfolioOptimizerBacktest": ArchivePageRef(
-        page="21_Backtester_Evaluator_Archive",
+        page="analysis",
         artifact_label="Portfolio-optimizer / cov / gamma sweep report",
     ),
     "Parity": ArchivePageRef(
-        page="3_Analysis",
+        page="analysis",
         artifact_label="Parity replay diff",
     ),
     "Evaluator": ArchivePageRef(
-        page="21_Backtester_Evaluator_Archive",
+        page="analysis",
         artifact_label="Backtester evaluator report",
     ),
     "DriftDetection": ArchivePageRef(
-        page="4_System_Health",
+        page="fleet-status",
         artifact_label="SF-vs-CFN drift report",
     ),
     "SaturdayHealthCheck": ArchivePageRef(
-        page="4_System_Health",
+        page="fleet-status",
         artifact_label="Saturday per-repo health check",
     ),
     "WeeklySubstrateHealthCheck": ArchivePageRef(
-        page="4_System_Health",
+        page="fleet-status",
         artifact_label="Weekly substrate health check",
     ),
     "ReportCard": ArchivePageRef(
@@ -368,7 +373,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         artifact_label="System Report Card",
     ),
     "Director": ArchivePageRef(
-        page="Director_Plan",
+        page="director",
         artifact_label="Director weekly action plan",
     ),
     "NotifyComplete": ArtifactReason(
@@ -410,7 +415,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     ),
     # ── Pre-open Trading SF (17 substantive Task steps) ───────────────────────────
     "DeployDriftCheck": ArchivePageRef(
-        page="4_System_Health",
+        page="fleet-status",
         artifact_label="Deploy-drift assertions",
     ),
     "StartExecutorEC2": ArtifactReason(
@@ -465,7 +470,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
     ),
     # MorningEnrich (weekday) — same state name as Saturday; same entry above wins.
     "PredictorInference": ArchivePageRef(
-        page="18_Predictor_Briefing_Archive",
+        page="predictor",
         artifact_label="Predictor morning briefing",
     ),
     "CheckPredictorCoverage": ArtifactReason(
@@ -481,7 +486,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "encoded in the SF branch taken."
     ),
     "PredictorHealthCheck": ArchivePageRef(
-        page="4_System_Health",
+        page="fleet-status",
         artifact_label="Predictor health check",
     ),
     # config#1853 (closing config#1282 / crucible-predictor#305): daily
@@ -496,11 +501,11 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "archive page yet.",
     ),
     "RunMorningPlanner": ArchivePageRef(
-        page="16_Order_Book_Rationale",
+        page="host_execution?tab=Order+Book",
         artifact_label="Order book + rationale",
     ),
     "RunDaemon": ArchivePageRef(
-        page="22_Intraday_Surveillance",
+        page="fleet-status",
         artifact_label="Intraday surveillance (daemon)",
     ),
     # Secondary daily news pull for the held + tracked universe; writes
@@ -524,6 +529,32 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "state (L4608, data #405) so reruns resume without re-paying the "
         "append. Writes the ArcticDB universe library; substrate-only.",
     ),
+    # config#1687 spot migration: the weekday data phases dispatch to per-stage
+    # data spots via the alpha-engine-data-spot-dispatcher Lambda. The launch
+    # states are fire-and-forget dispatches; the phase outputs themselves are
+    # substrate (see MorningEnrich / MorningArcticAppend).
+    "LaunchMorningEnrichSpot": ArtifactReason(
+        reason="Fire-and-forget spot dispatch (alpha-engine-data-spot-"
+        "dispatcher Lambda, workload=morning-enrich) for the weekday "
+        "MorningEnrich phase — data-spot migration config#1687/#1807. "
+        "Operational only, no rendered artifact; the enrich output is "
+        "substrate (see MorningEnrich).",
+    ),
+    "LaunchMorningArcticAppendSpot": ArtifactReason(
+        reason="Fire-and-forget spot dispatch (alpha-engine-data-spot-"
+        "dispatcher Lambda, workload=morning-arctic-append) for the weekday "
+        "ArcticDB daily_append phase — data-spot migration config#1687/#1807. "
+        "Operational only, no rendered artifact; the append output is "
+        "substrate (see MorningArcticAppend).",
+    ),
+    # Shared state name across the pre-open AND post-close SFs (the registry
+    # is keyed by state name; one entry serves both, like MorningEnrich).
+    "PublishDataSpotFailureImmediate": ArtifactReason(
+        reason="Fail-open SNS alert fired when a data-spot phase fails — the "
+        "pipeline continues past it (daemon / EOD reconcile proceed on prior "
+        "data) per the fail-open contract of the config#1687 spot migration. "
+        "No persisted artifact (the email IS the surface).",
+    ),
     # ── Post-close Trading SF (6 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
         reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
@@ -536,16 +567,32 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "inference. Substrate-only; the slow append separated from PostMarketData "
         "so reruns resume without re-paying it (mirrors MorningArcticAppend)."
     ),
+    # config#1687 spot migration, EOD side (see the weekday Launch* entries
+    # above; PublishDataSpotFailureImmediate is shared by state name).
+    "LaunchPostMarketDataSpot": ArtifactReason(
+        reason="Fire-and-forget spot dispatch (alpha-engine-data-spot-"
+        "dispatcher Lambda, workload=post-market-data) for the EOD "
+        "PostMarketData phase — data-spot migration config#1687. Operational "
+        "only, no rendered artifact; the phase output is substrate (see "
+        "PostMarketData).",
+    ),
+    "LaunchPostMarketArcticAppendSpot": ArtifactReason(
+        reason="Fire-and-forget spot dispatch (alpha-engine-data-spot-"
+        "dispatcher Lambda, workload=post-market-arctic-append) for the EOD "
+        "ArcticDB daily_append phase — data-spot migration config#1687. "
+        "Operational only, no rendered artifact; the append output is "
+        "substrate (see PostMarketArcticAppend).",
+    ),
     "CaptureSnapshot": ArchivePageRef(
-        page="1_Portfolio",
+        page="eod-report",
         artifact_label="NAV + positions snapshot",
     ),
     "EODReconcile": ArchivePageRef(
-        page="19_EOD_Reconcile_Archive",
+        page="eod-report",
         artifact_label="EOD reconcile briefing",
     ),
     "DailySubstrateHealthCheck": ArchivePageRef(
-        page="4_System_Health",
+        page="fleet-status",
         artifact_label="Daily substrate health check",
     ),
     "StopTradingInstance": ArtifactReason(
