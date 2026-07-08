@@ -220,6 +220,166 @@ def test_get_universe_symbols_raises_if_list_fails(monkeypatch):
         ae_arctic.get_universe_symbols("test-bucket")
 
 
+# ── PIT membership: pit_membership_as_of (pure) ──────────────────────────────
+
+# Producer keying (build_pit_membership): each key is an index *change date*
+# and its value is the roster held *immediately before* that change. So for
+# changes on 2020-06-01 (X added) and 2022-03-01 (Y removed):
+#   - membership[2020-06-01] = roster before 2020-06-01 (no X yet)
+#   - membership[2022-03-01] = roster before 2022-03-01 (has X, still has Y)
+_PIT_MEMBERSHIP = {
+    "2020-06-01": ["AAA", "BBB"],           # before X was added
+    "2022-03-01": ["AAA", "BBB", "XXX"],    # after X added, before Y removed
+}
+
+
+def test_pit_membership_as_of_between_changes():
+    """A date in [2020-06-01, 2022-03-01) gets the snapshot keyed at the
+    NEXT change date (membership 'before 2022-03-01')."""
+    import datetime
+
+    got = ae_arctic.pit_membership_as_of(_PIT_MEMBERSHIP, datetime.date(2021, 1, 1))
+    assert got == {"AAA", "BBB", "XXX"}
+
+
+def test_pit_membership_as_of_before_first_change():
+    """A date before the earliest change date gets the earliest snapshot."""
+    import datetime
+
+    got = ae_arctic.pit_membership_as_of(_PIT_MEMBERSHIP, datetime.date(2019, 1, 1))
+    assert got == {"AAA", "BBB"}
+
+
+def test_pit_membership_as_of_on_change_date_uses_next_snapshot():
+    """On a change date D itself, membership is 'after D' — so the snapshot
+    keyed at D (which is 'before D') must NOT be returned; the next snapshot
+    is (if any). On 2020-06-01 the roster is 'after 2020-06-01' == the
+    2022-03-01 snapshot (before the next change)."""
+    import datetime
+
+    got = ae_arctic.pit_membership_as_of(_PIT_MEMBERSHIP, datetime.date(2020, 6, 1))
+    assert got == {"AAA", "BBB", "XXX"}
+
+
+def test_pit_membership_as_of_after_last_change_returns_none():
+    """On/after the latest change date there is no pre-change snapshot — the
+    roster is the *current* one (lives in ArcticDB), so return None so the
+    caller falls back to list_symbols()."""
+    import datetime
+
+    assert ae_arctic.pit_membership_as_of(_PIT_MEMBERSHIP, datetime.date(2022, 3, 1)) is None
+    assert ae_arctic.pit_membership_as_of(_PIT_MEMBERSHIP, datetime.date(2025, 1, 1)) is None
+
+
+def test_pit_membership_as_of_uppercases_and_dedupes():
+    import datetime
+
+    membership = {"2021-01-01": ["aaa", "Bbb"], "2023-01-01": ["aaa"]}
+    got = ae_arctic.pit_membership_as_of(membership, datetime.date(2022, 1, 1))
+    assert got == {"AAA"}
+
+
+def test_pit_membership_as_of_accepts_datetime():
+    import datetime
+
+    got = ae_arctic.pit_membership_as_of(
+        _PIT_MEMBERSHIP, datetime.datetime(2021, 1, 1, 15, 30)
+    )
+    assert got == {"AAA", "BBB", "XXX"}
+
+
+# ── PIT membership: get_universe_symbols(as_of=...) end-to-end ───────────────
+
+
+class _FakeS3:
+    """Minimal boto3-like S3 client serving one JSON object for get_object."""
+
+    def __init__(self, body: bytes, *, raise_missing: bool = False):
+        self._body = body
+        self._raise = raise_missing
+
+    def get_object(self, Bucket, Key):  # noqa: N803 - boto3 kwarg names
+        if self._raise:
+            raise RuntimeError(f"NoSuchKey: {Key}")
+
+        class _Body:
+            def __init__(self, b):
+                self._b = b
+
+            def read(self):
+                return self._b
+
+        return {"Body": _Body(self._body)}
+
+
+def _constituents_doc(membership: dict) -> bytes:
+    import json
+
+    return json.dumps(
+        {"schema_version": 1, "membership": membership, "n_snapshots": len(membership)}
+    ).encode()
+
+
+def test_get_universe_symbols_as_of_returns_pit_set(monkeypatch):
+    """as_of resolves the PIT snapshot from S3 — ArcticDB list_symbols is
+    NOT consulted when the map covers the date (no arcticdb import needed)."""
+    import datetime
+
+    # Ensure any accidental ArcticDB use would blow up loudly.
+    monkeypatch.delitem(sys.modules, "arcticdb", raising=False)
+    s3 = _FakeS3(_constituents_doc(_PIT_MEMBERSHIP))
+
+    got = ae_arctic.get_universe_symbols(
+        "b", as_of=datetime.date(2021, 1, 1), s3_client=s3
+    )
+    assert got == {"AAA", "BBB", "XXX"}
+
+
+def test_get_universe_symbols_as_of_after_last_change_falls_back_to_current(monkeypatch):
+    """When as_of is past the last recorded change, the roster IS the current
+    one — get_universe_symbols must fall back to ArcticDB list_symbols()."""
+    import datetime
+
+    monkeypatch.setitem(sys.modules, "arcticdb", _stub_arcticdb_module())  # A,B,C
+    s3 = _FakeS3(_constituents_doc(_PIT_MEMBERSHIP))
+
+    got = ae_arctic.get_universe_symbols(
+        "b", as_of=datetime.date(2025, 1, 1), s3_client=s3
+    )
+    assert got == {"A", "B", "C"}  # current roster from list_symbols()
+
+
+def test_get_universe_symbols_omitted_as_of_is_current_behavior(monkeypatch):
+    """Non-breaking default: omitting as_of must be byte-identical to before —
+    the current ArcticDB roster, no S3 PIT read at all."""
+    monkeypatch.setitem(sys.modules, "arcticdb", _stub_arcticdb_module())
+
+    def _boom(*a, **k):  # any PIT read would be a regression
+        raise AssertionError("PIT map must not be read when as_of is omitted")
+
+    monkeypatch.setattr(ae_arctic, "_load_constituent_membership", _boom)
+
+    assert ae_arctic.get_universe_symbols("b") == {"A", "B", "C"}
+
+
+def test_get_universe_symbols_as_of_missing_map_raises(monkeypatch):
+    """A missing PIT map under as_of is a hard precondition failure (silently
+    falling back to the current roster would reintroduce survivorship bias)."""
+    import datetime
+
+    s3 = _FakeS3(b"", raise_missing=True)
+    with pytest.raises(RuntimeError, match="PIT constituent map"):
+        ae_arctic.get_universe_symbols("b", as_of=datetime.date(2021, 1, 1), s3_client=s3)
+
+
+def test_get_universe_symbols_as_of_malformed_map_raises(monkeypatch):
+    import datetime
+
+    s3 = _FakeS3(b'{"schema_version": 1}')  # no membership key
+    with pytest.raises(RuntimeError, match="no usable 'membership'"):
+        ae_arctic.get_universe_symbols("b", as_of=datetime.date(2021, 1, 1), s3_client=s3)
+
+
 # ── load_universe_ohlcv ──────────────────────────────────────────────────────
 
 
