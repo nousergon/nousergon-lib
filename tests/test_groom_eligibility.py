@@ -211,3 +211,29 @@ class TestFreshSkip:
         from nousergon_lib.groom_eligibility import fresh_skip_active
         now = 1_000_000.0
         assert not fresh_skip_active(now - 80 * 3600, now - 80 * 3600, now)
+
+
+class TestFreshSkipConstantsContract:
+    """config#2038: these three constants are the SSoT both groom consumers
+    (groom_driver.py on-box, contract-tested against this module; the
+    scheduled-groom-dispatcher Lambda, imported directly) must use — pins the
+    values so a future edit here can't silently re-drift one consumer from
+    the other the way FRESH_SKIP_SLACK_SEC (900 vs the driver's 1800) and the
+    3-vs-4-day lookback did."""
+
+    def test_slack_matches_driver_value(self):
+        from nousergon_lib.groom_eligibility import FRESH_SKIP_SLACK_SEC
+        assert FRESH_SKIP_SLACK_SEC == 1800.0
+
+    def test_lookback_days_covers_the_72h_window(self):
+        from nousergon_lib.groom_eligibility import (
+            ENGAGEMENT_LOOKBACK_DAYS,
+            FRESH_SKIP_HOURS,
+        )
+        # A run starting just before UTC midnight (FRESH_SKIP_HOURS/24) days
+        # ago must still fall inside the scanned date-bucket range.
+        assert ENGAGEMENT_LOOKBACK_DAYS >= (FRESH_SKIP_HOURS / 24.0) + 1
+
+    def test_engaged_dispositions_matches_driver_value(self):
+        from nousergon_lib.groom_eligibility import ENGAGED_DISPOSITIONS
+        assert ENGAGED_DISPOSITIONS == ("closed", "pr_opened", "commented", "labeled")
