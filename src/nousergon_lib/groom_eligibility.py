@@ -38,7 +38,7 @@ BASE_EXCLUDE_LABELS = frozenset({"groom-digest", "in-progress", "do-not-groom", 
 GATE_HARD_EXCLUDE_LABELS = frozenset({"gate:operator", "gate:decision", "gate:device"})
 #: SOFT — excluded unless the issue also carries ``gate-due``. ``gate:live-run``
 #: retired 2026-07-09, split by named pipeline into the three gate:*-sf labels
-#: (config#2062) so gate_sf_run_sweep.py can deterministically re-admit them.
+#: (config#2057) so gate_sf_run_sweep.py can deterministically re-admit them.
 GATE_SOFT_EXCLUDE_LABELS = frozenset({
     "gate:date", "gate:data", "gate:dependency",
     "gate:weekly-sf", "gate:preopen-sf", "gate:postclose-sf",
