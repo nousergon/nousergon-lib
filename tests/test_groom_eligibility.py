@@ -6,6 +6,7 @@ import pytest
 
 from nousergon_lib.groom_eligibility import (
     BUNDLED_FILTERS,
+    GATE_SOFT_EXCLUDE_LABELS,
     SlotDecision,
     TIER_MODELS,
     VALID_ISSUE_FILTERS,
@@ -45,6 +46,15 @@ class TestGateExclusion:
     def test_soft_gates_excluded_unless_due(self):
         assert is_gate_excluded(["gate:date"])
         assert not is_gate_excluded(["gate:date", "gate-due"])
+
+    def test_sf_gates_are_soft_excluded_unless_due(self):
+        # gate:live-run split by named pipeline (config#2062, 2026-07-09) —
+        # each behaves exactly like gate:date: soft-excluded unless gate-due.
+        for label in ("gate:weekly-sf", "gate:preopen-sf", "gate:postclose-sf"):
+            assert label in GATE_SOFT_EXCLUDE_LABELS
+            assert is_gate_excluded([label])
+            assert not is_gate_excluded([label, "gate-due"])
+        assert "gate:live-run" not in GATE_SOFT_EXCLUDE_LABELS
 
     def test_actionable_composes(self):
         assert is_actionable(["complexity:low"]) == "low"
