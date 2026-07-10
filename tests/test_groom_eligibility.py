@@ -154,7 +154,10 @@ class TestDecideSlot:
 
     def test_record_shape(self):
         rec = decide_slot("mid", {"low": 0, "mid": 9, "high": 0}).as_record()
-        assert set(rec) == {"launch", "tiers", "issue_filter", "model", "reason"}
+        assert set(rec) == {
+            "launch", "tiers", "issue_filter", "model", "reason",
+            "partition_index", "partition_count",
+        }
 
 
 class TestDecideTrigger:
@@ -204,6 +207,48 @@ class TestDecideTrigger:
 
     def test_empty_backlog_no_launches(self):
         assert all(not l.launch for l in self._launches({"low": 0, "mid": 0, "high": 0}))
+
+    def test_three_way_colaunch_gets_distinct_disjoint_partitions(self):
+        # config#2129: all 3 tiers co-launching (Brian's steady-state 7/8-7/10
+        # observation) must each get a UNIQUE partition_index over the SAME
+        # partition_count — this is what lets each box sweep a disjoint PR
+        # slice instead of only the first (high) ever running the sweep.
+        ls = [l for l in self._launches({"low": 8, "mid": 9, "high": 10}) if l.launch]
+        assert len(ls) == 3
+        assert {l.partition_count for l in ls} == {3}
+        assert sorted(l.partition_index for l in ls) == [0, 1, 2]
+
+    def test_solo_launch_is_unpartitioned(self):
+        # Only high clears the floor -> a single launch -> no partitioning
+        # needed (partition_count=1 means "sweep everything", the default).
+        ls = [l for l in self._launches({"low": 0, "mid": 0, "high": 10}) if l.launch]
+        assert len(ls) == 1
+        assert ls[0].partition_index == 0
+        assert ls[0].partition_count == 1
+
+    def test_skip_decisions_do_not_consume_a_partition_slot(self):
+        # One standalone launch (low) plus a thin `high` with no standalone
+        # tier above it (high is the top tier) that falls to the leftover
+        # pool and doesn't clear the floor there either -> skip. The skip
+        # must not be counted in partition_count; the one real launch is
+        # unpartitioned (0/1), not treated as "1 of 2".
+        ls = self._launches({"low": 10, "mid": 0, "high": 3})
+        launching = [l for l in ls if l.launch]
+        skipped = [l for l in ls if not l.launch]
+        assert len(launching) == 1 and len(skipped) == 1
+        assert launching[0].partition_index == 0
+        assert launching[0].partition_count == 1
+        assert skipped[0].partition_count == 1  # untouched default, never read
+
+    def test_partition_index_order_matches_launch_order_high_first(self):
+        # decide_trigger's own pool ordering sorts high-first — partition
+        # indices are assigned in that same emitted order (0=high, 1=mid,
+        # 2=low here), which is fine: any consistent, deterministic
+        # assignment yields disjoint slices, and this asserts it doesn't
+        # silently reshuffle later.
+        ls = [l for l in self._launches({"low": 8, "mid": 9, "high": 10}) if l.launch]
+        assert [l.issue_filter for l in ls] == ["high-only", "mid-only", "low-only"]
+        assert [l.partition_index for l in ls] == [0, 1, 2]
 
 
 class TestFreshSkip:
