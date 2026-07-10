@@ -209,7 +209,36 @@ def decide_slot(
 # for single-tier manual dispatches; scheduled triggers use decide_trigger().
 
 FRESH_SKIP_HOURS = 72.0
-FRESH_SKIP_SLACK_SEC = 900.0
+# config#2038: was 900.0, silently drifted from groom_driver.py's
+# _FRESH_SKIP_SLACK_SEC=1800 (the box does not install nousergon-lib at
+# runtime, so nothing caught the two constants diverging). Harmonized to the
+# driver's value — 1800s better absorbs the real gap between a chunk's
+# nominal end (elapsed_min) and its groom comment actually landing. The drift
+# made the pre-boot Lambda's fresh-skip-aware enumeration systematically
+# UNDER-skip relative to the on-box driver's, so a dispatcher decision like
+# "19 actionable, launch" could deflate to "8 actually actionable" once the
+# box's own (correct) fresh-skip ran three minutes later — a spot box boots
+# for a queue that was never really that big.
+FRESH_SKIP_SLACK_SEC = 1800.0
+
+# config#2038: every disposition that counts as ENGAGED for fresh-skip
+# purposes — SSoT for groom_driver.py's ENGAGED_DISPOSITIONS (contract-tested,
+# the box doesn't import this module at runtime) and the scheduled-groom-
+# dispatcher Lambda's engagement scan (which DOES import this module and must
+# use this constant directly, never a local hardcoded tuple — that hardcode is
+# exactly how this and FRESH_SKIP_SLACK_SEC drifted in the first place).
+ENGAGED_DISPOSITIONS = ("closed", "pr_opened", "commented", "labeled")
+
+# config#2038: how many trailing daily S3 prefixes (``groom/{date}/``) to scan
+# when building the engagement map that feeds fresh-skip. Must be >= 4 to
+# safely cover a 72h (FRESH_SKIP_HOURS) rolling window against calendar-day
+# buckets: a run that started just before UTC midnight 3 calendar days ago is
+# still inside the 72h window, but a 3-day lookback (today/yesterday/day-
+# before) can miss its bucket entirely. The dispatcher Lambda hardcoded
+# ``range(3)`` — under-covering the window and, combined with the slack drift
+# above, undercounting fresh-skips relative to the driver's own (correct)
+# 4-day lookback.
+ENGAGEMENT_LOOKBACK_DAYS = 4
 
 
 def fresh_skip_active(engaged_epoch: float, updated_epoch: float,
