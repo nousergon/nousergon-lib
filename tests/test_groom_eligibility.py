@@ -48,7 +48,7 @@ class TestGateExclusion:
         assert not is_gate_excluded(["gate:date", "gate-due"])
 
     def test_sf_gates_are_soft_excluded_unless_due(self):
-        # gate:live-run split by named pipeline (config#2062, 2026-07-09) —
+        # gate:live-run split by named pipeline (config#2057, 2026-07-09) —
         # each behaves exactly like gate:date: soft-excluded unless gate-due.
         for label in ("gate:weekly-sf", "gate:preopen-sf", "gate:postclose-sf"):
             assert label in GATE_SOFT_EXCLUDE_LABELS
