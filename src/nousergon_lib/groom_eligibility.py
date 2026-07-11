@@ -21,7 +21,7 @@ lists / counts in.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
 # ── Label semantics (mirrors groom_driver.py — contract-tested both sides) ──
@@ -134,37 +134,19 @@ def is_actionable(labels: Iterable[str]) -> Optional[str]:
 
 @dataclass(frozen=True)
 class SlotDecision:
-    """Outcome of a slot's enumerate-then-decide (config#1933).
-
-    ``partition_index``/``partition_count`` (config#2129) identify this
-    decision's slice of the PR merge-readiness sweep when it co-launches
-    with OTHER launching decisions from the SAME trigger. Every open PR is
-    tier-agnostic, so N concurrently-launched boxes racing the identical
-    sweep would double-push the same PR — these two fields let each box
-    claim a deterministic, disjoint slice instead (assigned by
-    ``decide_trigger`` below) so all co-launched boxes can sweep
-    concurrently without a race, rather than only the first-launched one
-    running the sweep at all (the prior starvation bug: ``high`` always
-    sorted first in ``decide_trigger``'s pool ordering, so ``low``/``mid``
-    never got a sweep turn). Defaults (0, 1) mean "no partition — sweep
-    every open PR", the correct value for any solo launch (``decide_slot``,
-    single-tier manual dispatch, ``gated-reverify``).
-    """
+    """Outcome of a slot's enumerate-then-decide (config#1933)."""
 
     launch: bool
     tiers: tuple[str, ...]      # tiers in the queue, cheapest first ((), if skip)
     issue_filter: str           # driver filter to export ("" if skip)
     model: str                  # model for the run ("" if skip)
     reason: str                 # human-readable, rendered in the decision record
-    partition_index: int = 0   # this decision's slice index among co-launched decisions
-    partition_count: int = 1   # total co-launched decisions this trigger (1 = unpartitioned)
 
     def as_record(self) -> dict:
         return {
             "launch": self.launch, "tiers": list(self.tiers),
             "issue_filter": self.issue_filter, "model": self.model,
-            "reason": self.reason, "partition_index": self.partition_index,
-            "partition_count": self.partition_count,
+            "reason": self.reason,
         }
 
 
@@ -287,30 +269,7 @@ def decide_trigger(
       launches at the highest-present tier's model iff its combined count
       >= floor OR the escape valve fires for the pool (an actionable P0 in
       a pooled tier, or a pooled tier's oldest waited >= max_wait_hours).
-
-    config#2129: every LAUNCHING decision in the returned list gets a
-    ``partition_index``/``partition_count`` assignment (0-based index among
-    ONLY the launching decisions, count = how many are launching this
-    trigger) so co-launched boxes can each sweep a disjoint slice of the
-    org's open PRs instead of racing the full set. Non-launching (skip)
-    decisions keep the default (0, 1) — meaningless since they never launch
-    a box.
     """
-    def _assign_partitions(decisions: list[SlotDecision]) -> list[SlotDecision]:
-        """config#2129: index the LAUNCHING decisions 0..N-1 (N = how many
-        launch this trigger); non-launching decisions are left untouched
-        (their partition fields are never read)."""
-        n = sum(1 for d in decisions if d.launch)
-        out: list[SlotDecision] = []
-        idx = 0
-        for d in decisions:
-            if d.launch:
-                out.append(replace(d, partition_index=idx, partition_count=n))
-                idx += 1
-            else:
-                out.append(d)
-        return out
-
     oldest_wait_hours = oldest_wait_hours or {}
     p0 = set(p0_tiers)
     standalone = [t for t in TIERS if counts.get(t, 0) >= floor]
@@ -349,8 +308,8 @@ def decide_trigger(
                 f"thin pool {'+'.join(tiers)} ({total}) < floor {floor}, no P0, "
                 f"none waited {max_wait_hours:g}h — deferred to a later trigger",
             ))
-            return _assign_partitions(launches)
+            return launches
         launches.append(SlotDecision(
             True, tuple(tiers), filter_for_tiers(tiers), TIER_MODELS[tiers[-1]], reason,
         ))
-    return _assign_partitions(launches)
+    return launches
