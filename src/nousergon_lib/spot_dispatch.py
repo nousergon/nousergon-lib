@@ -31,6 +31,17 @@ from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError  # noq
 logger = logging.getLogger(__name__)
 
 
+class SpotProbeError(Exception):
+    """The pre-launch concurrency probe (``running_instance_ids``) could not
+    determine whether a matching box is live — DescribeInstances itself
+    failed. Distinct from the probe's clean-empty ``[]`` result ("no
+    instances"): a degraded EC2 API must never masquerade as "no duplicate
+    running" (config#2267 site 1 — the old fail-open ``return []`` silently
+    dropped the duplicate-box guard). Callers choose their posture explicitly:
+    fail the dispatch loudly, or proceed to launch with a recorded
+    ``dedupe_degraded`` marker (coverage beats dedupe)."""
+
+
 def launch_with_fallback(
     instance_types: list[str],
     subnets: list[str],
@@ -131,10 +142,14 @@ def running_instance_ids(
     tag_name: str, discriminator_tags: dict[str, str], *, region: str
 ) -> list[str]:
     """Instance ids for a LIVE (``pending``/``running``) box matching
-    ``tag_name`` AND every key/value in ``discriminator_tags``. Fail-safe:
-    any API error returns ``[]`` — never blocks a launch on a broken check.
-    This guard is an optimization against duplicate spend, never a
-    correctness gate."""
+    ``tag_name`` AND every key/value in ``discriminator_tags``.
+
+    ``[]`` means exactly one thing: the probe RAN and found no matching box.
+    A DescribeInstances failure raises :class:`SpotProbeError` (chained) —
+    it never returns ``[]`` (config#2267 site 1: the old fail-open ``[]``
+    made a degraded EC2 API indistinguishable from "no duplicate", silently
+    vanishing the duplicate-box guard). The caller decides whether a failed
+    probe blocks the launch or degrades to launch-with-logged-flag."""
     try:
         ec2 = boto3.client("ec2", region_name=region)
         filters = [
@@ -149,12 +164,15 @@ def running_instance_ids(
             for r in resp.get("Reservations", [])
             for i in r.get("Instances", [])
         ]
-    except Exception as exc:  # noqa: BLE001 - fail-safe: never block a launch
-        logger.warning(
-            "concurrency check failed (non-fatal, launching anyway): %s: %s",
-            type(exc).__name__, exc,
+    except Exception as exc:  # noqa: BLE001 - re-raised as SpotProbeError; never swallowed
+        logger.error(
+            "concurrency probe DescribeInstances failed for tag_name=%s: %s: %s",
+            tag_name, type(exc).__name__, exc,
         )
-        return []
+        raise SpotProbeError(
+            f"concurrency probe failed for tag_name={tag_name!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def terminate_on_failure(instance_id: str, *, region: str, label: str = "spot") -> None:
