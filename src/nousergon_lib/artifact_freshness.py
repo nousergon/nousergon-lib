@@ -136,9 +136,9 @@ CheckState = Literal["fresh", "stale", "missing", "probe_failed", "grace_period"
 # The producer's actual run calendar — the single source of truth for a
 # ``continuous`` artifact's calendar-awareness (Brian's directive 2026-06-28:
 # "all freshness checks tied to trading day unless there is a clear reason
-# not to"). Subsumes the prior ad-hoc ``active_trading_days_only`` boolean
-# (now deprecated) and parameterizes the idle short-circuit AND the
-# freshness floor:
+# not to"). Subsumed the prior ad-hoc ``active_trading_days_only`` boolean
+# (removed in v0.102.0, config#1334) and parameterizes the idle
+# short-circuit AND the freshness floor:
 #
 # - ``trading_days`` — producer runs only on NYSE session days (the
 #   DEFAULT-by-principle for new continuous specs). Non-trading days
@@ -209,15 +209,10 @@ class ArtifactSpec:
             calendar-awareness: it drives BOTH the idle short-circuit and
             the freshness floor (see :func:`_resolve_run_calendar` for the
             resolution precedence and :func:`_freshness_floor` for the
-            floor it selects). ``None`` ⇒ resolved from the deprecated
-            ``active_*`` booleans for backward-compatibility (falling back
-            to ``all_days``); new continuous specs should set this
-            explicitly and default to ``trading_days``.
-        active_trading_days_only: DEPRECATED — use
-            ``run_calendar="trading_days"``. Honored as a fallback when
-            ``run_calendar`` is unset (S3-contract-safe migration window);
-            slated for removal once the deployed monitor has soaked on the
-            run_calendar-aware lib.
+            floor it selects). ``None`` ⇒ resolved from ``active_hours_utc``
+            (set ⇒ ``market_hours``) for backward-compatibility, else
+            ``all_days``; new continuous specs should set this explicitly
+            and default to ``trading_days``.
         active_hours_utc: ``continuous``-only ``(start, end)`` UTC-hour
             bounds — REQUIRED when ``run_calendar="market_hours"`` (the
             session window). When set, the check short-circuits to
@@ -265,7 +260,6 @@ class ArtifactSpec:
     calendar_aware: bool = True
     interval_minutes: int | None = None
     run_calendar: RunCalendarSymbol | None = None
-    active_trading_days_only: bool = False
     active_hours_utc: tuple[int, int] | None = None
     produces: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
@@ -401,11 +395,6 @@ class ArtifactSpec:
             raise ValueError(
                 "ArtifactSpec.run_calendar='market_hours' requires "
                 "active_hours_utc=(start, end)"
-            )
-        if self.active_trading_days_only and self.cadence != "continuous":
-            raise ValueError(
-                "ArtifactSpec.active_trading_days_only is only valid for "
-                f"cadence='continuous' (got cadence={self.cadence!r})"
             )
         if self.active_hours_utc is None:
             return
@@ -890,12 +879,11 @@ def _freshness_floor(
 def _resolve_run_calendar(spec: ArtifactSpec) -> str:
     """Resolve the effective run-calendar for a ``continuous`` spec.
 
-    Precedence (S3-contract-safe migration off the deprecated booleans):
+    Precedence (S3-contract-safe migration off the deprecated boolean):
 
     1. Explicit ``spec.run_calendar`` wins.
-    2. Else the deprecated ``active_*`` booleans map in:
-       ``active_hours_utc`` set ⇒ ``market_hours``;
-       ``active_trading_days_only`` ⇒ ``trading_days``.
+    2. Else ``active_hours_utc`` set ⇒ ``market_hours`` (the session-window
+       producer's legacy declaration).
     3. Else ``all_days`` (the conservative default — preserves the prior
        24/7 wall-clock behavior for any continuous spec that declares
        nothing, so the migration never silently flips an un-migrated spec).
@@ -907,8 +895,6 @@ def _resolve_run_calendar(spec: ArtifactSpec) -> str:
         return spec.run_calendar
     if spec.active_hours_utc is not None:
         return "market_hours"
-    if spec.active_trading_days_only:
-        return "trading_days"
     return "all_days"
 
 

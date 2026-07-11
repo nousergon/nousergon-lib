@@ -814,7 +814,6 @@ def _open_orders_spec(**overrides) -> ArtifactSpec:
         severity="warning",
         owner_repo="alpha-engine",
         created_at=date(2025, 1, 1),
-        active_trading_days_only=True,
         active_hours_utc=[14, 21],
     )
     defaults.update(overrides)
@@ -880,7 +879,7 @@ class TestContinuousActiveWindow:
         # is no "hours-only on all calendar days" producer in the fleet, and
         # the enum has no value for it. Previously these were independent
         # bounds and a bare active_hours_utc evaluated on Saturday.
-        spec = _open_orders_spec(active_trading_days_only=False)
+        spec = _open_orders_spec()
         now = datetime(2026, 6, 27, 16, 0, tzinfo=timezone.utc)  # Sat, in hours
         result = check_freshness(_fake_s3(), spec, now)
         assert result.state == "fresh"
@@ -896,10 +895,6 @@ class TestActiveWindowValidation:
     def test_active_hours_on_non_continuous_raises(self):
         with pytest.raises(ValueError, match="active_hours_utc"):
             _spec(active_hours_utc=[14, 21])  # default cadence saturday_sf
-
-    def test_active_trading_days_only_on_non_continuous_raises(self):
-        with pytest.raises(ValueError, match="active_trading_days_only"):
-            _spec(active_trading_days_only=True)
 
     def test_active_hours_bad_bounds_raises(self):
         with pytest.raises(ValueError, match="0 <= start < end <= 24"):
@@ -1012,27 +1007,6 @@ class TestRunCalendarResolutionAndValidation:
         spec = _daily_health_spec(run_calendar=None)
         result = check_freshness(_fake_s3(), spec, now)
         assert result.state == "missing"  # all_days ⇒ evaluated, absent ⇒ missing
-
-    def test_legacy_active_trading_days_only_maps_to_trading_days(self):
-        # Back-compat: the deprecated boolean (no run_calendar) still gives
-        # trading-day idle behavior through the resolution fallback.
-        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)  # Sunday
-        spec = _daily_health_spec(
-            run_calendar=None, active_trading_days_only=True,
-        )
-        result = check_freshness(_fake_s3(), spec, now)
-        assert result.state == "fresh"
-        assert "non-trading day" in result.reason
-
-    def test_explicit_run_calendar_wins_over_legacy_boolean(self):
-        # Explicit run_calendar="all_days" overrides a stale legacy
-        # active_trading_days_only=True.
-        now = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)  # Sunday
-        spec = _daily_health_spec(
-            run_calendar="all_days", active_trading_days_only=True,
-        )
-        result = check_freshness(_fake_s3(), spec, now)
-        assert result.state == "missing"  # all_days wins ⇒ evaluated
 
     def test_market_hours_requires_active_hours(self):
         with pytest.raises(ValueError, match="market_hours.*active_hours_utc"):
