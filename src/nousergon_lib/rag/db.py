@@ -11,12 +11,61 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
+import numpy as np
 import psycopg2
 import psycopg2.extras
 from pgvector.psycopg2 import register_vector
 
+if TYPE_CHECKING:  # pragma: no cover
+    from numpy.typing import NDArray
+
 logger = logging.getLogger(__name__)
+
+
+def coerce_embedding(value) -> "NDArray[np.float32]":
+    """Normalize a pgvector ``vector`` column read to a float32 ndarray.
+
+    THE chokepoint for the representation-fragile guarantee that
+    :func:`get_connection` aspires to via pgvector's ``register_vector``.
+    pgvector's read representation has flip-flopped across builds — a numpy
+    ndarray in most versions, a plain ``list`` in some, a naked
+    ``pgvector.Vector`` (which has NO numpy interop: no
+    ``__array__``/``__len__``/``__iter__``) in the build that resolved on the
+    weekly data spot, and a raw bracketed *string* when the codec never
+    registered at all. Any consumer that SELECTs a ``vector`` column and does
+    the natural ``np.array(value, dtype=np.float32)`` therefore crashes with
+    ``TypeError: float() argument must be ... not 'Vector'`` the moment the
+    build shifts under it (the 2026-07-11 weekly-freshness break at RAG Step
+    8/9, filing change detection). Route every embedding read through here so
+    that class of crash cannot recur regardless of which representation the
+    active pgvector/psycopg2 build hands back.
+
+    Accepts a numpy ndarray, a ``pgvector.Vector`` (normalized via its
+    documented ``.to_numpy()``), or a plain sequence of floats (``list`` /
+    ``tuple``).
+
+    FAIL-LOUD, by design: a ``str``/``bytes`` value means the pgvector codec
+    silently failed to register on the connection, so the DB handed back the
+    stringified vector. We refuse to parse it — a silently mis-parsed (or
+    single-element-coerced) embedding would corrupt every downstream cosine
+    computation without a trace. The caller must see the unregistered-codec
+    failure and fix the connection path, not have it papered over here.
+    """
+    if isinstance(value, (str, bytes, bytearray)):
+        snippet = repr(value)[:48]
+        raise TypeError(
+            f"coerce_embedding received a raw {type(value).__name__} "
+            f"({snippet}...): the pgvector codec did not register on this "
+            "connection, so a stringified vector was returned. Refusing to "
+            "silently parse it — read vectors through "
+            "nousergon_lib.rag.get_connection (which registers the codec) with "
+            "pgvector installed. This is fail-loud on purpose (config#2221)."
+        )
+    if hasattr(value, "to_numpy"):  # pgvector.Vector — not numpy-coercible
+        value = value.to_numpy()
+    return np.asarray(value, dtype=np.float32)
 
 _DATABASE_URL: str | None = None
 
@@ -36,13 +85,22 @@ def get_connection():
 
     Opens a new connection per call (Neon pooler handles connection reuse
     server-side). Commits on success, rolls back on exception.
+
+    Vector-column reads: this registers pgvector's psycopg2 codec so ``vector``
+    columns *usually* deserialize to numpy arrays — but that representation is
+    codec-and-build-dependent and has flip-flopped across pgvector versions
+    (ndarray / list / naked ``pgvector.Vector`` / raw string). Do NOT rely on
+    the codec's output type. The ENFORCED guarantee lives in
+    :func:`coerce_embedding`: normalize every embedding you read through it and
+    the representation-fragility can't reach your arithmetic (config#2221).
     """
     conn = psycopg2.connect(_get_url())
-    # Register pgvector type codecs so SELECTs on `vector` columns return
-    # numpy arrays instead of stringified lists. Without this, reads like
-    # rag/pipelines/filing_change_detection.py crash with
-    # "could not convert string to float" on np.array(embedding). Must run
-    # per-connection because psycopg2 scopes type adapters to the connection.
+    # Best-effort: register pgvector's psycopg2 codec so SELECTs on `vector`
+    # columns deserialize to numpy arrays where the resolved build supports it.
+    # This is NOT the guarantee — the codec's read representation is build-
+    # dependent (see get_connection docstring / config#2221); coerce_embedding
+    # is the enforced normalization. Must run per-connection because psycopg2
+    # scopes type adapters to the connection.
     register_vector(conn)
     try:
         yield conn
