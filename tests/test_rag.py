@@ -17,6 +17,7 @@ import pytest
 def test_top_level_imports_resolve():
     """All advertised re-exports should be importable from the top level."""
     from nousergon_lib.rag import (
+        coerce_embedding,
         get_connection,
         is_available,
         embed_texts,
@@ -28,6 +29,7 @@ def test_top_level_imports_resolve():
     # Verify the re-exports are callables (or at minimum, attributes — we
     # don't invoke them here because that requires a live database)
     for name, obj in [
+        ("coerce_embedding", coerce_embedding),
         ("get_connection", get_connection),
         ("is_available", is_available),
         ("embed_texts", embed_texts),

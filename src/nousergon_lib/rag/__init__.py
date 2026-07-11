@@ -21,7 +21,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed (e.g. Lambda) — env vars set externally
 
-from .db import get_connection, is_available
+from .db import coerce_embedding, get_connection, is_available
 from .embeddings import embed_texts
 from .retrieval import (
     retrieve,
@@ -30,6 +30,7 @@ from .retrieval import (
 )
 
 __all__ = [
+    "coerce_embedding",
     "get_connection",
     "is_available",
     "embed_texts",
