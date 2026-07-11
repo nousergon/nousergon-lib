@@ -37,6 +37,14 @@ class TestTierOf:
         assert tier_of(["in-progress"]) is None
         assert tier_of(["do-not-groom", "complexity:low"]) is None
 
+    def test_flap_breaker_stall_labels_excluded(self):
+        # config#2146 / alpha-engine-config#688 (2026-07-11): a flap-broken
+        # issue routed to the human Decision Queue must never re-enter
+        # machine grooming, even after a gate-due re-admission.
+        assert tier_of(["groom:stalled"]) is None
+        assert tier_of(["triage:session"]) is None
+        assert tier_of(["groom:stalled", "triage:session", "gate:weekly-sf", "gate-due"]) is None
+
 
 class TestGateExclusion:
     def test_hard_gates_always_excluded(self):
