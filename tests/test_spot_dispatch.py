@@ -5,9 +5,12 @@ from `scheduled-groom-dispatcher`/`ci-watch-dispatcher` (nousergon-data) — a
 third independent implementation (`sf-watch-spot-dispatcher`) is built
 against this module rather than duplicating it again.
 
-These tests pin BEHAVIOR PARITY with the two pre-extraction implementations:
-spot-then-on-demand fallback on ``SpotCapacityExhausted``, fail-safe-open
-concurrency checks, best-effort (never-raising) terminate-on-failure.
+These tests pin BEHAVIOR PARITY with the two pre-extraction implementations
+(spot-then-on-demand fallback on ``SpotCapacityExhausted``, best-effort
+never-raising terminate-on-failure) plus one deliberate DIVERGENCE
+(config#2267 site 1): the concurrency probe is no longer fail-open — a
+DescribeInstances failure raises ``SpotProbeError`` instead of returning
+``[]``, so a degraded EC2 API can never masquerade as "no duplicate box".
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import pytest
 
 from nousergon_lib import spot_dispatch
 from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError
+from nousergon_lib.spot_dispatch import SpotProbeError
 
 REGION = "us-east-1"
 
@@ -179,16 +183,32 @@ class TestRunningInstanceIds:
         assert {"Name": "tag:example-pipeline", "Values": ["ne-weekly-freshness-pipeline"]} in filters
 
     @mock.patch("nousergon_lib.spot_dispatch.boto3")
-    def test_fail_safe_open_returns_empty_list_on_api_error(self, mock_boto3):
+    def test_api_error_raises_spot_probe_error_not_empty_list(self, mock_boto3):
+        """config#2267 site 1: a failed probe must be LOUD — the old fail-open
+        `return []` silently vanished the duplicate-box guard on a degraded
+        EC2 API. Only a probe that actually RAN may return `[]`."""
         mock_ec2 = mock.MagicMock()
         mock_boto3.client.return_value = mock_ec2
         mock_ec2.describe_instances.side_effect = RuntimeError("AWS API hiccup")
 
-        result = spot_dispatch.running_instance_ids(
-            "alpha-engine-example-spot", {}, region=REGION
-        )
+        with pytest.raises(SpotProbeError, match="concurrency probe failed") as excinfo:
+            spot_dispatch.running_instance_ids(
+                "alpha-engine-example-spot", {}, region=REGION
+            )
 
-        assert result == []
+        # The original API error is chained, never masked.
+        assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_empty_result_still_means_no_instances_not_probe_failure(self, mock_boto3):
+        """`[]` stays the clean "probe ran, nothing live" verdict."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": []}
+
+        assert spot_dispatch.running_instance_ids(
+            "alpha-engine-example-spot", {}, region=REGION
+        ) == []
 
     @mock.patch("nousergon_lib.spot_dispatch.boto3")
     def test_no_discriminator_tags_still_filters_by_name_and_state(self, mock_boto3):
