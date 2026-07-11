@@ -31,8 +31,26 @@ MID_LABEL = "complexity:mid"
 HIGH_LABEL = "complexity:high"
 ULTRA_LABEL = "complexity:ultra"
 
+#: config#2146 flap-breaker output: an issue that already oscillated complexity
+#: judgment (>= FLAP_BREAKER_ADD_THRESHOLD relabels in the trailing window, see
+#: groom_driver.py) or was 2-strike comment-only-stalled gets routed to the
+#: human Decision Queue instead of the machine. Structurally excluding both
+#: labels here (not just relying on the agent declining solo) is the actual
+#: fix for the 2026-07-11 alpha-engine-config#688 floor-breach: gate:weekly-sf's
+#: gate-due re-entry does not check these, so a stalled issue kept re-entering
+#: the autonomous queue every gate cycle, burning a shared chunk's turn budget
+#: and then a wasted solo retry, until it fell just short of the (correctly
+#: pool-capped, config#1947) floor and paged as a false CRITICAL. Cleared only
+#: by a human ruling in the /backlog-triage session (or new activity resets
+#: the flap window) — never by re-admission via a gate.
+GROOM_STALLED_LABEL = "groom:stalled"
+TRIAGE_SESSION_LABEL = "triage:session"
+
 #: Issues carrying any of these never enter ANY groom queue.
-BASE_EXCLUDE_LABELS = frozenset({"groom-digest", "in-progress", "do-not-groom", ULTRA_LABEL})
+BASE_EXCLUDE_LABELS = frozenset({
+    "groom-digest", "in-progress", "do-not-groom", ULTRA_LABEL,
+    GROOM_STALLED_LABEL, TRIAGE_SESSION_LABEL,
+})
 
 #: config#1805 gate exclusion: HARD — no automated re-entry path exists.
 GATE_HARD_EXCLUDE_LABELS = frozenset({"gate:operator", "gate:decision", "gate:device"})
