@@ -360,4 +360,3 @@ def decide_trigger(
             True, tuple(tiers), filter_for_tiers(tiers), TIER_MODELS[tiers[-1]], reason,
         ))
     return launches
-# plus
