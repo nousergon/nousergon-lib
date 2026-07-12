@@ -260,7 +260,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "inline in Backtester evaluator report (page 21)."
     ),
     "AggregateCosts": ArchivePageRef(
-        page="host_cost_usage?tab=LLM+Cost",
+        page="host_cost_usage?tab=API",
         artifact_label="LLM cost telemetry (daily aggregate)",
     ),
     "PredictorTraining": ArchivePageRef(
