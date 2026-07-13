@@ -117,20 +117,20 @@ class TestDecideSlot:
         assert d.model == TIER_MODELS["mid"]
 
     def test_thin_everything_bundles_at_high_slot_on_cheapest_adequate_model(self):
-        # 1 low + 3 mid + 0 high at the Opus slot: queue is 4 < floor -> skip
+        # 1 low + 3 mid + 0 high at the high slot: queue is 4 < floor -> skip
         d = decide_slot("high", {"low": 1, "mid": 3, "high": 0})
         assert not d.launch
-        # ...but with 5 high it launches, and the model is Opus (high present)
+        # ...but with 5 high it launches, using the high tier's own model
         d = decide_slot("high", {"low": 1, "mid": 3, "high": 5})
         assert d.launch and d.issue_filter == "high+mid+low"
         assert d.model == TIER_MODELS["high"]
 
     def test_model_is_highest_present_not_slot(self):
-        # Opus slot, no high issues, bundle of starving low+mid -> Sonnet.
+        # high slot, no high issues, bundle of starving low+mid -> mid's model.
         d = decide_slot("high", {"low": 5, "mid": 6, "high": 0})
         assert d.launch  # 11 >= floor
         assert d.issue_filter == "mid+low"
-        assert d.model == TIER_MODELS["mid"]  # never Opus without high issues
+        assert d.model == TIER_MODELS["mid"]  # never the high tier's model without high issues
 
     def test_light_queue_skips_with_zero_spend(self):
         d = decide_slot("low", {"low": 6, "mid": 40, "high": 3})
@@ -175,7 +175,7 @@ class TestDecideTrigger:
     def test_brians_8_9_10_all_three_spin_up_same_trigger(self):
         ls = [l for l in self._launches({"low": 8, "mid": 9, "high": 10}) if l.launch]
         assert [(l.issue_filter, l.model) for l in sorted(ls, key=lambda x: x.issue_filter)] == [
-            ("high-only", "claude-opus-4-8"),
+            ("high-only", "claude-sonnet-5"),
             ("low-only", "claude-haiku-4-5"),
             ("mid-only", "claude-sonnet-5"),
         ]
@@ -189,7 +189,7 @@ class TestDecideTrigger:
         ls = [l for l in self._launches({"low": 4, "mid": 5, "high": 2}) if l.launch]
         assert len(ls) == 1
         assert ls[0].issue_filter == "high+mid+low"
-        assert ls[0].model == "claude-opus-4-8"  # high present in pool
+        assert ls[0].model == TIER_MODELS["high"]  # high present in pool
 
     def test_thin_pool_under_floor_skips_with_reason(self):
         ls = self._launches({"low": 1, "mid": 2, "high": 1})
@@ -205,12 +205,15 @@ class TestDecideTrigger:
                                         oldest_wait_hours={"low": 96.0}) if l.launch]
         assert len(ls) == 1 and ls[0].model == "claude-haiku-4-5"
 
-    def test_high_never_rides_below_opus(self):
-        # standalone low, thin high: high must NOT attach downward.
+    def test_high_never_rides_below_its_own_model(self):
+        # standalone low, thin high: high must NOT attach downward, and any
+        # launch containing high uses high's own model (Sonnet, same as mid,
+        # as of config#2409 — the guardrail is about tier isolation, not a
+        # distinct model anymore).
         ls = [l for l in self._launches({"low": 9, "mid": 0, "high": 2}) if l.launch]
         by_filter = {l.issue_filter: l for l in ls}
         assert "low-only" in by_filter
-        assert all("high" not in f or l.model == "claude-opus-4-8" for f, l in by_filter.items())
+        assert all("high" not in f or l.model == TIER_MODELS["high"] for f, l in by_filter.items())
 
     def test_empty_backlog_no_launches(self):
         assert all(not l.launch for l in self._launches({"low": 0, "mid": 0, "high": 0}))
