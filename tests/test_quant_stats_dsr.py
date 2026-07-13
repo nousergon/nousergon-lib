@@ -57,6 +57,25 @@ class TestPSR:
         result = compute_psr(r)
         assert result["status"] == "insufficient_data"
 
+    def test_periods_per_year_changes_annualized_sharpe(self):
+        # Same 60-observation series, scored as if it were weekly (52/yr) vs
+        # daily (252/yr) — the annualized Sharpe must scale with sqrt(ppy),
+        # and treating a non-daily series as daily (the pre-fix default)
+        # silently overstates both the reported Sharpe and PSR confidence.
+        r = _build_series(daily_mean=0.002, daily_std=0.01, n=60, seed=3)
+        weekly = compute_psr(r, sharpe_benchmark=0.0, periods_per_year=52)
+        daily = compute_psr(r, sharpe_benchmark=0.0, periods_per_year=252)
+        assert weekly["status"] == "ok" and daily["status"] == "ok"
+        assert weekly["sharpe"] == pytest.approx(
+            daily["sharpe"] * math.sqrt(52 / 252), rel=1e-9
+        )
+
+    def test_periods_per_year_default_matches_no_arg(self):
+        r = _build_series(daily_mean=0.001, daily_std=0.01, n=60, seed=5)
+        explicit = compute_psr(r, sharpe_benchmark=0.0, periods_per_year=252)
+        default = compute_psr(r, sharpe_benchmark=0.0)
+        assert explicit == default
+
 
 class TestDSR:
     def test_n_trials_one_equals_psr_zero(self):

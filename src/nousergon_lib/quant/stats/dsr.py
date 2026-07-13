@@ -63,7 +63,7 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def _annualized_sharpe(returns: np.ndarray) -> float:
+def _annualized_sharpe(returns: np.ndarray, periods_per_year: float = _TRADING_DAYS_PER_YEAR) -> float:
     """Annualized Sharpe (risk-free = 0), sample-std (ddof=1)."""
     if returns.size < 2:
         return 0.0
@@ -71,7 +71,7 @@ def _annualized_sharpe(returns: np.ndarray) -> float:
     std = float(returns.std(ddof=1))
     if std == 0.0:
         return 0.0
-    return mean / std * math.sqrt(_TRADING_DAYS_PER_YEAR)
+    return mean / std * math.sqrt(periods_per_year)
 
 
 def _sample_skew_kurtosis(returns: np.ndarray) -> tuple[float, float]:
@@ -97,16 +97,27 @@ def _sample_skew_kurtosis(returns: np.ndarray) -> tuple[float, float]:
 def compute_psr(
     daily_returns: pd.Series | np.ndarray,
     sharpe_benchmark: float = 0.0,
+    periods_per_year: float = _TRADING_DAYS_PER_YEAR,
 ) -> PSRResult:
     """Probabilistic Sharpe Ratio.
 
     Parameters
     ----------
     daily_returns : array-like
-        Daily simple returns. NaN dropped.
+        Periodic simple returns, one observation per period. NaN dropped.
+        Named for the common case (daily); pass ``periods_per_year`` to match
+        whatever cadence the series is actually sampled at.
     sharpe_benchmark : float
         Annualized Sharpe to test against (default 0.0, i.e. "is the
         true SR positive?").
+    periods_per_year : float
+        Observations per year implied by the series' sampling cadence
+        (default 252, i.e. daily trading days). Must match the actual
+        cadence of ``daily_returns`` — the annualization and the
+        per-period conversion inside the PSR formula both scale off this;
+        an irregular or non-daily series annualized at the wrong
+        ``periods_per_year`` silently mis-states both the reported
+        ``sharpe`` and the resulting ``psr`` probability.
 
     Returns
     -------
@@ -122,9 +133,9 @@ def compute_psr(
         PSR(SR*) = Phi(  (SR_hat - SR*) * sqrt(n - 1)
                         / sqrt(1 - skew * SR_hat + (kurtosis - 1)/4 * SR_hat^2) )
 
-    where SR_hat is the *non-annualized* observed Sharpe and SR* is the
-    benchmark on the same scale. We compute on daily Sharpe internally
-    and convert benchmarks accordingly.
+    where SR_hat is the *non-annualized* (per-period) observed Sharpe and
+    SR* is the benchmark on the same scale. We compute on per-period
+    Sharpe internally and convert benchmarks accordingly.
     """
     r = np.asarray(daily_returns, dtype=np.float64)
     r = r[np.isfinite(r)]
@@ -132,10 +143,10 @@ def compute_psr(
     if n < 30:  # PSR is asymptotic; small samples produce nonsense
         return {"status": "insufficient_data", "n": n}
 
-    sr_annualized = _annualized_sharpe(r)
-    # PSR formula uses the daily SR. Convert annualized benchmark back to daily.
-    sr_daily = sr_annualized / math.sqrt(_TRADING_DAYS_PER_YEAR)
-    sr_bench_daily = sharpe_benchmark / math.sqrt(_TRADING_DAYS_PER_YEAR)
+    sr_annualized = _annualized_sharpe(r, periods_per_year=periods_per_year)
+    # PSR formula uses the per-period SR. Convert annualized benchmark back down.
+    sr_daily = sr_annualized / math.sqrt(periods_per_year)
+    sr_bench_daily = sharpe_benchmark / math.sqrt(periods_per_year)
 
     skew, kurt_excess = _sample_skew_kurtosis(r)
     # The "kurtosis" term in López de Prado's formula is the raw 4th
