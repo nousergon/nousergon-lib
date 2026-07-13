@@ -82,11 +82,16 @@ _KNOWN_EXPECTED_RED_CHECKS: frozenset[str] = frozenset({
 TIERS = ("low", "mid", "high")
 
 #: Tier → model that works it. A bundled run uses the model of the HIGHEST
-#: tier actually present in its queue; high-tier issues never run below Opus.
+#: tier actually present in its queue; high-tier issues never run below the
+#: high tier's own model. config#2409: high moved Opus -> Sonnet (Brian-
+#: ratified cutover, 2026-07-13) — the tier split is now schedule/budget/
+#: dedicated-attention only, not a model-capability step up from mid. See
+#: the module docstring update and the groom prompt rewrites in
+#: alpha-engine-config for the full rationale.
 TIER_MODELS = {
     "low": "claude-haiku-4-5",
     "mid": "claude-sonnet-5",
-    "high": "claude-opus-4-8",
+    "high": "claude-sonnet-5",
 }
 
 #: Every issue_filter value the driver accepts. Single-tier forms keep the
@@ -216,8 +221,11 @@ def decide_slot(
       an actionable P0 exists, or any considered tier's oldest actionable
       issue has waited >= ``max_wait_hours`` (anti-starvation, ARCH §66).
     - The run's model = highest tier actually PRESENT in the queue — a
-      bundle of only low+mid issues runs on Sonnet even at the Opus slot;
-      high-tier issues never run below Opus (COMPLEXITY GUARDRAIL).
+      bundle of only low+mid issues runs on Sonnet even at the high-tier
+      slot; high-tier issues never run below the high tier's own model
+      (COMPLEXITY GUARDRAIL — config#2409: that model is Sonnet as of the
+      2026-07-13 cutover, same as mid; the guardrail now protects the
+      dedicated queue/budget, not a model-capability step up).
     """
     if slot_tier not in TIERS:
         raise ValueError(f"unknown slot tier: {slot_tier!r}")
@@ -311,7 +319,8 @@ def decide_trigger(
 
     - Every tier with count >= floor gets its OWN run (its tier's model).
     - Each thin tier (0 < count < floor) attaches to the NEAREST standalone
-      tier ABOVE it (upward only — high never rides below Opus).
+      tier ABOVE it (upward only — high never rides below its own model,
+      Sonnet as of config#2409).
     - Thin tiers with no standalone tier above pool together; the pool
       launches at the highest-present tier's model iff its combined count
       >= floor OR the escape valve fires for the pool (an actionable P0 in
