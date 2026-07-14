@@ -207,6 +207,10 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "CheckSkipRAGIngestion. Once Phase 4/5 lands, swap this entry "
         "for an ArchivePageRef pointing at the scanner-candidates page."
     ),
+    "ThinkTankCoverage": ArchivePageRef(
+        page="Think_Tank",
+        artifact_label="Think Tank coverage fill",
+    ),
     "RAGIngestion": ArtifactReason(
         reason="SEC/8-K/earnings/theses corpus refresh in rag/corpus/; "
         "substrate-only — consumed at Research time."
@@ -317,6 +321,28 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "launch. No per-run rendered artifact — a preventive guard "
         "(fail-open on fetch/parse misses, mirroring LibPinDriftCheck).",
     ),
+    # config#2278: fail-open + alert SNS publishes fired when LibPinDriftCheck
+    # / PipelineContractCheck itself can't check (Lambda failed after
+    # retries, or returned a malformed payload) — the run proceeds fail-open
+    # rather than halting, and this notifier is the alert that it did.
+    "PublishLibPinGateDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when LibPinDriftCheck could not "
+        "verify cross-repo pin parity (gate Lambda failed after retries, or "
+        "malformed payload) — the run proceeds fail-open, unprotected "
+        "against the co-install break the gate exists to catch. No "
+        "persisted artifact (the email IS the surface); see "
+        "NotifyCompleteGatesDegraded / NotifyCompleteGatesAndHealthDegraded "
+        "for the terminal marker this alert sets up.",
+    ),
+    "PublishPipelineContractGateDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when PipelineContractCheck could "
+        "not verify PIPELINE_CONTRACT.yaml self-consistency (gate Lambda "
+        "failed after retries, or malformed payload) — the run proceeds "
+        "fail-open, unprotected against the contract break the gate exists "
+        "to catch. No persisted artifact (the email IS the surface); see "
+        "NotifyCompleteGatesDegraded / NotifyCompleteGatesAndHealthDegraded "
+        "for the terminal marker this alert sets up.",
+    ),
     # config#1824 (2026-07-06): run-day gate mirroring the weekday
     # TradingDayGate (config#1430) — predictor Lambda action=
     # check_weekly_run_day, pure NYSE-calendar math, true iff yesterday was
@@ -372,13 +398,63 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         page="Report_Card",
         artifact_label="System Report Card",
     ),
+    # config#2302: WARNING-severity alert fired from ReportCard's Catch(States.ALL)
+    # — the 2026-07 incident where the evaluator Lambda died silently for 9 days
+    # because that Catch used to route straight to CheckShellRunNotify with no
+    # alert. Non-fatal (advisory grading only); mirrors PublishLibPinGateDegraded's
+    # shape.
+    "PublishReportCardDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when ReportCard (Evaluator "
+        "Report Card v2 Lambda) fails (config#2302) — non-fatal, the weekly "
+        "run's real trading artifacts are unaffected, but the advisory "
+        "grading layer (report_card.json, downstream Director) did not "
+        "run. No persisted artifact (the email IS the surface)."
+    ),
     "Director": ArchivePageRef(
         page="director",
         artifact_label="Director weekly action plan",
     ),
+    # config#2302: same silent-swallow class as ReportCard's pre-fix Catch —
+    # WARNING-severity alert fired from Director's Catch(States.ALL).
+    "PublishDirectorDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when Director (Evaluator "
+        "Director Lambda) fails (config#2302) — non-fatal, the weekly "
+        "run's real trading artifacts are unaffected, but the advisory "
+        "Director layer (action_plan.json, carry-over ledger update) did "
+        "not run. No persisted artifact (the email IS the surface)."
+    ),
     "NotifyComplete": ArtifactReason(
         reason="Terminal success SNS publish to alpha-engine-alerts; "
         "no persisted artifact (the email IS the surface)."
+    ),
+    # config#2278: SUCCESS-path notifier for a run whose pre-spend gates
+    # (LibPinDriftCheck / PipelineContractCheck) failed open unchecked —
+    # mirrors NotifyComplete exactly, Subject flags the gates-degraded run.
+    "NotifyCompleteGatesDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run whose pre-spend "
+        "gates (LibPinDriftCheck / PipelineContractCheck) failed open "
+        "unchecked (config#2278) — a PublishLibPinGateDegraded / "
+        "PublishPipelineContractGateDegraded alert fired earlier in the "
+        "run. No persisted artifact (the email IS the surface)."
+    ),
+    # config#2276: SUCCESS-path notifier for a run whose tail health checks
+    # (SaturdayHealthCheck / WeeklySubstrateHealthCheck) degraded — crashed,
+    # timed out, or finished non-Success.
+    "NotifyCompleteHealthDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run whose tail health "
+        "checks (SaturdayHealthCheck freshness and/or "
+        "WeeklySubstrateHealthCheck substrate/constituents-drift) could not "
+        "run to Success (config#2276) — freshness validation is NOT "
+        "confirmed for this run. No persisted artifact (the email IS the "
+        "surface)."
+    ),
+    # config#2278 + config#2276: both degradations fired in the same run —
+    # Subject reflects both; mirrors the other two Degraded notifiers.
+    "NotifyCompleteGatesAndHealthDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run where BOTH the "
+        "pre-spend gates failed open unchecked AND the tail health checks "
+        "degraded (config#2278 + config#2276). No persisted artifact (the "
+        "email IS the surface)."
     ),
     "NotifyShellRunComplete": ArtifactReason(
         reason="Friday-PM shell-run dry-pass terminal SNS publish; "
