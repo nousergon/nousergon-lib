@@ -207,6 +207,10 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "CheckSkipRAGIngestion. Once Phase 4/5 lands, swap this entry "
         "for an ArchivePageRef pointing at the scanner-candidates page."
     ),
+    "ThinkTankCoverage": ArchivePageRef(
+        page="Think_Tank",
+        artifact_label="Think Tank coverage fill",
+    ),
     "RAGIngestion": ArtifactReason(
         reason="SEC/8-K/earnings/theses corpus refresh in rag/corpus/; "
         "substrate-only — consumed at Research time."
