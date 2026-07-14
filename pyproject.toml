@@ -45,6 +45,13 @@ quant = ["numpy>=1.24"]
 # separate from [quant] so the numpy-only consumers (e.g. robodashboard)
 # don't pull pandas+sklearn.
 quant-xs = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.0"]
+# Per-series L2 data-contract validation gates (nousergon_lib.series_contract
+# — alpha-engine-config#2456): schema/sanity/staleness/continuity/outlier/
+# calendar-monotonic checks over an OHLCV DataFrame. pandas-only (no numpy
+# API used directly; pandas vendors it) — kept as its own extra rather than
+# folded into [arcticdb] so a pure-validation consumer (predictor,
+# backtester) doesn't have to pull the ArcticDB C++ extension transitively.
+series-contract = ["pandas>=2.0"]
 # Statistical evaluation utilities (nousergon_lib.quant.stats — PSR/DSR, IC,
 # expectancy, BH-FDR, risk-matched benchmarks). numpy + pandas always; scipy is
 # used by information_coefficient for the p-value (numpy fallback otherwise).
