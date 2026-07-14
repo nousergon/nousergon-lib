@@ -57,7 +57,7 @@ GATE_HARD_EXCLUDE_LABELS = frozenset({"gate:operator", "gate:decision", "gate:de
 #: SOFT — excluded unless the issue also carries ``gate-due``. ``gate:live-run``
 #: retired 2026-07-09, split by named pipeline into the three gate:*-sf labels
 #: (config#2057) so gate_sf_run_sweep.py can deterministically re-admit them.
-#: ``gate:milestone`` (config#2517) is event-driven — no calendar Re-exam at
+#: ``gate:milestone`` (config#2519) is event-driven — no calendar Re-exam at
 #: all — auto-cleared directly by alpha-engine-config's gate_milestone_sweep.py
 #: (same posture as gate:data's config#2431 promoted auto-clear) the moment
 #: MILESTONE_REGISTRY.yaml marks the referenced milestone ``reached``.
