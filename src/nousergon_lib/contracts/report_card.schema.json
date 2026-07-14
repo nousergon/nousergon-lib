@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nousergon.ai/schemas/alpha-engine/report_card.v1.json",
+  "title": "Alpha Engine Report Card (evaluator RC v2 contract, v1)",
+  "description": "Evaluator-slot output contract: written each grading cycle by the evaluator to evaluator/{date}/report_card.json; consumed by the dashboard (System Report Card + 9-tile MetricRecord substrate) and the substrate/board surfaces. v1 codifies the shape emitted by grading/aggregate.py::build_report_card (compute_scorecard base keys status/overall/research/predictor/executor + the aggregate-attached tiles/tiles_overall_status/_provenance), filed as the report_card boundary of the 2026-07-11 module-seam scorecard audit (config#2343, sibling of config#692; parent epic config#2327). Evolution is ADDITIVE-ONLY per the S3 Contract Safety rule: new optional fields may appear at any time (additionalProperties stays true); removing or renaming a required field is a breaking change requiring a v2 schema + dual-write window.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "overall",
+    "research",
+    "predictor",
+    "executor",
+    "tiles",
+    "tiles_overall_status",
+    "_provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Contract version stamp. NEW required field on the write-contract (config#2343); historical cards written before the producer stamp are grandfathered on READ by tolerant consumers but are NOT valid against this write-contract."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "partial", "insufficient_data"],
+      "description": "Build status: 'ok' all inputs present; 'partial' some artifacts absent; 'insufficient_data' too little to grade"
+    },
+    "overall": {
+      "$ref": "#/$defs/grade_block",
+      "description": "System-level v1 letter grade (distinct from tiles_overall_status)"
+    },
+    "research": {
+      "$ref": "#/$defs/module_block",
+      "description": "Research-module v1 grade + component breakdown (scanner, sector_teams, macro_agent, cio, composite_scoring, ...)"
+    },
+    "predictor": {
+      "$ref": "#/$defs/module_block",
+      "description": "Predictor-module v1 grade + component breakdown (meta_model, veto_gate)"
+    },
+    "executor": {
+      "$ref": "#/$defs/module_block",
+      "description": "Executor-module v1 grade + component breakdown (entry_triggers, risk_guard, exit_rules, position_sizing, portfolio, ...)"
+    },
+    "tiles": {
+      "type": "object",
+      "description": "RC v2 MetricRecord tiles keyed by tile name (portfolio_outcome, predictor, research, executor, backtester, substrate, agent, behavioral, director_quality). Each value carries at minimum a 'status' the overall_status roll-up reads.",
+      "additionalProperties": { "$ref": "#/$defs/tile" }
+    },
+    "tiles_overall_status": {
+      "type": "string",
+      "description": "Worst-of roll-up over the tiles' statuses (module_agg.overall_status); e.g. GREEN | WATCH | RED | N/A-NOT-RUN"
+    },
+    "_provenance": {
+      "type": "object",
+      "required": ["run_date", "grader_source", "artifacts"],
+      "properties": {
+        "run_date": {
+          "type": "string",
+          "description": "Grading cycle date (YYYY-MM-DD)"
+        },
+        "grader_source": {
+          "type": "string",
+          "description": "Grader implementation identity (e.g. alpha-engine-evaluator/grading/scorecard.py ...)"
+        },
+        "artifacts": {
+          "type": "object",
+          "description": "Artifact-read audit: n_read / n_missing + read/missing key lists",
+          "properties": {
+            "n_read": { "type": "integer", "minimum": 0 },
+            "n_missing": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "description": "Build provenance stamped by aggregate.py (run_date, grader_source, artifact-read audit)"
+    }
+  },
+  "$defs": {
+    "grade_block": {
+      "type": "object",
+      "required": ["grade", "letter"],
+      "properties": {
+        "grade": {
+          "type": ["number", "null"],
+          "description": "Numeric 0-100 grade; null when the module could not be graded this cycle"
+        },
+        "letter": {
+          "type": "string",
+          "description": "Letter grade derived from grade (A/B/C/D/F, or N/A when grade is null)"
+        }
+      }
+    },
+    "module_block": {
+      "type": "object",
+      "required": ["grade", "letter", "components"],
+      "properties": {
+        "grade": {
+          "type": ["number", "null"],
+          "description": "Module composite 0-100 grade; null when ungradable this cycle"
+        },
+        "letter": {
+          "type": "string",
+          "description": "Module letter grade (N/A when grade is null)"
+        },
+        "components": {
+          "type": "object",
+          "description": "Per-component breakdown; each value is a {grade, letter, ...} block or a list of such blocks (sector_teams). Component membership varies by cycle and evolves additively."
+        }
+      }
+    },
+    "tile": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Tile status the overall_status roll-up reads (e.g. GREEN | WATCH | RED | N/A-NOT-RUN)"
+        }
+      },
+      "description": "A MetricRecord tile. Only 'status' is contractually required (the roll-up dereferences it); the full MetricRecord field set (value, ci_low, ci_high, n_samples, target, red_line, trend_4w, estimator, criticality, ...) rides as additive optional fields."
+    }
+  }
+}
