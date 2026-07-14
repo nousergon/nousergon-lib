@@ -321,6 +321,22 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "launch. No per-run rendered artifact — a preventive guard "
         "(fail-open on fetch/parse misses, mirroring LibPinDriftCheck).",
     ),
+    # config#2249: fast pre-dispatch substrate health gate, immediately
+    # before MorningEnrich (the first state to actually dispatch work to
+    # the Saturday box). Replaces discovering a dead dispatch box (disk
+    # full, or an unresponsive SSM agent) only after MorningEnrich burns
+    # its full retry ladder (config#2279) with a fast, named
+    # SubstrateUnhealthy failure — a blocking guard, not a fail-open one
+    # (a dead box means the run genuinely cannot proceed).
+    "SubstrateHealthGate": ArtifactReason(
+        reason="Pre-dispatch substrate health check (config#2249) — "
+        "issues a quick SSM disk-headroom probe against the Saturday "
+        "dispatch box immediately before MorningEnrich and fails fast "
+        "(named SubstrateUnhealthy: disk_full / ssm_unresponsive / "
+        "ssm_command_never_registered) rather than burning MorningEnrich's "
+        "full retry ladder against a dead box. No per-run rendered "
+        "artifact — a blocking preventive guard.",
+    ),
     # config#2278: fail-open + alert SNS publishes fired when LibPinDriftCheck
     # / PipelineContractCheck itself can't check (Lambda failed after
     # retries, or returned a malformed payload) — the run proceeds fail-open
