@@ -560,6 +560,131 @@ class TestApplyAuditContract:
         contracts.validate("apply_audit", payload)
 
 
+def _report_card(**overrides):
+    def _grade(letter="B", grade=82.0):
+        return {"grade": grade, "letter": letter}
+
+    def _module(**mod):
+        base = {"grade": 80.0, "letter": "B", "components": {"scanner": _grade()}}
+        base.update(mod)
+        return base
+
+    payload = {
+        "schema_version": 1,
+        "status": "ok",
+        "overall": _grade(),
+        "research": _module(),
+        "predictor": _module(components={"meta_model": _grade(), "veto_gate": _grade()}),
+        "executor": _module(
+            components={
+                "entry_triggers": _grade(),
+                "risk_guard": _grade(),
+                "exit_rules": _grade(),
+                "position_sizing": _grade(),
+                "portfolio": _grade(),
+            }
+        ),
+        "tiles": {
+            "portfolio_outcome": {"status": "GREEN"},
+            "predictor": {"status": "WATCH", "value": 0.31, "n_samples": 40},
+        },
+        "tiles_overall_status": "WATCH",
+        "_provenance": {
+            "run_date": "2026-07-11",
+            "grader_source": "alpha-engine-evaluator/grading/scorecard.py",
+            "artifacts": {
+                "n_read": 12,
+                "n_missing": 1,
+                "artifacts_read": ["backtest/2026-07-11/e2e_lift.json"],
+                "artifacts_missing": ["backtest/2026-07-11/pit_parity.json"],
+            },
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestReportCardContract:
+    def test_minimal_conforming_payload(self):
+        contracts.validate("report_card", _report_card())
+
+    def test_is_registered_at_v1(self):
+        assert contracts.SCHEMA_VERSIONS["report_card"] == 1
+        schema = contracts.load_schema("report_card")
+        assert "report_card.v1.json" in schema["$id"]
+        # eval-storage contract, not a product slot boundary
+        assert "report_card" in contracts.CONTRACT_SCHEMAS
+        assert "report_card" not in contracts.SLOT_SCHEMAS
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "schema_version",
+            "status",
+            "overall",
+            "research",
+            "predictor",
+            "executor",
+            "tiles",
+            "tiles_overall_status",
+            "_provenance",
+        ],
+    )
+    def test_missing_required_top_level_fails(self, missing):
+        payload = _report_card()
+        del payload[missing]
+        errors = contracts.conformance_errors("report_card", payload)
+        assert errors and missing in " ".join(errors)
+
+    def test_wrong_schema_version_rejected(self):
+        assert contracts.conformance_errors("report_card", _report_card(schema_version=2))
+
+    def test_unknown_status_rejected(self):
+        assert contracts.conformance_errors("report_card", _report_card(status="great"))
+
+    @pytest.mark.parametrize("status", ["ok", "partial", "insufficient_data"])
+    def test_all_statuses_accepted(self, status):
+        contracts.validate("report_card", _report_card(status=status))
+
+    @pytest.mark.parametrize("field", ["grade", "letter"])
+    def test_overall_missing_field_fails(self, field):
+        payload = _report_card()
+        del payload["overall"][field]
+        assert contracts.conformance_errors("report_card", payload)
+
+    def test_overall_null_grade_tolerated(self):
+        # ungradable cycle → grade null, letter N/A (compute_scorecard contract)
+        contracts.validate("report_card", _report_card(overall={"grade": None, "letter": "N/A"}))
+
+    @pytest.mark.parametrize("field", ["grade", "letter", "components"])
+    def test_module_missing_field_fails(self, field):
+        payload = _report_card()
+        del payload["research"][field]
+        assert contracts.conformance_errors("report_card", payload)
+
+    @pytest.mark.parametrize("field", ["run_date", "grader_source", "artifacts"])
+    def test_provenance_missing_field_fails(self, field):
+        payload = _report_card()
+        del payload["_provenance"][field]
+        assert contracts.conformance_errors("report_card", payload)
+
+    def test_tile_missing_status_fails(self):
+        # overall_status roll-up dereferences t["status"] on every tile
+        payload = _report_card()
+        del payload["tiles"]["portfolio_outcome"]["status"]
+        assert contracts.conformance_errors("report_card", payload)
+
+    def test_additive_top_level_field_ok(self):
+        contracts.validate("report_card", _report_card(some_future_tile_group={"x": 1}))
+
+    def test_additive_tile_fields_ok(self):
+        payload = _report_card()
+        payload["tiles"]["portfolio_outcome"].update(
+            {"ci_low": 0.1, "ci_high": 0.4, "estimator": "bootstrap", "criticality": "high"}
+        )
+        contracts.validate("report_card", payload)
+
+
 class TestConformanceKitApi:
     def test_validate_raises_with_full_error_list(self):
         payload = _predictions_payload()
