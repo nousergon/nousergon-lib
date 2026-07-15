@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Mapping, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
 
+    import pandas as pd
     from arcticdb.version_store.library import Library
 
 log = logging.getLogger(__name__)
@@ -186,7 +187,7 @@ def _load_constituent_membership(
 
 
 def pit_membership_as_of(
-    membership: dict[str, "list[str] | set[str]"], as_of: "date"
+    membership: Mapping[str, "list[str] | set[str]"], as_of: "date"
 ) -> set[str] | None:
     """Resolve as-of-date index membership from a PIT ``membership`` map.
 
@@ -314,11 +315,11 @@ def _load_arctic_frames(
     symbols,
     *,
     lookback_days: int,
-    end,
+    end: "pd.Timestamp | str | None",
     columns,
     max_workers: int,
     label: str,
-) -> "dict[str, 'pd.DataFrame']":
+) -> dict[str, pd.DataFrame]:
     """Shared read core for the universe + macro ArcticDB readers.
 
     Reads a date-windowed slice of each ``symbols`` entry out of an
@@ -338,15 +339,23 @@ def _load_arctic_frames(
     if not symbols:
         return {}
 
-    end_ts = (
-        pd.Timestamp(end) if end is not None else pd.Timestamp.now(tz="UTC")
+    # pd.Timestamp(...)'s constructor stub includes a NaT-producing branch
+    # (its generic fallback for unparseable input); `end` is documented as
+    # pd.Timestamp/str/None and this is a controlled internal call, so NaT
+    # can't actually occur here.
+    end_ts = cast(
+        "pd.Timestamp",
+        pd.Timestamp(end) if end is not None else pd.Timestamp.now(tz="UTC"),
     ).normalize()
     if end_ts.tz is not None:
         end_ts = end_ts.tz_localize(None)
     start_ts = end_ts - pd.Timedelta(days=lookback_days)
 
     def _read(sym: str):
-        read_kwargs = {"date_range": (start_ts, end_ts)}
+        # dict[str, Any]: this dict is heterogeneous kwargs (a tuple value
+        # today, optionally a list value below) — the plain-literal
+        # inference would otherwise pin the value type to the first entry.
+        read_kwargs: dict[str, Any] = {"date_range": (start_ts, end_ts)}
         if columns is not None:
             read_kwargs["columns"] = list(columns)
         df = lib.read(sym, **read_kwargs).data
@@ -395,11 +404,11 @@ def load_universe_ohlcv(
     *,
     symbols=None,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
-    end=None,
+    end: "pd.Timestamp | str | None" = None,
     columns=None,
     max_workers: int = 20,
     region: str | None = None,
-) -> "dict[str, 'pd.DataFrame']":
+) -> dict[str, pd.DataFrame]:
     """Load a ticker -> OHLCV DataFrame dict from the ArcticDB **universe** lib.
 
     This is the **single source of truth** for "read a 2y-ish OHLCV slice per
@@ -459,11 +468,11 @@ def load_macro_series(
     symbols,
     *,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
-    end=None,
+    end: "pd.Timestamp | str | None" = None,
     columns=None,
     max_workers: int = 20,
     region: str | None = None,
-) -> "dict[str, 'pd.DataFrame']":
+) -> dict[str, pd.DataFrame]:
     """Load a symbol -> OHLCV DataFrame dict from the ArcticDB **macro** lib.
 
     The macro-lib analog of :func:`load_universe_ohlcv`, sharing the exact

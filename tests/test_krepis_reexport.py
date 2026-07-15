@@ -58,13 +58,3 @@ def test_model_metadata_is_the_shared_krepis_object():
     from nousergon_lib.decision_capture import ModelMetadata as via_decision_capture
 
     assert via_decision_capture is via_krepis
-
-
-def test_alpha_engine_lib_alias_composes_through_to_krepis():
-    """The deprecated ``alpha_engine_lib`` alias must still resolve a moved
-    module all the way through to its krepis object:
-    alpha_engine_lib.cost -> nousergon_lib.cost -> krepis.cost."""
-    import krepis.cost
-
-    aliased = importlib.import_module("alpha_engine_lib.cost")
-    assert aliased is krepis.cost

@@ -28,6 +28,10 @@ import urllib.request
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -160,7 +164,14 @@ class BasePreflight:
             ) from exc
 
         try:
-            df = lib.read(symbol).data
+            # ArcticDB's VersionedItem.data is typed as a broad
+            # NormalizableType union (DataFrame/Series/ndarray/ExpressionNode
+            # /LazyDataFrame/etc, since ArcticDB symbols can hold any
+            # normalizable type, and lib.read() without a lazy query builder
+            # never returns the Lazy* variants); this method reads a price
+            # DataFrame by contract, so the cast trusts that over the
+            # unstubbed union.
+            df = cast("pd.DataFrame", lib.read(symbol).data)
         except Exception as exc:
             raise RuntimeError(
                 f"Pre-flight: ArcticDB {library}/{symbol} read failed: {exc}"
@@ -171,7 +182,14 @@ class BasePreflight:
                 f"Pre-flight: ArcticDB {library}/{symbol} is empty"
             )
 
-        last_ts = pd.Timestamp(df.index[-1])
+        # df.index[-1]'s static type is a broad Index.__getitem__ overload
+        # union (pyright can't narrow the scalar element type from an
+        # unstubbed index); pd.Timestamp(...) does the actual runtime
+        # coercion/validation regardless of the input's concrete type. The
+        # df.empty check above guarantees a real index label here, so
+        # pd.Timestamp's NaT branch (its ctor stub's fallback for
+        # None/unparseable input) can never actually fire — cast it away.
+        last_ts = cast("pd.Timestamp", pd.Timestamp(cast(Any, df.index[-1])))
         # Normalize to tz-naive date for comparison against today's UTC date.
         if last_ts.tzinfo is not None:
             last_ts = last_ts.tz_convert("UTC").tz_localize(None)
@@ -293,10 +311,17 @@ class BasePreflight:
 
         def _last_date_for(sym: str) -> tuple[str, "date | None", "str | None"]:
             try:
-                df = lib.tail(sym, n=1).data
+                # See the analogous cast on check_arcticdb_universe_fresh
+                # above: VersionedItem.data's declared type is a broad
+                # NormalizableType union; this reads a price DataFrame by
+                # contract.
+                df = cast("pd.DataFrame", lib.tail(sym, n=1).data)
                 if df.empty:
                     return sym, None, "empty frame"
-                last_ts = pd.Timestamp(df.index[-1])
+                # See the analogous cast + comment above: the df.empty
+                # check guarantees a real index label, so NaT can't
+                # actually fire.
+                last_ts = cast("pd.Timestamp", pd.Timestamp(cast(Any, df.index[-1])))
                 if last_ts.tzinfo is not None:
                     last_ts = last_ts.tz_convert("UTC").tz_localize(None)
                 return sym, last_ts.date(), None
