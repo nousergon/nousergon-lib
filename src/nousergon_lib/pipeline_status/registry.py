@@ -232,11 +232,11 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "rendered artifact."
     ),
     "EvalJudgeSubmitFirstSaturday": ArchivePageRef(
-        page="host_eval_backtester?tab=Eval+Quality",
+        page="evaluator",
         artifact_label="Eval judge (first Saturday batch)",
     ),
     "EvalJudgeSubmitWeekly": ArchivePageRef(
-        page="host_eval_backtester?tab=Eval+Quality",
+        page="evaluator",
         artifact_label="Eval judge (weekly batch)",
     ),
     "EvalJudgePoll": ArtifactReason(
@@ -244,11 +244,11 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "see EvalJudgeProcess for the materialized rubric output."
     ),
     "EvalJudgeProcess": ArchivePageRef(
-        page="host_eval_backtester?tab=Eval+Quality",
+        page="evaluator",
         artifact_label="Eval judge processed rubrics",
     ),
     "EvalRollingMean": ArchivePageRef(
-        page="host_eval_backtester?tab=Eval+Quality",
+        page="evaluator",
         artifact_label="Eval 4-week rolling mean",
     ),
     "RationaleClustering": ArtifactReason(
