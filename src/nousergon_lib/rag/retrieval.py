@@ -445,7 +445,16 @@ def ingest_document(
                    RETURNING id""",
                 (ticker, sector, doc_type, source, filed_date, title, url),
             )
-            doc_id = cur.fetchone()[0]
+            row = cur.fetchone()
+            if row is None:
+                # INSERT ... RETURNING id not returning a row would mean
+                # the insert silently didn't happen — a driver/DB-level
+                # anomaly, not a normal "no match" case (unlike a SELECT).
+                raise RuntimeError(
+                    f"INSERT INTO rag.documents returned no row for "
+                    f"{ticker} {doc_type} {filed_date}"
+                )
+            doc_id = row[0]
 
             chunk_params = [
                 (doc_id, i, c["content"], c.get("section_label"), str(c["embedding"]))
