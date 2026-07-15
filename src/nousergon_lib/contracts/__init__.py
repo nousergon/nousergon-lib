@@ -21,6 +21,11 @@ single source of truth for those schemas:
   so a blocked/starved apply loop is impossible to miss (crucible-backtester →
   crucible-evaluator) → ``config/apply_audit/{date}.json``. Eval-storage
   contract, not a slot.
+- ``report_card`` — the evaluator's unified system report card (RC v2: v1
+  letter grades for research/predictor/executor + the 9-tile MetricRecord
+  substrate + provenance), emitted by ``grading/aggregate.py::build_report_card``
+  (crucible-evaluator) → ``evaluator/{date}/report_card.json`` and consumed by
+  the dashboard. Eval-storage contract, not a slot (config#2343).
 - ``experiment`` — the Crucible declarative experiment MANIFEST (input
   envelope: per-slot stock|artifact|command|entry_point binding, window,
   universe, evaluation config). Phase A of crucible_ux_output_plan_260708.md
@@ -70,6 +75,11 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     "research_intel": "research_intel.schema.json",
     "attractiveness_eval": "attractiveness_eval.schema.json",
     "apply_audit": "apply_audit.schema.json",
+    # Evaluator report card (RC v2): grading/aggregate.py::build_report_card →
+    # ``evaluator/{date}/report_card.json``; consumed by the dashboard System
+    # Report Card + 9-tile substrate. Eval-storage contract, not a slot
+    # (config#2343, sibling of config#692).
+    "report_card": "report_card.schema.json",
     # Crucible harness envelope contracts (Phase A of the ratified
     # crucible_ux_output_plan_260708.md — config#1966). Not slot boundaries:
     # ``experiment`` DECLARES which slot implementations run (the manifest);
@@ -97,6 +107,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "research_intel": 1,
     "attractiveness_eval": 2,
     "apply_audit": 1,
+    "report_card": 1,
     "experiment": 1,
     "experiment_record": 1,
 }
@@ -121,6 +132,11 @@ def load_schema(name: str) -> dict[str, Any]:
     if name not in CONTRACT_SCHEMAS:
         raise KeyError(f"unknown contract {name!r}; known: {sorted(CONTRACT_SCHEMAS)}")
     fname = CONTRACT_SCHEMAS[name]
+    # __package__ is only None for a module run standalone as __main__
+    # with no package context, which this module never is (it's always
+    # imported as nousergon_lib.contracts) — the assertion documents that
+    # invariant for pyright rather than silently passing None through.
+    assert __package__ is not None, "nousergon_lib.contracts.__package__ is unset"
     with resources.files(__package__).joinpath(fname).open("r", encoding="utf-8") as f:
         return json.load(f)
 

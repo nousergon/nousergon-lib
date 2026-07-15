@@ -25,7 +25,13 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        import voyageai
+        # voyageai is not declared under any pyproject.toml extra (a
+        # pre-existing gap — the [rag] extra covers psycopg2/pgvector/numpy
+        # only) and isn't installed in the pyright CI environment
+        # (test.yml only installs
+        # [dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts]), so this
+        # import is unresolved there regardless of local venv state.
+        import voyageai  # pyright: ignore[reportMissingImports]
         _client = voyageai.Client(api_key=os.environ.get("VOYAGE_API_KEY"))
     return _client
 
