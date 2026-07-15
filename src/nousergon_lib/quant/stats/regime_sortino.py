@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 import numpy as np
 import pandas as pd
@@ -189,7 +189,11 @@ def _stratum_metrics(
             hit_rate=None,
         )
 
-    populated = slice_df[slice_df[return_col].notna() & slice_df[spy_col].notna()]
+    # Boolean-mask row selection on a DataFrame always returns a DataFrame;
+    # pyright's inference widens to Series|DataFrame because
+    # DataFrame.__getitem__'s stub overloads also cover scalar/list-label
+    # column selection.
+    populated = cast("pd.DataFrame", slice_df[slice_df[return_col].notna() & slice_df[spy_col].notna()])
     n_picks = len(populated)
     if n_picks < min_picks:
         return StratumMetrics(
@@ -204,9 +208,13 @@ def _stratum_metrics(
             hit_rate=None,
         )
 
-    # Convert arithmetic → log domain (canonical framework)
+    # Convert arithmetic → log domain (canonical framework). return_col /
+    # spy_col are plain str (not literals), so pyright can't statically
+    # rule out DataFrame.__getitem__'s duplicate-column-label overload;
+    # both are single confirmed-present column names (checked above), so
+    # this is always single-column Series selection.
     log_alphas = _arithmetic_to_log_alpha(
-        populated[return_col], populated[spy_col],
+        cast("pd.Series", populated[return_col]), cast("pd.Series", populated[spy_col]),
     ).to_numpy()
 
     sortino = _annualized_sortino_from_log_alphas(log_alphas, horizon_days=horizon_days)
@@ -249,12 +257,16 @@ def stratified_sortino_by_regime(
     if "market_regime" not in df.columns:
         return []
 
-    df_with_regime = df[df["market_regime"].notna()]
+    # See the analogous cast in _stratum_metrics: boolean-mask row
+    # selection on a DataFrame always returns a DataFrame.
+    df_with_regime = cast("pd.DataFrame", df[df["market_regime"].notna()])
     regimes = sorted(df_with_regime["market_regime"].unique())
 
     out: list[StratumMetrics] = []
     for regime in regimes:
-        regime_slice = df_with_regime[df_with_regime["market_regime"] == regime]
+        regime_slice = cast(
+            "pd.DataFrame", df_with_regime[df_with_regime["market_regime"] == regime]
+        )
         for horizon in horizons:
             out.append(
                 _stratum_metrics(

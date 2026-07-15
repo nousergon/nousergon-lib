@@ -162,7 +162,10 @@ def historical_cvar(returns: list[float], *, confidence: float = 0.95) -> float 
     """
     if len(returns) < 2:
         return None
+    # historical_var only returns None when len(returns) < 2 (its own
+    # early-return, mirrored above), so var is never None on this path.
     var = historical_var(returns, confidence=confidence)
+    assert var is not None
     losses = [-r for r in returns]
     tail = [loss for loss in losses if loss >= var]
     if not tail:

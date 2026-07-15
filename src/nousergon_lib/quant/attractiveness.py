@@ -9,7 +9,7 @@ share byte-identical numbers for the same factor-profile inputs.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional, cast
 
 PILLAR_ORDER: tuple[str, ...] = (
     "quality",
@@ -40,7 +40,12 @@ def _num(v: object) -> float | None:
     if v is None:
         return None
     try:
-        f = float(v)
+        # v is deliberately `object` — this coerces arbitrary upstream
+        # JSON/dict values (str, int, bool, Decimal, ...); the
+        # try/except (TypeError, ValueError) below IS the type-safety
+        # mechanism for non-ConvertibleToFloat input at runtime, so the
+        # cast just tells pyright to let the runtime check do its job.
+        f = float(cast(Any, v))
     except (TypeError, ValueError):
         return None
     if f != f or f in (float("inf"), float("-inf")):
