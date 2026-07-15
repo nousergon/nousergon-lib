@@ -69,6 +69,15 @@ class TestGateExclusion:
         assert is_actionable(["complexity:low", "gate:operator"]) is None
         assert is_actionable(["complexity:ultra"]) is None
 
+    def test_milestone_gate_is_soft_excluded_unless_due(self):
+        # config#2519: event-driven gate — never gets gate-due in practice
+        # (gate_milestone_sweep.py auto-clears directly), but the SOFT
+        # exclusion semantics (excluded unless gate-due) still apply for
+        # consistency with the other auto-clearing gate classes.
+        assert "gate:milestone" in GATE_SOFT_EXCLUDE_LABELS
+        assert is_gate_excluded(["gate:milestone"])
+        assert not is_gate_excluded(["gate:milestone", "gate-due"])
+
 
 class TestFilterGrammar:
     def test_round_trip_single(self):

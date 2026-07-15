@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.112.0"
+version = "0.115.0"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -81,15 +81,45 @@ dev = [
     "pytest-cov>=4.0",
     "moto>=5.0",
 ]
+# Stub-only package for pyright's benefit — gives pipeline_status/read.py's
+# `if TYPE_CHECKING: from mypy_boto3_stepfunctions.client import SFNClient`
+# a resolvable type instead of an untyped boto3 BaseClient. Not a runtime
+# dependency of anything; only needed in the pyright CI job's install step.
+type-check = [
+    "mypy-boto3-stepfunctions>=1.43",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"nousergon_lib" = ["transparency_inventory.yaml"]
+"nousergon_lib" = ["transparency_inventory.yaml", "py.typed"]
 "nousergon_lib.contracts" = ["*.schema.json"]
 "nousergon_lib.rag" = ["schema.sql", "migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.pyright]
+# CI gate (config#2534): basic mode pinned to the 3.9 floor — the oldest
+# supported version is where PEP604-class regressions actually bite (see
+# test.yml's origin note), so a single pinned run at 3.9 catches the same
+# class of defect a full 3.9-3.13 pyright matrix would, without 5x the CI
+# minutes. Strict mode is a deliberate follow-up ratchet, not this pass.
+include = ["src/nousergon_lib"]
+# tests/ excluded: this gate protects the *importable contract* ~10 repos
+# consume (src/), not the test suite. Typing 1200+ test cases (many using
+# loosely-typed fixtures/moto mocks/parametrize) is a separate, much larger
+# ratchet with its own cost/benefit call — out of scope for this issue.
+exclude = ["**/__pycache__"]
+pythonVersion = "3.9"
+typeCheckingMode = "basic"
+# Resolve optional-extra imports (pandas/numpy/psycopg2/jsonschema/etc) the
+# same way CI's pytest job does: installed into the active environment, not
+# a separate venv config. The CI job installs
+# ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,type-check]"
+# (mirrors test.yml's pytest install line + the pyright-only stub extra)
+# before running pyright, so no venvPath/executionEnvironments indirection
+# is needed — pyright resolves imports from the active interpreter's
+# site-packages by default.

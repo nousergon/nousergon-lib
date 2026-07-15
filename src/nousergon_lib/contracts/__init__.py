@@ -132,6 +132,11 @@ def load_schema(name: str) -> dict[str, Any]:
     if name not in CONTRACT_SCHEMAS:
         raise KeyError(f"unknown contract {name!r}; known: {sorted(CONTRACT_SCHEMAS)}")
     fname = CONTRACT_SCHEMAS[name]
+    # __package__ is only None for a module run standalone as __main__
+    # with no package context, which this module never is (it's always
+    # imported as nousergon_lib.contracts) — the assertion documents that
+    # invariant for pyright rather than silently passing None through.
+    assert __package__ is not None, "nousergon_lib.contracts.__package__ is unset"
     with resources.files(__package__).joinpath(fname).open("r", encoding="utf-8") as f:
         return json.load(f)
 
