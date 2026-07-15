@@ -93,22 +93,28 @@ jobs:
         if: ${{ always() }}
         env:
           DISPATCH_PAT: ${{ secrets.SF_WATCH_DISPATCH_PAT }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_SERVER_URL: ${{ github.server_url }}
+          GH_WORKFLOW: ${{ github.workflow }}
+          GH_REF_NAME: ${{ github.ref_name }}
         run: |
           if [ -z "$DISPATCH_PAT" ]; then
             echo "::warning::SF_WATCH_DISPATCH_PAT not configured — Fleet CI Watch NOT dispatched for this failure (config#1593 operator step pending). The Telegram alert above still fired."
             exit 0
           fi
           jq -n \
-            --arg repo "${{ github.repository }}" \
-            --arg sha "${{ github.sha }}" \
-            --arg run_id "${{ github.run_id }}" \
-            --arg run_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --arg workflow "${{ github.workflow }}" \
-            --arg branch "${{ github.ref_name }}" \
+            --arg repo "$GH_REPOSITORY" \
+            --arg sha "$GH_SHA" \
+            --arg run_id "$GH_RUN_ID" \
+            --arg run_url "$GH_SERVER_URL/$GH_REPOSITORY/actions/runs/$GH_RUN_ID" \
+            --arg workflow "$GH_WORKFLOW" \
+            --arg branch "$GH_REF_NAME" \
             '{event_type: "ci-main-failure", client_payload: {repo: $repo, sha: $sha, run_id: $run_id, run_url: $run_url, workflow: $workflow, branch: $branch}}' \
           | curl -sS --fail-with-body -X POST \
               -H "Authorization: token $DISPATCH_PAT" \
               -H "Accept: application/vnd.github+json" \
               https://api.github.com/repos/nousergon/alpha-engine-config/dispatches \
               -d @-
-          echo "Dispatched ci-main-failure for ${{ github.repository }} run ${{ github.run_id }}"
+          echo "Dispatched ci-main-failure for $GH_REPOSITORY run $GH_RUN_ID"
