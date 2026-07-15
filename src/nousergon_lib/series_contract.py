@@ -81,7 +81,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence, cast
 
 import pandas as pd
 
@@ -276,8 +276,12 @@ def quarantine_decision(
     ``DAILY_APPEND_BLOCK_ANOMALY_TYPES`` escape hatch.
     """
     block_set = frozenset(block_gates)
-    blocking = tuple(r.gate for r in report.failing if r.gate in block_set)
-    warning = tuple(r.gate for r in report.failing if r.gate not in block_set)
+    blocking: tuple[GateName, ...] = tuple(
+        r.gate for r in report.failing if r.gate in block_set
+    )
+    warning: tuple[GateName, ...] = tuple(
+        r.gate for r in report.failing if r.gate not in block_set
+    )
     return QuarantineDecision(
         quarantine=bool(blocking),
         alarm=not report.passed,
@@ -361,7 +365,13 @@ def check_sanity(
             reason=f"{price_field!r} column absent — cannot evaluate sanity",
         )
 
-    prices = pd.to_numeric(df[price_field], errors="coerce")
+    # `price_field` is a str, so `df[price_field]` always selects a single
+    # column (a Series, never a DataFrame/scalar) — `to_numeric` on a
+    # Series input always returns a Series. pyright's inferred return type
+    # is the union of every overload `to_numeric` supports (scalar/array/
+    # ExtensionArray/...) because pandas ships without return-type stubs
+    # for this un-stubbed function; narrow it back to the true runtime type.
+    prices = cast(pd.Series, pd.to_numeric(df[price_field], errors="coerce"))
     bad_mask = prices.notna() & (prices <= 0)
     if not bad_mask.any():
         return GateResult(gate="sanity", ok=True)
@@ -550,8 +560,10 @@ def check_outlier(
             reason="insufficient history for a trailing-vol estimate",
         )
 
-    prices = pd.to_numeric(df[price_field], errors="coerce")
-    prices = prices[prices.notna() & (prices > 0)]
+    # See check_sanity's comment above `cast` for why this is safe: a str
+    # column selection always yields a Series, so `to_numeric` returns one.
+    prices = cast(pd.Series, pd.to_numeric(df[price_field], errors="coerce"))
+    prices = cast(pd.Series, prices[prices.notna() & (prices > 0)])
     if len(prices) < min_observations + 2:
         return GateResult(
             gate="outlier", ok=True,
@@ -574,7 +586,12 @@ def check_outlier(
     if not violation_mask.any():
         return GateResult(gate="outlier", ok=True)
 
-    bad_idx = returns.index[violation_mask]
+    # `violation_mask` is a boolean-valued Series/array, not a scalar
+    # position, so this boolean-mask indexing always returns an Index (never
+    # the single-int-position branch of `Index.__getitem__`'s inferred
+    # union — pandas has no return-type stub here, so pyright falls back to
+    # its broadest reading of the un-stubbed implementation).
+    bad_idx = cast("pd.Index", returns.index[violation_mask])
     samples = []
     for d in bad_idx[:5]:
         samples.append({
@@ -729,10 +746,25 @@ def validate_series(
 
 
 def _to_date(value: Any) -> date:
-    """Coerce a pandas Timestamp / datetime / date / str index value to date."""
+    """Coerce a pandas Timestamp / datetime / date / str index value to date.
+
+    Raises ``ValueError`` if ``value`` is NaT/unparseable — every caller
+    treats the result as a real calendar date (sorting, ``.isoformat()``,
+    comparison), so a silent ``None``/NaT here would just surface as a
+    more confusing failure downstream. An index value that can't be
+    coerced to a date is itself a data-contract violation this module
+    exists to catch, not a case to paper over.
+    """
     if isinstance(value, date) and not hasattr(value, "hour"):
         return value
     ts = pd.Timestamp(value)
+    if not isinstance(ts, pd.Timestamp):
+        # `pd.Timestamp(value)` constructs NaT (a NaTType, not a Timestamp)
+        # for None/NaT/unparseable input; NaTType.date() returns NaT again
+        # rather than raising, so without this branch a malformed index
+        # value would silently become NaT and corrupt every downstream
+        # comparison/isoformat() call that assumes a real date.
+        raise ValueError(f"index value {value!r} is NaT/unparseable — cannot coerce to date")
     return ts.date()
 
 
