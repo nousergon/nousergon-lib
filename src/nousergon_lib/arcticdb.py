@@ -296,10 +296,15 @@ def read_settled_only(
     """
     lib = open_universe_lib(bucket, region=region)
     result = lib.read(symbol, as_of=as_of, **read_kwargs)
-    df = result.data
+    # arcticdb's Library.read() return type is a union that includes
+    # LazyDataFrame/ExpressionNode (only reachable when the caller passes
+    # lazy=True, which read_kwargs never does here) — cast matches the
+    # existing precedent in preflight.py (BasePreflight.check_arcticdb_*)
+    # rather than inventing a second pattern for the same stub gap.
+    df = cast("pd.DataFrame | None", result.data)
     if df is not None and not df.empty and SETTLED_COL in df.columns:
         mask = df[SETTLED_COL].fillna(False).astype(bool)
-        if not mask.all():
+        if not bool(mask.all()):
             _n_dropped = int((~mask).sum())
             try:
                 from nousergon_lib.gate_alerts import alert_gate_failure
@@ -323,7 +328,7 @@ def read_settled_only(
                     "%r found inside %r (alert_gate_failure unavailable)",
                     _n_dropped, symbol, UNIVERSE_LIB,
                 )
-            df = df[mask]
+            df = cast("pd.DataFrame", df[mask])
     return df
 
 
