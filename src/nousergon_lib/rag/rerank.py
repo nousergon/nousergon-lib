@@ -158,7 +158,11 @@ class CrossEncoderReranker:
         try:
             # Imported lazily so a bare ``from nousergon_lib.rag import
             # retrieve`` stays cheap on consumers that don't rerank.
-            from sentence_transformers import CrossEncoder
+            # [rerank] extra deliberately not installed in CI (heavy
+            # torch+transformers dep), matches test.yml's install-skip
+            # precedent (sentence-transformers / flow-doctor are both
+            # deferred until first call / mocked in tests).
+            from sentence_transformers import CrossEncoder  # pyright: ignore[reportMissingImports]
         except ImportError as exc:
             raise ImportError(
                 "CrossEncoderReranker requires sentence-transformers. "

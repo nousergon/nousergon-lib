@@ -23,7 +23,7 @@ Pure-compute. Operates on a returns array; no I/O.
 from __future__ import annotations
 
 import logging
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import numpy as np
 import pandas as pd
@@ -155,7 +155,11 @@ def compute_expectancy_by_group(
         raise KeyError(f"group_col {group_col!r} not in dataframe")
     out: dict[str, ExpectancyResult] = {}
     for group_value, sub in df.groupby(group_col):
+        # return_col is plain str (not a literal), so pyright can't
+        # statically rule out DataFrame.__getitem__'s duplicate-column
+        # -label overload; it was confirmed present in df.columns above,
+        # so this is always single-column Series selection.
         out[str(group_value)] = compute_expectancy(
-            sub[return_col], threshold=threshold, min_samples=min_samples,
+            cast("pd.Series", sub[return_col]), threshold=threshold, min_samples=min_samples,
         )
     return out

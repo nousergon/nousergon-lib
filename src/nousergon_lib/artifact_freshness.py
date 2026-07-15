@@ -80,10 +80,15 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Final, Literal
 
+# trading_calendar.py is a sys.modules rebind shim to
+# krepis.trading_calendar; pyright can't see through the dynamic rebind,
+# verified correct at runtime — the per-symbol ignores below are needed
+# because pyright anchors reportAttributeAccessIssue to each imported
+# name's own line on a multi-line from-import.
 from nousergon_lib.trading_calendar import (
-    is_trading_day,
-    last_closed_trading_day,
-    previous_trading_day,
+    is_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
+    last_closed_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
+    previous_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
 )
 
 

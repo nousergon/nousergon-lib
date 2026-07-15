@@ -26,7 +26,10 @@ lazily inside the function, mirroring the arcticdb module's contract).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Mapping, Optional, Sequence, Tuple, cast
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
 
 
 @dataclass(frozen=True)
@@ -107,8 +110,8 @@ class ParityReport:
 
 
 def reconcile_frame_dicts(
-    a: Mapping[str, "object"],
-    b: Mapping[str, "object"],
+    a: Mapping[str, "pd.DataFrame"],
+    b: Mapping[str, "pd.DataFrame"],
     *,
     value_cols: Sequence[str] = ("Close",),
     epsilon: float = 1e-6,
@@ -162,8 +165,14 @@ def reconcile_frame_dicts(
         for col in cols:
             if col not in fa.columns or col not in fb.columns:
                 continue
-            sa = pd.to_numeric(fa.loc[idx, col], errors="coerce")
-            sb = pd.to_numeric(fb.loc[idx, col], errors="coerce")
+            # fa.loc[idx, col] / fb.loc[idx, col] always select a single
+            # column across a row index here (col is one column label from
+            # `cols`), so to_numeric always receives/returns a Series; the
+            # cast narrows pyright away from to_numeric's broader
+            # scalar/array-input overload union (its signature has no
+            # per-input-type overloads to infer from).
+            sa = cast("pd.Series", pd.to_numeric(fa.loc[idx, col], errors="coerce"))
+            sb = cast("pd.Series", pd.to_numeric(fb.loc[idx, col], errors="coerce"))
             diff = (sa - sb).abs()
             # NaN on either side -> treat as comparable only where both
             # present; an asymmetric NaN is a real mismatch.
