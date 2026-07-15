@@ -15,8 +15,14 @@ Pgvector + psycopg2 are heavy dependencies; install via the ``[rag]`` extra:
 
 # Auto-load .env so RAG_DATABASE_URL and VOYAGE_API_KEY are available
 # whether run from CLI, Lambda (already in env), or imported in tests.
+# python-dotenv is an optional soft-dependency (not declared under any
+# extra — this try/except IS the dependency contract) and isn't installed
+# in the pyright CI environment (test.yml only installs
+# [dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts]), so the import
+# is unresolved there even though it resolves fine in a dev venv that
+# happens to have it.
 try:
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # pyright: ignore[reportMissingImports]
     load_dotenv()
 except ImportError:
     pass  # python-dotenv not installed (e.g. Lambda) — env vars set externally

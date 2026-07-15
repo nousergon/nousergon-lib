@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import numpy as np
 import pandas as pd
@@ -112,17 +112,27 @@ def construct_ew_high_vol_benchmark(
     rebalance_dates: list[pd.Timestamp] = []
     seen: set[pd.Timestamp] = set()
     for ps in period_starts:
-        candidates = sub.index[sub.index >= ps]
+        # Boolean-mask indexing a DatetimeIndex always returns a
+        # DatetimeIndex here (sub.index was validated as one above); the
+        # cast narrows pyright away from Index.__getitem__'s generic
+        # overload union (int | slice | tuple | Index | ... depending on
+        # key shape, inferred from pandas' untyped implementation).
+        candidates = cast("pd.DatetimeIndex", sub.index[sub.index >= ps])
         if len(candidates) > 0:
-            d = candidates[0]
+            d = cast("pd.Timestamp", candidates[0])
             if d not in seen and d in sub.index:
                 rebalance_dates.append(d)
                 seen.add(d)
 
     benchmark_segments: list[pd.Series] = []
     for i, rd in enumerate(rebalance_dates):
-        # Compute trailing vol on returns up to rd.
-        rd_pos = sub.index.get_loc(rd)
+        # Compute trailing vol on returns up to rd. `sub.index` was
+        # validated as a DatetimeIndex above (checked at function entry)
+        # and `rd` is one of its own elements, so get_loc always resolves
+        # to a scalar int here (its broader int|slice|ndarray return type,
+        # inferred by pyright from pandas' untyped implementation, only
+        # applies to non-unique/partial-match indexes).
+        rd_pos = cast(int, sub.index.get_loc(rd))
         if rd_pos < vol_lookback_days:
             continue  # not enough history yet
         lookback = daily_returns.iloc[rd_pos - vol_lookback_days : rd_pos]
@@ -138,13 +148,19 @@ def construct_ew_high_vol_benchmark(
         # Hold from rd until next rebalance (exclusive) or end of data.
         next_rd = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else None
         end_pos = (
-            sub.index.get_loc(next_rd)
+            cast(int, sub.index.get_loc(next_rd))
             if next_rd is not None
             else len(sub.index)
         )
         # Daily returns over [rd+1, next_rd] — first day post-rebalance
-        # is the first day the held basket starts compounding.
-        segment = daily_returns[selected].iloc[rd_pos + 1 : end_pos].mean(axis=1)
+        # is the first day the held basket starts compounding. `selected`
+        # is a list of column labels, so this is always column-subset
+        # selection returning a DataFrame; pyright's inference widens to
+        # include the boolean-mask-row-selection overload (ndarray-typed)
+        # because `selected`'s element type traces back through several
+        # untyped pandas calls.
+        selected_returns = cast("pd.DataFrame", daily_returns[selected])
+        segment = selected_returns.iloc[rd_pos + 1 : end_pos].mean(axis=1)
         benchmark_segments.append(segment)
 
     if not benchmark_segments:
@@ -204,16 +220,23 @@ def construct_beta_matched_spy_benchmark(
     rebalance_dates: list[pd.Timestamp] = []
     seen: set[pd.Timestamp] = set()
     for ps in period_starts:
-        candidates = aligned.index[aligned.index >= ps]
+        # `aligned.index` is datetime-like at runtime (both inputs are
+        # "indexed by trading day" per the docstring — the `.dt` accessor
+        # above already depends on that). The cast narrows pyright away
+        # from Index.__getitem__'s generic overload union.
+        candidates = cast("pd.DatetimeIndex", aligned.index[aligned.index >= ps])
         if len(candidates) > 0:
-            d = candidates[0]
+            d = cast("pd.Timestamp", candidates[0])
             if d not in seen:
                 rebalance_dates.append(d)
                 seen.add(d)
 
     bench_segments: list[pd.Series] = []
     for i, rd in enumerate(rebalance_dates):
-        rd_pos = aligned.index.get_loc(rd)
+        # aligned.index is a unique DatetimeIndex (inner-joined + deduped
+        # above) and rd is one of its own elements, so get_loc always
+        # resolves to a scalar int here.
+        rd_pos = cast(int, aligned.index.get_loc(rd))
         if rd_pos < beta_lookback_days:
             continue
         window = aligned.iloc[rd_pos - beta_lookback_days : rd_pos]
@@ -227,7 +250,7 @@ def construct_beta_matched_spy_benchmark(
 
         next_rd = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else None
         end_pos = (
-            aligned.index.get_loc(next_rd)
+            cast(int, aligned.index.get_loc(next_rd))
             if next_rd is not None
             else len(aligned.index)
         )
@@ -273,8 +296,11 @@ def compute_alpha_vs_benchmark(
     if aligned.empty:
         return {"status": "insufficient_data", "n_days": 0, "label": label}
 
-    port = aligned["port"]
-    bench = aligned["bench"]
+    # aligned was built from two uniquely-named Series concatenated
+    # column-wise, so selecting by name always yields a Series (never
+    # the DataFrame branch of __getitem__'s duplicate-column overload).
+    port = cast("pd.Series", aligned["port"])
+    bench = cast("pd.Series", aligned["bench"])
     excess = port - bench
     # Total returns via geometric compounding.
     port_total = float((1.0 + port).prod() - 1.0)

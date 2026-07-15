@@ -37,8 +37,16 @@ logger = logging.getLogger(__name__)
 _TRADING_DAYS_PER_YEAR = 252
 
 
-class PSRResult(TypedDict, total=False):
+class _PSRResultRequired(TypedDict):
+    # ``status`` is set on every compute_psr() return path (both the
+    # early insufficient_data exit and both "ok" returns) — required so
+    # callers that key off it (e.g. compute_dsr's psr_result["status"])
+    # don't need a defensive .get() for a field that's never actually
+    # absent.
     status: str
+
+
+class PSRResult(_PSRResultRequired, total=False):
     n: int
     sharpe: float           # observed annualized Sharpe
     sharpe_benchmark: float # benchmark Sharpe being tested against
@@ -47,8 +55,13 @@ class PSRResult(TypedDict, total=False):
     kurtosis: float
 
 
-class DSRResult(TypedDict, total=False):
+class _DSRResultRequired(TypedDict):
+    # See _PSRResultRequired — status is set on every compute_dsr()
+    # return path.
     status: str
+
+
+class DSRResult(_DSRResultRequired, total=False):
     n: int
     sharpe: float
     n_trials: int           # number of candidates considered (multiple-testing N)

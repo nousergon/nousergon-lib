@@ -36,7 +36,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any, Optional, Union
+from typing import TYPE_CHECKING, Annotated, Any, Mapping, NoReturn, Optional, Sequence, Union, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -263,7 +263,7 @@ def _region_from_arn(state_machine_arn: str) -> Optional[str]:
     return parts[3]
 
 
-def _failure_cause_from(describe_resp: dict) -> str:
+def _failure_cause_from(describe_resp: Mapping[str, Any]) -> str:
     """Extract + truncate the failure cause from DescribeExecution response.
 
     Mirrors sf-telegram-notifier's ``_failure_cause_from`` (lines 125-136)
@@ -325,7 +325,7 @@ def _absorb_wait_companion(state_name: str) -> str:
     return WAIT_GROUPING.get(state_name, state_name)
 
 
-def _materialize_tasks(history_events: list[dict]) -> list[TaskRow]:
+def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[TaskRow]:
     """Walk the execution history and produce one TaskRow per substantive state.
 
     Algorithm:
@@ -427,7 +427,7 @@ def _materialize_tasks(history_events: list[dict]) -> list[TaskRow]:
     return rows
 
 
-def _failing_state_from_history(history_events: list[dict]) -> Optional[str]:
+def _failing_state_from_history(history_events: Sequence[Mapping[str, Any]]) -> Optional[str]:
     """Identify the state that emitted TaskFailed (or ExecutionFailed) first."""
     for event in history_events:
         etype = event.get("type", "")
@@ -468,7 +468,7 @@ _DEFAULT_ROLE_SEARCH_LIMIT = 50
 _LIST_EXECUTIONS_PAGE_SIZE = 25
 
 
-def _extract_pipeline_role(describe_resp: dict) -> Optional[str]:
+def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> Optional[str]:
     """Parse ``input.pipeline_role`` from a DescribeExecution response.
 
     DescribeExecution returns ``input`` as a JSON-encoded string. The
@@ -704,7 +704,13 @@ def read_pipeline_state(
     if client is None:  # pragma: no cover — production path
         import boto3
 
-        client = boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn))
+        # mypy-boto3-stepfunctions is a stub-only package (no runtime
+        # overloads for boto3.client's service-name dispatch), so the cast
+        # tells pyright what boto3 actually hands back at runtime.
+        client = cast(
+            "SFNClient",
+            boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn)),
+        )
 
     # Path 1: explicit execution_arn — fetch directly.
     if execution_arn is not None:
@@ -787,7 +793,13 @@ def list_recent_pipeline_runs(
     if client is None:  # pragma: no cover — production path
         import boto3
 
-        client = boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn))
+        # mypy-boto3-stepfunctions is a stub-only package (no runtime
+        # overloads for boto3.client's service-name dispatch), so the cast
+        # tells pyright what boto3 actually hands back at runtime.
+        client = cast(
+            "SFNClient",
+            boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn)),
+        )
 
     walk_cap = limit if role_filter is None else min(limit * 5, _DEFAULT_ROLE_SEARCH_LIMIT)
     summaries: list[PipelineExecutionSummary] = []
@@ -858,7 +870,7 @@ def list_recent_pipeline_runs(
     return summaries
 
 
-def _raise_for_boto_error(exc: Exception, action: str) -> None:
+def _raise_for_boto_error(exc: Exception, action: str) -> NoReturn:
     """Translate a boto3 exception into a typed PipelineStatusError.
 
     Inspects the ``ClientError.response["Error"]["Code"]`` for the common
