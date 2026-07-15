@@ -35,6 +35,8 @@ name: Version-bump check
 #     internal-consistency to external-monotonicity.
 
 on:
+
+permissions: {}
   pull_request:
     branches: [main]
 

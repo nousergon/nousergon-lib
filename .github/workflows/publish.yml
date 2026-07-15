@@ -16,6 +16,8 @@ name: Publish to PyPI
 # pending-trusted-publisher bootstrap, etc.).
 
 on:
+
+permissions: {}
   push:
     branches: [main]
   workflow_dispatch:

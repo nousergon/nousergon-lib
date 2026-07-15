@@ -14,6 +14,8 @@ name: Tests
 # time rather than consumer-side.
 
 on:
+
+permissions: {}
   pull_request:
     branches: [main]
   push:
