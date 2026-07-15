@@ -183,8 +183,15 @@ def build_factor_returns_series(
         f_panel[i] = f_t
         eps_panel[i] = residuals
 
-    factor_returns_df = pd.DataFrame(f_panel, index=dates, columns=col_names)
-    residuals_df = pd.DataFrame(eps_panel, index=dates, columns=tickers)
+    # pd.Index(...) wraps (rather than passing the raw list) because
+    # pandas' DataFrame(index=..., columns=...) stub types the parameter
+    # as Axes, and a plain list[T] fails its SequenceNotStr structural
+    # check (list.index()'s parameter variance isn't compatible with the
+    # protocol's Any-typed index() as pyright checks it) — pandas itself
+    # wraps list args in pd.Index internally, so this is a no-op at
+    # runtime.
+    factor_returns_df = pd.DataFrame(f_panel, index=pd.Index(dates), columns=pd.Index(col_names))
+    residuals_df = pd.DataFrame(eps_panel, index=pd.Index(dates), columns=pd.Index(tickers))
     return factor_returns_df, residuals_df
 
 
@@ -232,7 +239,7 @@ def estimate_factor_covariance(
             "estimate_factor_covariance: only %d clean rows (need ≥%d) — "
             "returning all-NaN F", len(clean), min_obs,
         )
-        return pd.DataFrame(np.full((K, K), np.nan), index=cols, columns=cols)
+        return pd.DataFrame(np.full((K, K), np.nan), index=pd.Index(cols), columns=pd.Index(cols))
 
     if shrinkage == "ledoit_wolf":
         # Single shared Ledoit-Wolf estimator (LV1-AE.a, 2026-06-03). The numpy
@@ -251,7 +258,7 @@ def estimate_factor_covariance(
         F = np.cov(clean.to_numpy(), rowvar=False)
     else:
         raise ValueError(f"Unknown shrinkage: {shrinkage!r}")
-    return pd.DataFrame(F, index=cols, columns=cols)
+    return pd.DataFrame(F, index=pd.Index(cols), columns=pd.Index(cols))
 
 
 def estimate_idiosyncratic_variance(
