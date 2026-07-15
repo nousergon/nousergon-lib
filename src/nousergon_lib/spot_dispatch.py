@@ -26,7 +26,7 @@ import time
 
 import boto3
 from nousergon_lib import ec2_spot
-from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError  # noqa: F401 - re-exported for callers
+from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue] - ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't see through the dynamic rebind, verified correct at runtime
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +72,22 @@ def launch_with_fallback(
         tag_name=tag_name,
         region=region,
     )
+    # ec2_spot.launch(...) below: ec2_spot.py is a sys.modules rebind shim
+    # to krepis.ec2_spot; pyright can't see through the dynamic rebind,
+    # verified correct at runtime — see the ignore-reason on the import
+    # above.
     if force_on_demand:
         logger.warning("force_on_demand set — launching ON-DEMAND directly")
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
         return iid, "on-demand"
     try:
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=True, **common)
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=True, **common)  # pyright: ignore[reportAttributeAccessIssue]
         return iid, "spot"
     except SpotCapacityExhausted:
         logger.warning(
             "spot capacity exhausted across all type×subnet pools — relaunching ON-DEMAND"
         )
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
         return iid, "on-demand"
 
 
