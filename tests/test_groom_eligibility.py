@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 
 from nousergon_lib.groom_eligibility import (
-    CI_EXPECTED_RED_LABEL,
-    expected_red_labels_for_checks,
     BUNDLED_FILTERS,
+    CI_EXPECTED_RED_LABEL,
     GATE_SOFT_EXCLUDE_LABELS,
     TIER_MODELS,
     VALID_ISSUE_FILTERS,
     decide_slot,
+    expected_red_labels_for_checks,
     filter_for_tiers,
     filter_tiers,
     is_actionable,
