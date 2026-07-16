@@ -79,12 +79,12 @@ than replaces for the checks ``price_validator`` already owns).
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Iterable, Literal, Mapping, Sequence, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
-
 from krepis.trading_calendar import is_trading_day, previous_trading_day
 
 GateName = Literal[
