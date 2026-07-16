@@ -23,7 +23,6 @@ from pathlib import Path
 
 import nousergon_lib
 
-
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 

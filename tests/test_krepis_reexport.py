@@ -55,6 +55,7 @@ def test_model_metadata_is_the_shared_krepis_object():
     """ModelMetadata was lifted into krepis; decision_capture (which stays in
     nousergon_lib) re-imports it, so both paths yield the same class."""
     from krepis.model_metadata import ModelMetadata as via_krepis
+
     from nousergon_lib.decision_capture import ModelMetadata as via_decision_capture
 
     assert via_decision_capture is via_krepis

@@ -39,9 +39,9 @@ from __future__ import annotations
 
 import io
 import tokenize
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping
 
 __all__ = [
     "WIDE_OUTCOME_COLUMNS",
@@ -253,4 +253,4 @@ def assert_burndown(
             assert_burndown(REPO_ROOT, migrating=_MIGRATING, exempt=_EXEMPT)
     """
     report = check_burndown(repo_root, migrating, exempt, columns, exclude_prefixes)
-    assert report.ok, report.message()
+    assert report.ok, report.message()  # noqa: S101 -- deliberate AssertionError-raising test-helper API, see docstring

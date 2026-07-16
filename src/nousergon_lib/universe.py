@@ -24,7 +24,8 @@ impossible by construction: both consumers go through one code path.
 
 from __future__ import annotations
 
-from typing import AbstractSet, Callable, Iterable, TypeVar
+from collections.abc import Iterable, Set
+from typing import Callable, TypeVar
 
 T = TypeVar("T")
 
@@ -46,7 +47,7 @@ def _default_key(item: object) -> str | None:
 
 def filter_to_universe(
     items: Iterable[T],
-    universe: AbstractSet[str],
+    universe: Set[str],
     *,
     key: Callable[[T], str | None] | None = None,
 ) -> tuple[list[T], list[T]]:
@@ -78,6 +79,6 @@ def filter_to_universe(
     return kept, dropped
 
 
-def in_universe(ticker: str | None, universe: AbstractSet[str]) -> bool:
+def in_universe(ticker: str | None, universe: Set[str]) -> bool:
     """Predicate — ``True`` iff ``ticker`` is a non-empty string in ``universe``."""
     return isinstance(ticker, str) and bool(ticker) and ticker in universe

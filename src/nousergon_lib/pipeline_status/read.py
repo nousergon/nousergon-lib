@@ -33,16 +33,15 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any, Mapping, NoReturn, Optional, Sequence, Union, cast
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .registry import (
     PIPELINE_LABELS,
-    SUBSTANTIVE_RESOURCES,
     WAIT_GROUPING,
     ArchivePageRef,
     ArtifactReason,
@@ -154,9 +153,9 @@ class TaskRow(BaseModel):
 
     state_name: str
     status: TaskStatus
-    start_utc: Optional[datetime] = None
-    end_utc: Optional[datetime] = None
-    duration_sec: Optional[float] = None
+    start_utc: datetime | None = None
+    end_utc: datetime | None = None
+    duration_sec: float | None = None
     # Either an ArchivePageRef (deep-link) OR an ArtifactReason (explicit
     # substrate-only reason). ``None`` here means "state name not in the
     # registry" and is a CI-time bug — the consumer should treat it as a
@@ -170,13 +169,8 @@ class TaskRow(BaseModel):
     # left it as a plain dict — page-25's ``isinstance`` checks then
     # misfired and rendered "Registry drift" for every state, even those
     # with valid registry entries.
-    archive: Optional[
-        Annotated[
-            Union[ArchivePageRef, ArtifactReason],
-            Field(discriminator="kind"),
-        ]
-    ] = None
-    failure_cause: Optional[str] = None  # populated only when status == FAILED
+    archive: Annotated[ArchivePageRef | ArtifactReason, Field(discriminator="kind")] | None = None
+    failure_cause: str | None = None  # populated only when status == FAILED
 
 
 class PipelineRun(BaseModel):
@@ -186,15 +180,15 @@ class PipelineRun(BaseModel):
 
     state_machine_arn: str
     pretty_label: str  # "Weekly Freshness SF" / "Pre-open Trading SF" / "Post-close Trading SF" — from registry
-    execution_arn: Optional[str] = None  # None iff status == NOT_RUN
-    execution_name: Optional[str] = None  # human-readable execution id
+    execution_arn: str | None = None  # None iff status == NOT_RUN
+    execution_name: str | None = None  # human-readable execution id
     status: RunStatus
-    start_utc: Optional[datetime] = None
-    end_utc: Optional[datetime] = None
-    duration_sec: Optional[float] = None
+    start_utc: datetime | None = None
+    end_utc: datetime | None = None
+    duration_sec: float | None = None
     tasks: list[TaskRow] = Field(default_factory=list)
-    failing_state: Optional[str] = None  # populated only when status == FAILED
-    failure_cause: Optional[str] = None  # populated only when status == FAILED
+    failing_state: str | None = None  # populated only when status == FAILED
+    failure_cause: str | None = None  # populated only when status == FAILED
     # The ``pipeline_role`` carried on this execution's input JSON
     # (e.g. "weekly" / "daily" / "eod" / "smoke" / "recovery" /
     # "shell-run" / "backfill" / "operator-replay"). None when the input
@@ -203,7 +197,7 @@ class PipelineRun(BaseModel):
     # The dashboard exposes this in the section header so the operator
     # always knows whether they're looking at the canonical cadence run
     # or a smoke / recovery overlay.
-    pipeline_role: Optional[str] = None
+    pipeline_role: str | None = None
 
 
 class PipelineExecutionSummary(BaseModel):
@@ -225,9 +219,9 @@ class PipelineExecutionSummary(BaseModel):
     name: str
     status: RunStatus
     start_utc: datetime
-    end_utc: Optional[datetime] = None
-    duration_sec: Optional[float] = None
-    pipeline_role: Optional[str] = None
+    end_utc: datetime | None = None
+    duration_sec: float | None = None
+    pipeline_role: str | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -239,7 +233,7 @@ def _label_for_arn(state_machine_arn: str) -> str:
     return PIPELINE_LABELS.get(sm_name, sm_name or "Unknown SF")
 
 
-def _region_from_arn(state_machine_arn: str) -> Optional[str]:
+def _region_from_arn(state_machine_arn: str) -> str | None:
     """Extract the AWS region from a Step Functions ARN.
 
     ARN shape: ``arn:aws:states:<region>:<account>:stateMachine:<name>``.
@@ -282,7 +276,7 @@ def _failure_cause_from(describe_resp: Mapping[str, Any]) -> str:
     return snippet
 
 
-def _parse_ts(value: Any) -> Optional[datetime]:
+def _parse_ts(value: Any) -> datetime | None:
     """Normalize boto3's datetime values to UTC.
 
     boto3 returns ``datetime`` objects with offset-aware ``tzinfo`` (usually
@@ -361,7 +355,7 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
             if len(snippet) > _CAUSE_MAX_CHARS:
                 snippet = snippet[: _CAUSE_MAX_CHARS - 1] + "…"
             # Attach to the most-recent state that entered without exiting.
-            for sn, rec in reversed(list(by_state.items())):
+            for _sn, rec in reversed(list(by_state.items())):
                 if rec.get("end") is None:
                     rec["status"] = TaskStatus.FAILED
                     rec["cause"] = snippet
@@ -404,7 +398,7 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
 
         start = rec["start"]
         end = rec["end"]
-        duration: Optional[float] = None
+        duration: float | None = None
         if start is not None and end is not None:
             duration = (end - start).total_seconds()
 
@@ -427,7 +421,7 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
     return rows
 
 
-def _failing_state_from_history(history_events: Sequence[Mapping[str, Any]]) -> Optional[str]:
+def _failing_state_from_history(history_events: Sequence[Mapping[str, Any]]) -> str | None:
     """Identify the state that emitted TaskFailed (or ExecutionFailed) first."""
     for event in history_events:
         etype = event.get("type", "")
@@ -468,7 +462,7 @@ _DEFAULT_ROLE_SEARCH_LIMIT = 50
 _LIST_EXECUTIONS_PAGE_SIZE = 25
 
 
-def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> Optional[str]:
+def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> str | None:
     """Parse ``input.pipeline_role`` from a DescribeExecution response.
 
     DescribeExecution returns ``input`` as a JSON-encoded string. The
@@ -508,7 +502,7 @@ def _build_pipeline_run_from_execution_arn(
     execution_arn: str,
     state_machine_arn: str,
     *,
-    client: "SFNClient",
+    client: SFNClient,
 ) -> PipelineRun:
     """Project a known execution ARN onto a typed :class:`PipelineRun`.
 
@@ -533,14 +527,14 @@ def _build_pipeline_run_from_execution_arn(
     status_str = describe_resp.get("status", "RUNNING")
     try:
         run_status = RunStatus(status_str)
-    except ValueError:
+    except ValueError as exc:
         raise PipelineStatusError(
             f"Unknown SF execution status {status_str!r} from boto3 for {execution_arn}"
-        )
+        ) from exc
 
     start_utc = _parse_ts(describe_resp.get("startDate"))
     end_utc = _parse_ts(describe_resp.get("stopDate"))
-    duration: Optional[float] = None
+    duration: float | None = None
     if start_utc is not None and end_utc is not None:
         duration = (end_utc - start_utc).total_seconds()
 
@@ -584,9 +578,9 @@ def _find_execution_matching_role(
     state_machine_arn: str,
     role_filter: set[str],
     *,
-    client: "SFNClient",
+    client: SFNClient,
     search_limit: int,
-) -> Optional[tuple[str, Optional[str]]]:
+) -> tuple[str, str | None] | None:
     """Walk ListExecutions pages until finding an execution whose
     ``input.pipeline_role`` ∈ ``role_filter``, or until ``search_limit``
     executions have been inspected.
@@ -602,7 +596,7 @@ def _find_execution_matching_role(
     page) or a "no execution matches filter" fallback signal.
     """
     inspected = 0
-    next_token: Optional[str] = None
+    next_token: str | None = None
     while inspected < search_limit:
         kwargs: dict[str, Any] = {
             "stateMachineArn": state_machine_arn,
@@ -644,10 +638,10 @@ def _find_execution_matching_role(
 def read_pipeline_state(
     state_machine_arn: str,
     *,
-    role_filter: Optional[set[str]] = None,
+    role_filter: set[str] | None = None,
     search_limit: int = _DEFAULT_ROLE_SEARCH_LIMIT,
-    execution_arn: Optional[str] = None,
-    client: Optional["SFNClient"] = None,
+    execution_arn: str | None = None,
+    client: SFNClient | None = None,
 ) -> PipelineRun:
     """Project the chosen execution of ``state_machine_arn`` onto a typed
     :class:`PipelineRun`.
@@ -759,8 +753,8 @@ def list_recent_pipeline_runs(
     state_machine_arn: str,
     *,
     limit: int = 10,
-    role_filter: Optional[set[str]] = None,
-    client: Optional["SFNClient"] = None,
+    role_filter: set[str] | None = None,
+    client: SFNClient | None = None,
 ) -> list[PipelineExecutionSummary]:
     """Return lightweight summaries of the most-recent N executions.
 
@@ -804,7 +798,7 @@ def list_recent_pipeline_runs(
     walk_cap = limit if role_filter is None else min(limit * 5, _DEFAULT_ROLE_SEARCH_LIMIT)
     summaries: list[PipelineExecutionSummary] = []
     inspected = 0
-    next_token: Optional[str] = None
+    next_token: str | None = None
 
     while len(summaries) < limit and inspected < walk_cap:
         kwargs: dict[str, Any] = {
@@ -836,13 +830,13 @@ def list_recent_pipeline_runs(
             status_str = describe_resp.get("status", "RUNNING")
             try:
                 status = RunStatus(status_str)
-            except ValueError:
+            except ValueError as exc:
                 raise PipelineStatusError(
                     f"Unknown SF execution status {status_str!r} from boto3 for {execution_arn}"
-                )
+                ) from exc
             start_utc = _parse_ts(describe_resp.get("startDate"))
             end_utc = _parse_ts(describe_resp.get("stopDate"))
-            duration: Optional[float] = None
+            duration: float | None = None
             if start_utc is not None and end_utc is not None:
                 duration = (end_utc - start_utc).total_seconds()
             if start_utc is None:
