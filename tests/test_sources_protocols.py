@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -22,7 +21,6 @@ from nousergon_lib.sources import (
     NewsArticle,
     NewsSource,
 )
-
 
 # ── NewsArticle ────────────────────────────────────────────────────────
 
@@ -213,6 +211,7 @@ def test_lib_version_bumped_to_0_15_0():
     Asserts >= so future version bumps don't break this gate while
     still catching accidental version regressions below 0.15.0."""
     from packaging.version import Version
+
     import nousergon_lib
     assert Version(nousergon_lib.__version__) >= Version("0.15.0")
 

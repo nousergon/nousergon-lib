@@ -31,6 +31,7 @@ Public surface: ``PhaseStatus``, ``PhaseOutcome``, ``PhaseRegistry``,
 
 from __future__ import annotations
 
+import _thread
 import enum
 import faulthandler
 import json
@@ -38,12 +39,12 @@ import logging
 import sys
 import threading
 import time
-import _thread
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 import boto3
 import yaml

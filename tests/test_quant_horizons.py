@@ -7,6 +7,8 @@ Pure stdlib module; no extra required. Pins the wide-column naming convention
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from nousergon_lib.quant import horizons
@@ -168,5 +170,5 @@ class TestHorizonPolicy:
             DEFAULT_POLICY.with_overrides(diagnostic_horizons=(21,))
 
     def test_frozen(self):
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             DEFAULT_POLICY.primary_horizon = 5  # type: ignore[misc]

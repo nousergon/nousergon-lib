@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
@@ -469,6 +468,7 @@ def test_check_deploy_drift_warns_and_passes_on_github_outage(tmp_path):
 
 def test_fetch_origin_main_sha_returns_none_on_url_error():
     import urllib.error
+
     from nousergon_lib.preflight import _fetch_origin_main_sha
     with mock.patch(
         "urllib.request.urlopen",

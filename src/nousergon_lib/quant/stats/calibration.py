@@ -31,7 +31,7 @@ either array are dropped before binning.
 
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+from typing import TypedDict
 
 import numpy as np
 
@@ -47,7 +47,7 @@ class ECEResult(TypedDict, total=False):
     status: str          # "ok" | "insufficient_data" | "no_data"
     n: int               # samples contributing to ece (after min_bin_n drops)
     n_total: int         # valid (prob, label) pairs after NaN filtering
-    ece: Optional[float]  # sample-weighted mean |mean_pred - hit_rate|; None if no usable bin
+    ece: float | None  # sample-weighted mean |mean_pred - hit_rate|; None if no usable bin
     n_bins_used: int
     bins: list[_BinRecord]
     dropped_bins: list[_BinRecord]

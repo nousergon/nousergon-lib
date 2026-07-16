@@ -29,7 +29,6 @@ from nousergon_lib.pipeline_status import (
     SFNAccessDenied,
     SFNNoExecutions,
     SFNThrottled,
-    TaskRow,
     TaskStatus,
     list_recent_pipeline_runs,
     read_pipeline_state,
@@ -46,7 +45,6 @@ from nousergon_lib.pipeline_status.registry import (
     ArchivePageRef,
     ArtifactReason,
 )
-
 
 SATURDAY_ARN = (
     "arn:aws:states:us-east-1:711398986525:stateMachine:ne-weekly-freshness-pipeline"
@@ -591,7 +589,7 @@ def test_extract_pipeline_role_empty_string_returns_none():
 # ── Role filter + execution_arn paths in read_pipeline_state ──────────────
 
 
-def _make_describe_response(*, status="SUCCEEDED", role: Optional[str] = None) -> dict:
+def _make_describe_response(*, status="SUCCEEDED", role: str | None = None) -> dict:
     """Build a DescribeExecution response carrying an optional
     pipeline_role on the input JSON. Default times preserved."""
     body: dict = {

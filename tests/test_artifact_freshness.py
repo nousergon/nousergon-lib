@@ -37,8 +37,8 @@ from unittest import mock
 import pytest
 
 from nousergon_lib.artifact_freshness import (
-    ArtifactSpec,
     CADENCE_SYMBOLS,
+    ArtifactSpec,
     CheckResult,
     CycleCompletion,
     DependencyGraph,
@@ -51,22 +51,21 @@ from nousergon_lib.artifact_freshness import (
     resolve_dedup_key,
 )
 
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
 def _spec(**overrides) -> ArtifactSpec:
     """Build a baseline saturday_sf spec. Override fields per-test."""
-    defaults = dict(
-        artifact_id="test_artifact",
-        s3_bucket="bkt",
-        s3_key_template="path/{date}/file.json",
-        cadence="saturday_sf",
-        sla_minutes_after_cron=180,  # 3hr after Sat 09:00 UTC = 12:00 UTC
-        severity="warning",
-        owner_repo="alpha-engine-test",
-        created_at=date(2025, 1, 1),  # ancient — past any grace
-    )
+    defaults = {
+        "artifact_id": "test_artifact",
+        "s3_bucket": "bkt",
+        "s3_key_template": "path/{date}/file.json",
+        "cadence": "saturday_sf",
+        "sla_minutes_after_cron": 180,  # 3hr after Sat 09:00 UTC = 12:00 UTC
+        "severity": "warning",
+        "owner_repo": "alpha-engine-test",
+        "created_at": date(2025, 1, 1),  # ancient — past any grace
+    }
     defaults.update(overrides)
     return ArtifactSpec(**defaults)
 
@@ -804,18 +803,18 @@ def _open_orders_spec(**overrides) -> ArtifactSpec:
     """A continuous, fixed-key spec modelling the executor daemon's
     ``trades/open_orders/latest.json`` snapshot — written every ~30min
     ONLY while paper-trading during the NYSE session."""
-    defaults = dict(
-        artifact_id="open_orders_latest",
-        s3_bucket="bkt",
-        s3_key_template="trades/open_orders/latest.json",
-        cadence="continuous",
-        interval_minutes=30,
-        sla_minutes_after_cron=15,
-        severity="warning",
-        owner_repo="alpha-engine",
-        created_at=date(2025, 1, 1),
-        active_hours_utc=[14, 21],
-    )
+    defaults = {
+        "artifact_id": "open_orders_latest",
+        "s3_bucket": "bkt",
+        "s3_key_template": "trades/open_orders/latest.json",
+        "cadence": "continuous",
+        "interval_minutes": 30,
+        "sla_minutes_after_cron": 15,
+        "severity": "warning",
+        "owner_repo": "alpha-engine",
+        "created_at": date(2025, 1, 1),
+        "active_hours_utc": [14, 21],
+    }
     defaults.update(overrides)
     return ArtifactSpec(**defaults)
 
@@ -916,18 +915,18 @@ def _daily_health_spec(**overrides) -> ArtifactSpec:
     """A continuous, fixed-key DAILY (1440) spec modelling
     ``health/daily_data.json`` — written on each weekday + Weekly Freshness SF run,
     never on Sunday. The 2026-06-28 false-positive subject."""
-    defaults = dict(
-        artifact_id="health_alpha_engine_data",
-        s3_bucket="bkt",
-        s3_key_template="health/daily_data.json",
-        cadence="continuous",
-        interval_minutes=1440,
-        sla_minutes_after_cron=60,
-        severity="warning",
-        owner_repo="alpha-engine-data",
-        created_at=date(2025, 1, 1),
-        run_calendar="trading_days",
-    )
+    defaults = {
+        "artifact_id": "health_alpha_engine_data",
+        "s3_bucket": "bkt",
+        "s3_key_template": "health/daily_data.json",
+        "cadence": "continuous",
+        "interval_minutes": 1440,
+        "sla_minutes_after_cron": 60,
+        "severity": "warning",
+        "owner_repo": "alpha-engine-data",
+        "created_at": date(2025, 1, 1),
+        "run_calendar": "trading_days",
+    }
     defaults.update(overrides)
     return ArtifactSpec(**defaults)
 
@@ -1113,12 +1112,12 @@ class TestBuildDependencyGraph:
 
 def _event_spec(**overrides) -> ArtifactSpec:
     """An event_driven config-row spec with a proxy liveness anchor."""
-    defaults = dict(
-        cadence="event_driven",
-        liveness_via="optimizer_run_report",
+    defaults = {
+        "cadence": "event_driven",
+        "liveness_via": "optimizer_run_report",
         # event_driven rows never self-page; grace/interval are moot.
-        grace_period_cycles=0,
-    )
+        "grace_period_cycles": 0,
+    }
     defaults.update(overrides)
     return _spec(**defaults)
 

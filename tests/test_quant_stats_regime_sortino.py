@@ -36,7 +36,6 @@ from nousergon_lib.quant.stats.regime_sortino import (
     stratified_sortino_by_regime,
 )
 
-
 # ---------------------------------------------------------------------------
 # Arithmetic → log alpha conversion (canonical framework)
 # (The SQLite loader `load_with_subscores_and_regime` stays in the consumer
