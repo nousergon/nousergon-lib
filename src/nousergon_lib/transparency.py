@@ -47,7 +47,10 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -425,12 +428,17 @@ def _check_s3_csv(
                 # both 'YYYY-MM-DD' and ISO timestamps.
                 d_col = pd.to_datetime(df[date_col], errors="coerce").dt.date
                 mask = d_col > threshold
-                sub = df[mask]
+                # Boolean-mask row selection on a DataFrame always returns
+                # a DataFrame; pyright's inference widens to
+                # Series|DataFrame (and, on the second reassignment,
+                # ndarray too) because DataFrame.__getitem__'s stub
+                # overloads also cover scalar/list-label column selection.
+                sub = cast("pd.DataFrame", df[mask])
                 if action_filter:
                     a_col = action_filter["column"]
                     a_val = action_filter["equals"]
                     if a_col in sub.columns:
-                        sub = sub[sub[a_col] == a_val]
+                        sub = cast("pd.DataFrame", sub[sub[a_col] == a_val])
                 if not sub.empty:
                     for col in cols:
                         if col not in sub.columns:

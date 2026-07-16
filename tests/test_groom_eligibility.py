@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from nousergon_lib.groom_eligibility import (
+    CI_EXPECTED_RED_LABEL,
+    expected_red_labels_for_checks,
     BUNDLED_FILTERS,
     GATE_SOFT_EXCLUDE_LABELS,
     SlotDecision,
@@ -68,6 +70,15 @@ class TestGateExclusion:
         assert is_actionable(["complexity:low"]) == "low"
         assert is_actionable(["complexity:low", "gate:operator"]) is None
         assert is_actionable(["complexity:ultra"]) is None
+
+    def test_milestone_gate_is_soft_excluded_unless_due(self):
+        # config#2519: event-driven gate — never gets gate-due in practice
+        # (gate_milestone_sweep.py auto-clears directly), but the SOFT
+        # exclusion semantics (excluded unless gate-due) still apply for
+        # consistency with the other auto-clearing gate classes.
+        assert "gate:milestone" in GATE_SOFT_EXCLUDE_LABELS
+        assert is_gate_excluded(["gate:milestone"])
+        assert not is_gate_excluded(["gate:milestone", "gate-due"])
 
 
 class TestFilterGrammar:
@@ -283,3 +294,20 @@ class TestFreshSkipConstantsContract:
     def test_engaged_dispositions_matches_driver_value(self):
         from nousergon_lib.groom_eligibility import ENGAGED_DISPOSITIONS
         assert ENGAGED_DISPOSITIONS == ("closed", "pr_opened", "commented", "labeled")
+
+
+class TestCiExpectedRed:
+    def test_expected_check_returns_label(self):
+        result = expected_red_labels_for_checks(["iam-drift"])
+        assert result == [CI_EXPECTED_RED_LABEL]
+
+    def test_unknown_check_returns_empty(self):
+        result = expected_red_labels_for_checks(["iam-drift", "ci.yml"])
+        assert result == []
+
+    def test_empty_input_returns_empty(self):
+        result = expected_red_labels_for_checks([])
+        assert result == []
+
+    def test_label_outside_gate_namespace(self):
+        assert not CI_EXPECTED_RED_LABEL.startswith("gate:")

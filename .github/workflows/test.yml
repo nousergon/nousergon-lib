@@ -28,7 +28,7 @@ jobs:
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v6
@@ -64,12 +64,48 @@ jobs:
       - name: Run pytest
         run: python -m pytest -q
 
+  # Basic-mode pyright, pinned to the 3.9 floor (config#2534). One pinned
+  # run rather than a 3.9-3.13 matrix: 3.9 is where PEP604-class regressions
+  # actually surface (see the origin note above) — a full matrix would 5x
+  # the CI cost here for no extra signal, since 3.10+ is strictly more
+  # permissive for the union-syntax class of bug this workflow exists to
+  # catch. Blocking: nousergon-lib is the shared contract surface ~10 repos
+  # import, so a type regression here propagates fleet-wide.
+  pyright:
+    name: pyright (basic, py3.9)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + extras + pyright
+        # Same extras as the pytest job (see its install-step comment for
+        # the per-extra rationale) plus [type-check] — the mypy-boto3-stepfunctions
+        # stub-only package pipeline_status/read.py's TYPE_CHECKING import
+        # needs to resolve SFNClient. [rerank]/[flow_doctor] stay excluded
+        # (heavy torch/transformers + flow-doctor glue, deferred at runtime
+        # and unresolved-import-ignored in the two call sites that touch
+        # them — see rag/rerank.py).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,type-check]"
+          pip install pyright
+
+      - name: Run pyright
+        run: pyright
+
   # Alert (Telegram) ONLY on genuine post-merge breakage of the default
   # branch. PR-branch reds (mid-fix commits, cross-repo lib-tag merge-order
   # races) stay silent. Reusable workflow + transport in nousergon-lib.
   # See alpha-engine-config#1128.
   notify-main-failure:
-    needs: [test]
+    needs: [test, pyright]
     if: ${{ failure() && github.ref == 'refs/heads/main' }}
     uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@main
     secrets: inherit

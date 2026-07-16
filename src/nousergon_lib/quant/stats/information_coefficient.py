@@ -17,7 +17,7 @@ numpy rank-then-Pearson fallback gives the identical IC with no p-value.
 from __future__ import annotations
 
 import logging
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 
 import numpy as np
 import pandas as pd
@@ -105,7 +105,10 @@ def compute_ic(
     try:
         from scipy.stats import spearmanr  # type: ignore[import-not-found]
 
-        result = spearmanr(c, r)
+        # scipy ships no py.typed marker, so spearmanr's return type is
+        # opaque to pyright; it actually returns a SignificanceResult
+        # (statistic + pvalue attributes) at runtime.
+        result = cast(Any, spearmanr(c, r))
         ic = float(result.statistic)
         p_value = float(result.pvalue)
     except Exception:
@@ -143,7 +146,14 @@ def compute_ic_by_bucket(
             raise KeyError(f"column {col!r} not in dataframe")
     out: dict[str, ICResult] = {}
     for bucket_value, sub in df.groupby(bucket_col):
+        # conviction_col / return_col are plain str (not literals), so
+        # pyright can't statically rule out DataFrame.__getitem__'s
+        # duplicate-column-label overload; both were confirmed present in
+        # df.columns above, so this is always single-column Series
+        # selection.
         out[str(bucket_value)] = compute_ic(
-            sub[conviction_col], sub[return_col], min_samples=min_samples,
+            cast("pd.Series", sub[conviction_col]),
+            cast("pd.Series", sub[return_col]),
+            min_samples=min_samples,
         )
     return out
