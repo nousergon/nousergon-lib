@@ -3,8 +3,6 @@ tradeability percentile."""
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from nousergon_lib.quant.transaction_cost import (

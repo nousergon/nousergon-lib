@@ -11,19 +11,17 @@ from __future__ import annotations
 
 import importlib
 
-import pytest
-
 
 def test_top_level_imports_resolve():
     """All advertised re-exports should be importable from the top level."""
     from nousergon_lib.rag import (
         coerce_embedding,
-        get_connection,
-        is_available,
-        embed_texts,
-        retrieve,
-        ingest_document,
         document_exists,
+        embed_texts,
+        get_connection,
+        ingest_document,
+        is_available,
+        retrieve,
     )
 
     # Verify the re-exports are callables (or at minimum, attributes — we
@@ -132,8 +130,8 @@ def test_no_bare_rag_imports_in_lib():
     real ingestion run. Catch the class statically — walk every module file
     in the rag submodule and assert no `^\\s*(from|import)\\s+rag\\.` lines.
     """
-    import re
     import importlib.resources as ir
+    import re
 
     pattern = re.compile(r"^\s*(from|import)\s+rag\.", re.MULTILINE)
     rag_files = ir.files("nousergon_lib.rag")

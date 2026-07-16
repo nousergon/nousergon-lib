@@ -27,10 +27,9 @@ how the two stay in sync without a runtime coupling.
 
 from __future__ import annotations
 
-from typing import Annotated, Final, Literal, Optional, Union
+from typing import Annotated, Final, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ── Substantive-state filtering (§3.2 of the plan doc) ────────────────────
 
@@ -186,7 +185,7 @@ RegistryEntry = Annotated[
 # (Saturday 89 / Weekday 36 / EOD 21 total states; nested Parallel branches
 # walked). Reviewed against ROADMAP L3050 + the post-2026-05-15
 # artifact-archive pages (dashboard #86: pages 16-22).
-STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] = {
+STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     # ── Weekly Freshness SF (27 substantive Task steps) ──────────────────────────
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
@@ -716,7 +715,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
 }
 
 
-def lookup_registry(state_name: str) -> Optional[Union[ArchivePageRef, ArtifactReason]]:
+def lookup_registry(state_name: str) -> ArchivePageRef | ArtifactReason | None:
     """Return the registry entry for ``state_name`` (None if absent).
 
     ``None`` here signals "this state is not in the registry" — distinct

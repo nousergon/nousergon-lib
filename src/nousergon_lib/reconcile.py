@@ -25,8 +25,9 @@ lazily inside the function, mirroring the arcticdb module's contract).
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Mapping, Optional, Sequence, Tuple, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
@@ -45,11 +46,11 @@ class ParityReport:
     common: frozenset
     rowcount_deltas: Mapping[str, int]  # ticker -> len(a)-len(b), nonzero only
     max_abs_value_delta: float
-    worst_cell: Optional[Tuple[str, str, str]]  # (ticker, column, iso-date)
+    worst_cell: tuple[str, str, str] | None  # (ticker, column, iso-date)
     n_cells_over_epsilon: int
     n_cells_compared: int
     epsilon: float
-    value_cols: Tuple[str, ...]
+    value_cols: tuple[str, ...]
     require_ticker_match: bool
     require_rowcount_match: bool
 
@@ -110,8 +111,8 @@ class ParityReport:
 
 
 def reconcile_frame_dicts(
-    a: Mapping[str, "pd.DataFrame"],
-    b: Mapping[str, "pd.DataFrame"],
+    a: Mapping[str, pd.DataFrame],
+    b: Mapping[str, pd.DataFrame],
     *,
     value_cols: Sequence[str] = ("Close",),
     epsilon: float = 1e-6,
@@ -146,7 +147,7 @@ def reconcile_frame_dicts(
 
     rowcount_deltas: dict = {}
     max_abs = 0.0
-    worst_cell: Optional[Tuple[str, str, str]] = None
+    worst_cell: tuple[str, str, str] | None = None
     n_over = 0
     n_compared = 0
     cols = tuple(value_cols)
@@ -190,10 +191,11 @@ def reconcile_frame_dicts(
                 if cell_max > max_abs:
                     max_abs = cell_max
                     worst_dt = valid.idxmax()
+                    isoformat = getattr(worst_dt, "isoformat", None)
                     worst_cell = (
                         ticker,
                         col,
-                        getattr(worst_dt, "isoformat", lambda: str(worst_dt))(),
+                        isoformat() if isoformat is not None else str(worst_dt),
                     )
 
     return ParityReport(
