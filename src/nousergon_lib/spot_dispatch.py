@@ -27,11 +27,7 @@ import time
 import boto3
 from krepis import alerts
 from nousergon_lib import ec2_spot
-from nousergon_lib.ec2_spot import (  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue] - ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't see through the dynamic rebind, verified correct at runtime
-    SpotCapacityExhausted,
-    SpotLaunchError,
-    SpotQuotaExceededError,
-)
+from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError, SpotQuotaExceededError  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue] - ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't see through the dynamic rebind, verified correct at runtime
 
 logger = logging.getLogger(__name__)
 
