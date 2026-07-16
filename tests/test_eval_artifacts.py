@@ -13,14 +13,17 @@ Validates the canonical eval-style artifact partition convention:
 """
 from __future__ import annotations
 
+import io as _io
+import json as _json
 from datetime import datetime, timezone
-
-import pytest
+from unittest.mock import MagicMock as _MagicMock
 
 from nousergon_lib.eval_artifacts import (
     EVAL_LATEST_FILENAME,
     eval_artifact_key,
     eval_latest_key,
+    list_eval_artifacts,
+    load_latest_eval_artifact,
     new_eval_run_id,
 )
 
@@ -159,16 +162,6 @@ class TestEvalLatestKey:
 
 
 # ─ Reader tests ──────────────────────────────────────────────────────
-
-
-import io as _io
-import json as _json
-from unittest.mock import MagicMock as _MagicMock
-
-from nousergon_lib.eval_artifacts import (
-    list_eval_artifacts,
-    load_latest_eval_artifact,
-)
 
 
 class _FakeS3:

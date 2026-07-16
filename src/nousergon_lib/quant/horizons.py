@@ -44,8 +44,9 @@ the right chokepoint (EPIC config#1483 Phase 1).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping
+from typing import Any
 
 __all__ = [
     "PRIMARY_HORIZON",
@@ -225,7 +226,7 @@ class HorizonPolicy:
             )
 
     @classmethod
-    def from_mapping(cls, data: Mapping[str, Any]) -> "HorizonPolicy":
+    def from_mapping(cls, data: Mapping[str, Any]) -> HorizonPolicy:
         """Build a policy from a config mapping (the ratified YAML shape)::
 
             primary_horizon: 21
@@ -269,7 +270,7 @@ class HorizonPolicy:
             "label_definition": self.label.as_dict(),
         }
 
-    def with_overrides(self, **kwargs: Any) -> "HorizonPolicy":
+    def with_overrides(self, **kwargs: Any) -> HorizonPolicy:
         """Return a copy with fields replaced (re-runs validation)."""
         return replace(self, **kwargs)
 

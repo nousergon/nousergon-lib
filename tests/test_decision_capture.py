@@ -20,18 +20,17 @@ import pytest
 from moto import mock_aws
 
 from nousergon_lib.decision_capture import (
+    _INPUT_SNAPSHOT_DEFAULT_CAP_BYTES,
     DecisionArtifact,
     DecisionCaptureWriteError,
     FullPromptContext,
     ModelMetadata,
-    _INPUT_SNAPSHOT_DEFAULT_CAP_BYTES,
     _build_s3_key,
     _serialized_size,
     capture_decision,
     is_llm_decision,
     truncate_snapshot,
 )
-
 
 # ── ModelMetadata ─────────────────────────────────────────────────────────
 

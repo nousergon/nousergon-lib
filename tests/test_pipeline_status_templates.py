@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from nousergon_lib.pipeline_status import templates
 
-
 # ── format_success_message ────────────────────────────────────────────────
 
 

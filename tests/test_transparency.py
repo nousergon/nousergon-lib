@@ -9,19 +9,16 @@ import textwrap
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
-from nousergon_lib import transparency
 from nousergon_lib.transparency import (
-    CheckResult,
     INVENTORY_PATH,
+    CheckResult,
     check_inventory,
     emit_cloudwatch_metrics,
     format_report,
     load_inventory,
 )
-
 
 # ---------------------------------------------------------------------------
 # Stub clients

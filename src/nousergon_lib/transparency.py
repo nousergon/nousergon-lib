@@ -44,10 +44,11 @@ import os
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
