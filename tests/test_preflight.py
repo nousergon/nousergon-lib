@@ -564,6 +564,7 @@ def test_is_ancestor_false_on_url_error():
     known at this point, so an unresolved ancestry check must not
     silently pass a possibly-real drift."""
     import urllib.error
+
     from nousergon_lib.preflight import _is_ancestor
     with mock.patch(
         "urllib.request.urlopen",
