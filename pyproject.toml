@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.123.1"
+version = "0.123.2"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -45,6 +45,13 @@ quant = ["numpy>=1.24"]
 # separate from [quant] so the numpy-only consumers (e.g. robodashboard)
 # don't pull pandas+sklearn.
 quant-xs = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.0"]
+# Per-series L2 data-contract validation gates (nousergon_lib.series_contract
+# — alpha-engine-config#2456): schema/sanity/staleness/continuity/outlier/
+# calendar-monotonic checks over an OHLCV DataFrame. pandas-only (no numpy
+# API used directly; pandas vendors it) — kept as its own extra rather than
+# folded into [arcticdb] so a pure-validation consumer (predictor,
+# backtester) doesn't have to pull the ArcticDB C++ extension transitively.
+series-contract = ["pandas>=2.0"]
 # Statistical evaluation utilities (nousergon_lib.quant.stats — PSR/DSR, IC,
 # expectancy, BH-FDR, risk-matched benchmarks). numpy + pandas always; scipy is
 # used by information_coefficient for the p-value (numpy fallback otherwise).
