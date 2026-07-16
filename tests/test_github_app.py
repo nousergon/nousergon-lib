@@ -39,7 +39,7 @@ def rsa_keys():
     return pem, key.public_key()
 
 
-def _mint_response(token="ghs_testtoken", expires_at="2099-01-01T00:00:00Z"):
+def _mint_response(token="ghs_testtoken", expires_at="2099-01-01T00:00:00Z"):  # noqa: S107 -- test fixture value, not a credential
     body = json.dumps({"token": token, "expires_at": expires_at}).encode()
     resp = mock.MagicMock()
     resp.read.return_value = body

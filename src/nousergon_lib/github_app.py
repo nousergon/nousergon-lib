@@ -50,8 +50,19 @@ _ENV_OVERRIDES = {
 }
 _USER_AGENT = "nousergon-lib-github-app"
 
-_cache: dict[str, "InstallationToken"] = {}
+_cache: dict[str, InstallationToken] = {}
 _cache_lock = threading.Lock()
+
+
+def _safe_urlopen(req: urllib.request.Request, **kwargs):
+    """urlopen wrapper that fails loudly on any non-https scheme (S310:
+    bandit cannot statically prove the URL's scheme — mirrors
+    ``preflight._safe_urlopen``; the only call site builds the URL from the
+    https ``GITHUB_API`` default or a caller-supplied ``api`` base, and this
+    makes the https guarantee enforced at runtime)."""
+    if not req.full_url.startswith("https://"):
+        raise GitHubAppTokenError(f"refusing non-https URL: {req.full_url!r}")
+    return urllib.request.urlopen(req, **kwargs)  # noqa: S310 -- scheme validated above
 
 
 class GitHubAppTokenError(RuntimeError):
@@ -104,7 +115,10 @@ def mint_installation_token(
     """
     app_jwt = build_app_jwt(app_id, private_key_pem)
     url = f"{api}/app/installations/{installation_id}/access_tokens"
-    req = urllib.request.Request(
+    # S310 can't see through the ``api`` parameter indirection (kept for
+    # testability); constructing a Request does no I/O — the https scheme is
+    # enforced at runtime by _safe_urlopen below, mirroring preflight.py.
+    req = urllib.request.Request(  # noqa: S310 -- scheme validated in _safe_urlopen
         url,
         data=b"{}",
         method="POST",
@@ -116,7 +130,7 @@ def mint_installation_token(
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _safe_urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
