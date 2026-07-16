@@ -64,6 +64,7 @@ def launch_with_fallback(
     tag_name: str,
     region: str,
     force_on_demand: bool = False,
+    extra_tags: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Launch a box; spot first, on-demand fallback on SpotCapacityExhausted
     (or immediately on-demand if ``force_on_demand``, e.g. config#1645's
@@ -71,6 +72,15 @@ def launch_with_fallback(
     Returns ``(instance_id, market)`` where market is ``"spot"`` or
     ``"on-demand"``. Raises ``SpotLaunchError`` (or its
     ``SpotCapacityExhausted`` subclass) if every attempt is exhausted/fails.
+
+    ``extra_tags`` (config#2292, root fix for config#2267 site 2): additional
+    ``{key: value}`` instance tags threaded straight through to
+    :func:`krepis.ec2_spot.launch`, which merges them into the SAME
+    RunInstances ``TagSpecifications`` entry as ``tag_name`` — the box is
+    never observably untagged. Callers that previously wrote load-bearing
+    discriminator tags via a separate post-launch ``create_tags`` call (with
+    its own bounded retry) should pass them here instead and delete that
+    retry path entirely.
     """
     common = {
         "image_id": image_id,
@@ -80,6 +90,7 @@ def launch_with_fallback(
         "volume_size_gb": volume_size_gb,
         "shutdown_behavior": "terminate",
         "tag_name": tag_name,
+        "extra_tags": extra_tags,
         "region": region,
     }
     # ec2_spot.launch(...) below: ec2_spot.py is a sys.modules rebind shim

@@ -68,6 +68,21 @@ GATE_SOFT_EXCLUDE_LABELS = frozenset({
 })
 GATE_DUE_LABEL = "gate-due"
 
+#: Non-blocking informational label for expected-CI-red PRs (config#TBD).
+#: Applied by the Haiku end-of-SF sweep when every failing CI check
+#: is a known expected-failure (drift check, pre-existing broken test).
+#: Intentionally OUTSIDE the gate:* namespace -- gate means "blocking",
+#: ci:expected-red means "merge is fine despite the red."
+CI_EXPECTED_RED_LABEL = "ci:expected-red"
+
+#: CI check names (from gh pr checks --json name) that are expected to
+#: fail on PR branches for structural reasons. Updated when new drift
+#: guards or known-failing check patterns are added.
+_KNOWN_EXPECTED_RED_CHECKS: frozenset[str] = frozenset({
+    "iam-drift",
+    "drift-detection",
+})
+
 #: Tier order, cheapest first. Unlabeled issues default to "mid".
 TIERS = ("low", "mid", "high")
 
@@ -158,6 +173,20 @@ def is_actionable(labels: Iterable[str]) -> str | None:
     if tier is None or is_gate_excluded(labels):
         return None
     return tier
+
+
+def expected_red_labels_for_checks(failing_checks: Iterable[str]) -> list[str]:
+    """Return [CI_EXPECTED_RED_LABEL] if every failing check is
+    known-expected, or [] if any check is NOT known-expected
+    (genuine CI failure).
+    """
+    fail_set = set(failing_checks)
+    if not fail_set:
+        return []
+    unknown = fail_set - _KNOWN_EXPECTED_RED_CHECKS
+    if unknown:
+        return []
+    return [CI_EXPECTED_RED_LABEL]
 
 
 @dataclass(frozen=True)
