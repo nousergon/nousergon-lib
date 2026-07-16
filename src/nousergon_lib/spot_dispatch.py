@@ -26,6 +26,7 @@ import time
 
 import boto3
 from krepis import alerts
+
 from nousergon_lib import ec2_spot
 
 # ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't
