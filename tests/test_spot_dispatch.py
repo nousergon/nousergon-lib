@@ -71,6 +71,35 @@ class TestLaunchWithFallback:
         assert second_call_kwargs["spot"] is False
 
     @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_extra_tags_threaded_through_to_ec2_spot_launch(self, mock_ec2_spot):
+        """config#2292 root fix: extra_tags rides straight through to
+        krepis.ec2_spot.launch so discriminator tags land atomically at
+        RunInstances time — no separate post-launch create_tags call."""
+        mock_ec2_spot.launch.return_value = "i-tagged"
+
+        instance_id, market = spot_dispatch.launch_with_fallback(
+            **_common_launch_kwargs(
+                extra_tags={"ci-watch-repo": "nousergon/krepis", "ci-watch-sha": "abc123"}
+            )
+        )
+
+        assert (instance_id, market) == ("i-tagged", "spot")
+        _, kwargs = mock_ec2_spot.launch.call_args
+        assert kwargs["extra_tags"] == {
+            "ci-watch-repo": "nousergon/krepis",
+            "ci-watch-sha": "abc123",
+        }
+
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_no_extra_tags_passes_none_through(self, mock_ec2_spot):
+        mock_ec2_spot.launch.return_value = "i-notags"
+
+        spot_dispatch.launch_with_fallback(**_common_launch_kwargs())
+
+        _, kwargs = mock_ec2_spot.launch.call_args
+        assert kwargs["extra_tags"] is None
+
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
     def test_force_on_demand_skips_spot_attempt_entirely(self, mock_ec2_spot):
         mock_ec2_spot.launch.return_value = "i-ondemand789"
 
