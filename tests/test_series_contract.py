@@ -21,7 +21,6 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
-import pytest
 
 from nousergon_lib.series_contract import (
     DEFAULT_BLOCK_GATES,
@@ -35,7 +34,6 @@ from nousergon_lib.series_contract import (
     quarantine_decision,
     validate_series,
 )
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
