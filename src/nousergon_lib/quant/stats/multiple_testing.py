@@ -33,7 +33,7 @@ def benjamini_hochberg(p_values: list[float], alpha: float = 0.05) -> list[bool]
     # Find the largest k where p_(k) <= (k/n) * alpha
     significant = [False] * n
     max_k = -1
-    for rank_minus_one, (orig_idx, p) in enumerate(indexed):
+    for rank_minus_one, (_orig_idx, p) in enumerate(indexed):
         k = rank_minus_one + 1  # 1-based rank
         threshold = (k / n) * alpha
         if p <= threshold:

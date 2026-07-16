@@ -27,17 +27,17 @@ REGION = "us-east-1"
 
 
 def _common_launch_kwargs(**overrides):
-    kwargs = dict(
-        instance_types=["t3.medium", "t3a.medium"],
-        subnets=["subnet-aaa", "subnet-bbb"],
-        image_id="ami-0123456789abcdef0",
-        key_name="alpha-engine-key",
-        security_group_ids=["sg-0123456789abcdef0"],
-        iam_instance_profile="alpha-engine-example-executor-profile",
-        volume_size_gb=40,
-        tag_name="alpha-engine-example-spot",
-        region=REGION,
-    )
+    kwargs = {
+        "instance_types": ["t3.medium", "t3a.medium"],
+        "subnets": ["subnet-aaa", "subnet-bbb"],
+        "image_id": "ami-0123456789abcdef0",
+        "key_name": "alpha-engine-key",
+        "security_group_ids": ["sg-0123456789abcdef0"],
+        "iam_instance_profile": "alpha-engine-example-executor-profile",
+        "volume_size_gb": 40,
+        "tag_name": "alpha-engine-example-spot",
+        "region": REGION,
+    }
     kwargs.update(overrides)
     return kwargs
 
