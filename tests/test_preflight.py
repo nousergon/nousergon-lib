@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
@@ -402,7 +403,8 @@ def test_check_deploy_drift_passes_when_baked_matches_upstream(tmp_path):
 
 
 def test_check_deploy_drift_raises_on_sha_mismatch(tmp_path):
-    """Baked SHA differs from origin/main HEAD → hard-fail with both stamps."""
+    """Baked SHA differs from origin/main HEAD and is not an ancestor
+    (unrelated SHAs) → hard-fail with both stamps."""
     sha_file = tmp_path / "GIT_SHA.txt"
     sha_file.write_text("aaaaaaaa" * 5 + "\n")
 
@@ -410,9 +412,35 @@ def test_check_deploy_drift_raises_on_sha_mismatch(tmp_path):
     with mock.patch(
         "nousergon_lib.preflight._fetch_origin_main_sha",
         return_value="bbbbbbbb" * 5,
+    ), mock.patch(
+        "nousergon_lib.preflight._is_ancestor",
+        return_value=False,
     ):
         with pytest.raises(RuntimeError, match="Deploy drift"):
             p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
+
+
+def test_check_deploy_drift_passes_on_ancestor_relationship(tmp_path):
+    """Baked SHA differs from upstream HEAD but is a valid ancestor of it
+    (the benign back-to-back-merge race) → no raise + info log."""
+    sha_file = tmp_path / "GIT_SHA.txt"
+    sha_file.write_text("aaaaaaaa" * 5 + "\n")
+
+    p = _Concrete("bkt")
+    with mock.patch(
+        "nousergon_lib.preflight._fetch_origin_main_sha",
+        return_value="bbbbbbbb" * 5,
+    ), mock.patch(
+        "nousergon_lib.preflight._is_ancestor",
+        return_value=True,
+    ) as is_ancestor:
+        p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
+    is_ancestor.assert_called_once_with(
+        "nousergon/crucible-predictor",
+        base="aaaaaaaa" * 5,
+        head="bbbbbbbb" * 5,
+        timeout=5.0,
+    )
 
 
 def test_check_deploy_drift_warns_and_passes_when_stamp_missing(tmp_path, caplog):
@@ -500,3 +528,55 @@ def test_fetch_origin_main_sha_returns_none_on_json_parse_error():
     fake_resp.__exit__ = mock.MagicMock(return_value=False)
     with mock.patch("urllib.request.urlopen", return_value=fake_resp):
         assert _fetch_origin_main_sha("nousergon/crucible-predictor") is None
+
+
+# ── _is_ancestor ────────────────────────────────────────────────────────
+# Direct unit tests for the compare-API ancestry helper. GitHub's compare
+# endpoint reports `status` as identical/ahead/behind/diverged; only the
+# first two mean `base` is reachable by walking `head`'s history back.
+
+
+@pytest.mark.parametrize("status", ["identical", "ahead"])
+def test_is_ancestor_true_when_status_identical_or_ahead(status):
+    from nousergon_lib.preflight import _is_ancestor
+    fake_resp = mock.MagicMock()
+    fake_resp.read.return_value = json.dumps({"status": status}).encode()
+    fake_resp.__enter__ = mock.MagicMock(return_value=fake_resp)
+    fake_resp.__exit__ = mock.MagicMock(return_value=False)
+    with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+        assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is True
+
+
+@pytest.mark.parametrize("status", ["behind", "diverged"])
+def test_is_ancestor_false_when_status_behind_or_diverged(status):
+    from nousergon_lib.preflight import _is_ancestor
+    fake_resp = mock.MagicMock()
+    fake_resp.read.return_value = json.dumps({"status": status}).encode()
+    fake_resp.__enter__ = mock.MagicMock(return_value=fake_resp)
+    fake_resp.__exit__ = mock.MagicMock(return_value=False)
+    with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+        assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is False
+
+
+def test_is_ancestor_false_on_url_error():
+    """Compare-API unreachable → False (hard-fail-on-mismatch default),
+    not None/True — unlike _fetch_origin_main_sha, a mismatch is already
+    known at this point, so an unresolved ancestry check must not
+    silently pass a possibly-real drift."""
+    import urllib.error
+    from nousergon_lib.preflight import _is_ancestor
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.URLError("dns failure"),
+    ):
+        assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is False
+
+
+def test_is_ancestor_false_on_json_parse_error():
+    from nousergon_lib.preflight import _is_ancestor
+    fake_resp = mock.MagicMock()
+    fake_resp.read.return_value = b"not valid json{{{"
+    fake_resp.__enter__ = mock.MagicMock(return_value=fake_resp)
+    fake_resp.__exit__ = mock.MagicMock(return_value=False)
+    with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+        assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is False
