@@ -20,7 +20,7 @@ from unittest import mock
 import pytest
 
 from nousergon_lib import spot_dispatch
-from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError
+from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError, SpotQuotaExceededError
 from nousergon_lib.spot_dispatch import SpotProbeError
 
 REGION = "us-east-1"
@@ -97,6 +97,56 @@ class TestLaunchWithFallback:
         with pytest.raises(SpotLaunchError):
             spot_dispatch.launch_with_fallback(**_common_launch_kwargs())
         mock_ec2_spot.launch.assert_called_once()
+
+    @mock.patch("nousergon_lib.spot_dispatch.alerts")
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_spot_quota_exceeded_falls_back_to_on_demand_no_rotation_and_pages(
+        self, mock_ec2_spot, mock_alerts
+    ):
+        """config#2698 acceptance criterion: stubbed RunInstances returning
+        MaxSpotInstanceCountExceeded (surfaced as SpotQuotaExceededError by
+        krepis.ec2_spot) => the launcher lands an on-demand instance, spot
+        was attempted exactly ONCE (no rotation — ec2_spot itself already
+        skips rotation on a quota error), and a warning-level page fires."""
+        mock_ec2_spot.launch.side_effect = [
+            SpotQuotaExceededError("MaxSpotInstanceCountExceeded (c5.large@subnet-aaa)"),
+            "i-ondemand-quota",
+        ]
+
+        instance_id, market = spot_dispatch.launch_with_fallback(**_common_launch_kwargs())
+
+        assert (instance_id, market) == ("i-ondemand-quota", "on-demand")
+        assert mock_ec2_spot.launch.call_count == 2
+        first_call_kwargs = mock_ec2_spot.launch.call_args_list[0].kwargs
+        second_call_kwargs = mock_ec2_spot.launch.call_args_list[1].kwargs
+        assert first_call_kwargs["spot"] is True
+        assert second_call_kwargs["spot"] is False
+        mock_alerts.publish.assert_called_once()
+        _, publish_kwargs = mock_alerts.publish.call_args
+        assert publish_kwargs["severity"] == "warning"
+        assert "quota" in mock_alerts.publish.call_args.args[0].lower()
+
+    @mock.patch("nousergon_lib.spot_dispatch.alerts")
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_quota_exceeded_is_not_capacity_exhausted(self, mock_ec2_spot, mock_alerts):
+        """Quota and capacity exhaustion are siblings, not each other — both
+        must independently trigger the on-demand fallback branch."""
+        assert issubclass(SpotQuotaExceededError, SpotLaunchError)
+        assert not issubclass(SpotQuotaExceededError, SpotCapacityExhausted)
+
+    @mock.patch("nousergon_lib.spot_dispatch.alerts")
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_quota_exceeded_propagates_when_on_demand_also_fails(
+        self, mock_ec2_spot, mock_alerts
+    ):
+        mock_ec2_spot.launch.side_effect = [
+            SpotQuotaExceededError("quota"),
+            SpotLaunchError("on-demand also failed"),
+        ]
+
+        with pytest.raises(SpotLaunchError):
+            spot_dispatch.launch_with_fallback(**_common_launch_kwargs())
+        assert mock_ec2_spot.launch.call_count == 2
 
 
 class TestWaitSsmOnline:
