@@ -30,9 +30,9 @@ except ImportError:
 from .db import coerce_embedding, get_connection, is_available
 from .embeddings import embed_texts
 from .retrieval import (
-    retrieve,
-    ingest_document,
     document_exists,
+    ingest_document,
+    retrieve,
 )
 
 __all__ = [

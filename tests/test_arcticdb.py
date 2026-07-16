@@ -13,7 +13,6 @@ import pytest
 
 from nousergon_lib import arcticdb as ae_arctic
 
-
 # ── URI construction ────────────────────────────────────────────────────────
 
 

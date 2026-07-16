@@ -21,18 +21,17 @@ triples, not LLM-judge).
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from nousergon_lib.rag.rerank import (
+    _RERANKER_REGISTRY,
     CrossEncoderReranker,
     RerankCache,
-    _RERANKER_REGISTRY,
     get_reranker,
 )
 from nousergon_lib.rag.retrieval import RetrievalResult, retrieve
-
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 

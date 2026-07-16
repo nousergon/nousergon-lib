@@ -51,9 +51,10 @@ Requires the ``contracts`` extra (``nousergon-lib[contracts]`` → jsonschema).
 from __future__ import annotations
 
 import json
-from functools import lru_cache
+from collections.abc import Iterator
+from functools import cache
 from importlib import resources
-from typing import Any, Iterator
+from typing import Any
 
 __all__ = [
     "CONTRACT_SCHEMAS",
@@ -126,7 +127,7 @@ class ContractViolation(Exception):
         )
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_schema(name: str) -> dict[str, Any]:
     """Load the JSON Schema for a contract (``signals`` | ``predictions`` | ``outcome_record``)."""
     if name not in CONTRACT_SCHEMAS:
@@ -136,7 +137,7 @@ def load_schema(name: str) -> dict[str, Any]:
     # with no package context, which this module never is (it's always
     # imported as nousergon_lib.contracts) — the assertion documents that
     # invariant for pyright rather than silently passing None through.
-    assert __package__ is not None, "nousergon_lib.contracts.__package__ is unset"
+    assert __package__ is not None, "nousergon_lib.contracts.__package__ is unset"  # noqa: S101 -- type-narrowing invariant, not input validation
     with resources.files(__package__).joinpath(fname).open("r", encoding="utf-8") as f:
         return json.load(f)
 

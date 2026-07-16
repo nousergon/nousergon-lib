@@ -34,7 +34,8 @@ Flow Doctor's per-yaml dedup window suppresses repeat alerts.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 
 def report_collector_errors(
