@@ -27,7 +27,17 @@ import time
 import boto3
 from krepis import alerts
 from nousergon_lib import ec2_spot
-from nousergon_lib.ec2_spot import SpotCapacityExhausted, SpotLaunchError, SpotQuotaExceededError  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue] - ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't see through the dynamic rebind, verified correct at runtime
+
+# ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't
+# see through the dynamic rebind (verified correct at runtime), so each
+# symbol needs its own reportAttributeAccessIssue ignore on the line pyright
+# actually flags (a single ignore on the `from ... import (` line, as this
+# used to be written as a one-liner, only silences the first diagnostic).
+from nousergon_lib.ec2_spot import (
+    SpotCapacityExhausted,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
+    SpotLaunchError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
+    SpotQuotaExceededError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,17 +88,17 @@ def launch_with_fallback(
     its own bounded retry) should pass them here instead and delete that
     retry path entirely.
     """
-    common = dict(
-        image_id=image_id,
-        key_name=key_name,
-        security_group_ids=list(security_group_ids),
-        iam_instance_profile=iam_instance_profile,
-        volume_size_gb=volume_size_gb,
-        shutdown_behavior="terminate",
-        tag_name=tag_name,
-        extra_tags=extra_tags,
-        region=region,
-    )
+    common = {
+        "image_id": image_id,
+        "key_name": key_name,
+        "security_group_ids": list(security_group_ids),
+        "iam_instance_profile": iam_instance_profile,
+        "volume_size_gb": volume_size_gb,
+        "shutdown_behavior": "terminate",
+        "tag_name": tag_name,
+        "extra_tags": extra_tags,
+        "region": region,
+    }
     # ec2_spot.launch(...) below: ec2_spot.py is a sys.modules rebind shim
     # to krepis.ec2_spot; pyright can't see through the dynamic rebind,
     # verified correct at runtime — see the ignore-reason on the import

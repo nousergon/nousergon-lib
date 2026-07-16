@@ -63,7 +63,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install alerts CLI (base lib, no extras)
-        run: pip install "nousergon-lib @ git+https://github.com/nousergon/nousergon-lib@${{ inputs.lib_ref }}"
+        env:
+          LIB_REF: ${{ inputs.lib_ref }}
+        run: pip install "nousergon-lib @ git+https://github.com/nousergon/nousergon-lib@${LIB_REF}"
 
       - name: Publish Telegram alert
         env:
@@ -72,13 +74,17 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_REPOSITORY: ${{ github.repository }}
+          CI_REF_NAME: ${{ github.ref_name }}
+          CI_SHA: ${{ github.sha }}
+          CI_WORKFLOW: ${{ github.workflow }}
         run: |
           python -m krepis.alerts publish \
             --no-sns \
             --severity error \
-            --source "ci:${{ github.repository }}@${{ github.ref_name }}" \
-            --message "🔴 CI RED on main — ${{ github.repository }} @ ${{ github.sha }}
-          Workflow: ${{ github.workflow }}
+            --source "ci:${CI_REPOSITORY}@${CI_REF_NAME}" \
+            --message "🔴 CI RED on main — ${CI_REPOSITORY} @ ${CI_SHA}
+          Workflow: ${CI_WORKFLOW}
           Run: ${RUN_URL}"
 
       # Secondary observability hung off the primary alert path: when the org

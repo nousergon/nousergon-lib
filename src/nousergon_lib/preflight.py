@@ -41,10 +41,6 @@ log = logging.getLogger(__name__)
 # alternate path.
 _DEFAULT_GIT_SHA_FILE = Path("/var/task/GIT_SHA.txt")
 
-# Public-repo branch-HEAD API. No auth required; 60 req/hr unauth rate
-# limit is fine for Lambda cold-starts and CI runs.
-_GITHUB_BRANCH_URL = "https://api.github.com/repos/{repo}/branches/{branch}"
-
 
 class BasePreflight:
     """Shared preflight primitives.
@@ -300,7 +296,7 @@ class BasePreflight:
         today = date.today()
         cutoff = today - timedelta(days=max_stale_days)
 
-        def _last_date_for(sym: str) -> tuple[str, "date | None", "str | None"]:
+        def _last_date_for(sym: str) -> tuple[str, date | None, str | None]:
             try:
                 # See the analogous cast on check_arcticdb_universe_fresh
                 # above: VersionedItem.data's declared type is a broad
@@ -445,6 +441,17 @@ def _read_baked_git_sha(sha_file: Path) -> str | None:
     return sha
 
 
+def _safe_urlopen(req, **kwargs):
+    """urlopen wrapper that fails loudly on any non-https scheme (S310: bandit
+    cannot statically prove the URL's scheme, but every call site here builds
+    it from a hardcoded https:// base -- this makes that guarantee explicit
+    and enforced at runtime rather than just asserted by code review)."""
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    if not url.startswith("https://"):
+        raise ValueError(f"refusing non-https URL: {url!r}")
+    return urllib.request.urlopen(req, **kwargs)  # noqa: S310 -- scheme validated above
+
+
 def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0) -> str | None:
     """Fetch HEAD SHA of ``branch`` for ``repo`` via GitHub REST API.
 
@@ -453,10 +460,18 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
     the consumer. ``repo`` is ``"owner/name"`` (e.g.
     ``"nousergon/crucible-predictor"``).
     """
-    url = _GITHUB_BRANCH_URL.format(repo=repo, branch=branch)
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+    # S310 fires on urllib.request.Request(...) whenever the URL argument is
+    # a variable rather than an inline literal (it cannot statically prove
+    # the scheme through the indirection) — inlining the f-string directly,
+    # same as the alpha-engine-config precedent (config#2532), keeps the
+    # scheme provably-hardcoded-https at the call site instead of needing a
+    # noqa here on top of the _safe_urlopen runtime guard below.
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/branches/{branch}",
+        headers={"Accept": "application/vnd.github+json"},
+    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _safe_urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
         return payload.get("commit", {}).get("sha")
     except (OSError, json.JSONDecodeError) as exc:
