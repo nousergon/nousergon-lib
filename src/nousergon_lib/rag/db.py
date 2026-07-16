@@ -24,7 +24,7 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-def coerce_embedding(value) -> "NDArray[np.float32]":
+def coerce_embedding(value) -> NDArray[np.float32]:
     """Normalize a pgvector ``vector`` column read to a float32 ndarray.
 
     THE chokepoint for the representation-fragile guarantee that

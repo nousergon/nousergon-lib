@@ -37,7 +37,7 @@ References:
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -158,7 +158,6 @@ def build_factor_returns_series(
             raise ValueError("loadings_by_date is empty — nothing to regress against")
         factor_names = list(sample.columns)
     factor_names = list(factor_names)
-    K = len(factor_names)
 
     col_names = (["market"] + factor_names) if include_intercept else factor_names
 

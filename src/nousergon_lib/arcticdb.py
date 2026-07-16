@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Mapping, cast
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
@@ -93,7 +94,7 @@ def open_arctic(bucket: str, *, region: str | None = None):
 
 def open_universe_lib(
     bucket: str, *, region: str | None = None, create_if_missing: bool = False
-) -> "Library":
+) -> Library:
     """Open the ``universe`` library on ``bucket``.
 
     Raises ``RuntimeError`` on any library-open failure, with bucket and
@@ -116,7 +117,7 @@ def open_universe_lib(
 
 def open_macro_lib(
     bucket: str, *, region: str | None = None, create_if_missing: bool = False
-) -> "Library":
+) -> Library:
     """Open the ``macro`` library on ``bucket``.
 
     Raises ``RuntimeError`` on any library-open failure.
@@ -187,7 +188,7 @@ def _load_constituent_membership(
 
 
 def pit_membership_as_of(
-    membership: Mapping[str, "list[str] | set[str]"], as_of: "date"
+    membership: Mapping[str, list[str] | set[str]], as_of: date
 ) -> set[str] | None:
     """Resolve as-of-date index membership from a PIT ``membership`` map.
 
@@ -208,18 +209,19 @@ def pit_membership_as_of(
     Pure (no IO) so it is cheaply unit-testable and can be called per-date in
     a tight backtest loop.
     """
-    from datetime import date as _date, datetime as _datetime
+    from datetime import date as _date
+    from datetime import datetime as _datetime
 
     if isinstance(as_of, _datetime):
         as_of = as_of.date()
 
-    def _parse(key: str) -> "_date":
+    def _parse(key: str) -> _date:
         return _datetime.strptime(key, "%Y-%m-%d").date()
 
     # Smallest change date strictly greater than as_of -> that snapshot is
     # "membership before this change" == membership as of as_of.
     best_key: str | None = None
-    best_dt: "_date | None" = None
+    best_dt: _date | None = None
     for key in membership:
         try:
             dt = _parse(key)
@@ -237,7 +239,7 @@ def pit_membership_as_of(
 def get_universe_symbols(
     bucket: str,
     *,
-    as_of: "date | None" = None,
+    as_of: date | None = None,
     region: str | None = None,
     s3_client=None,
 ) -> set[str]:
@@ -315,7 +317,7 @@ def _load_arctic_frames(
     symbols,
     *,
     lookback_days: int,
-    end: "pd.Timestamp | str | None",
+    end: pd.Timestamp | str | None,
     columns,
     max_workers: int,
     label: str,
@@ -332,8 +334,9 @@ def _load_arctic_frames(
     / empty frames are logged at WARNING and dropped — the caller decides
     how to handle a partial load.
     """
-    import pandas as pd  # lazy: only needed with the [arcticdb] extra
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    import pandas as pd  # lazy: only needed with the [arcticdb] extra
 
     symbols = sorted(set(symbols))
     if not symbols:
@@ -368,7 +371,7 @@ def _load_arctic_frames(
         df = df[~df.index.duplicated(keep="last")].sort_index()
         return sym, df
 
-    out: "dict[str, pd.DataFrame]" = {}
+    out: dict[str, pd.DataFrame] = {}
     errors = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_read, s): s for s in symbols}
@@ -404,7 +407,7 @@ def load_universe_ohlcv(
     *,
     symbols=None,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
-    end: "pd.Timestamp | str | None" = None,
+    end: pd.Timestamp | str | None = None,
     columns=None,
     max_workers: int = 20,
     region: str | None = None,
@@ -468,7 +471,7 @@ def load_macro_series(
     symbols,
     *,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
-    end: "pd.Timestamp | str | None" = None,
+    end: pd.Timestamp | str | None = None,
     columns=None,
     max_workers: int = 20,
     region: str | None = None,

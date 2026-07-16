@@ -91,7 +91,6 @@ from nousergon_lib.trading_calendar import (
     previous_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
 )
 
-
 # ── Cadence symbols ──────────────────────────────────────────────────────────
 # Plan §4 PR 2 commits the registry to a closed set of cadence symbols
 # rather than free-form cron strings. The symbols encode the cron
@@ -572,7 +571,7 @@ def resolve_current_cycle(
     if spec.cadence == "continuous":
         # Bucket the wall-clock UTC into interval_minutes-wide windows.
         # Bucket index = floor(epoch_min / interval_min).
-        assert spec.interval_minutes is not None  # validated in __post_init__
+        assert spec.interval_minutes is not None  # noqa: S101 -- type-narrowing invariant, validated in __post_init__
         epoch_min = int(now_utc.timestamp() // 60)
         bucket = epoch_min // spec.interval_minutes
         tick = datetime.fromtimestamp(
@@ -856,7 +855,7 @@ def _freshness_floor(
             tzinfo=timezone.utc,
         )
     if spec.cadence == "continuous":
-        assert spec.interval_minutes is not None
+        assert spec.interval_minutes is not None  # noqa: S101 -- type-narrowing invariant, validated in __post_init__
         rc = _resolve_run_calendar(spec)
         if rc != "all_days" and spec.interval_minutes >= 1440:
             # Daily-or-longer trading-day producer: count the lookback in
@@ -1175,7 +1174,7 @@ def _cycle_length_seconds(spec: ArtifactSpec) -> float:
     if spec.cadence in ("weekday_sf", "eod_sf"):
         return 24 * 3600
     if spec.cadence == "continuous":
-        assert spec.interval_minutes is not None
+        assert spec.interval_minutes is not None  # noqa: S101 -- type-narrowing invariant, validated in __post_init__
         return spec.interval_minutes * 60
     if spec.cadence == "event_driven":
         # Coarse cold-start unit only (event_driven short-circuits the
@@ -1544,7 +1543,7 @@ def build_dependency_graph(specs: Iterable[ArtifactSpec]) -> DependencyGraph:
 def _raise_on_cycle(depends_on: dict[str, tuple[str, ...]]) -> None:
     """DFS three-colouring; raise ValueError naming a cycle if one exists."""
     WHITE, GREY, BLACK = 0, 1, 2
-    colour = {a: WHITE for a in depends_on}
+    colour = dict.fromkeys(depends_on, WHITE)
 
     def visit(node: str, path: list[str]) -> None:
         colour[node] = GREY
