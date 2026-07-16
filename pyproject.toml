@@ -94,6 +94,16 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+# Ratchet floor (config#2530): measured 92.78% with the same [dev,rag,
+# arcticdb,quant,quant-xs,quant-stats,contracts] extras test.yml's pytest job
+# installs, rounded down to integer. Prevents regression; raise
+# opportunistically as coverage grows.
+fail_under = 92
+
 [tool.pyright]
 # CI gate (config#2534): basic mode pinned to the 3.9 floor — the oldest
 # supported version is where PEP604-class regressions actually bite (see

@@ -59,10 +59,10 @@ jobs:
         # call inside the relevant module / tests mock the model load.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts]"
+          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts]" pytest-cov
 
       - name: Run pytest
-        run: python -m pytest -q
+        run: python -m pytest -q --cov --cov-report=term-missing
 
   # Basic-mode pyright, pinned to the 3.9 floor (config#2534). One pinned
   # run rather than a 3.9-3.13 matrix: 3.9 is where PEP604-class regressions
