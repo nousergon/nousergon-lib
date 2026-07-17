@@ -32,7 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
 
     import pandas as pd
-    from arcticdb.version_store.library import Library
+    from arcticdb.version_store.library import Library, VersionedItem
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,79 @@ log = logging.getLogger(__name__)
 # Centralized so a rename propagates from one place.
 UNIVERSE_LIB = "universe"
 MACRO_LIB = "macro"
+
+# Preliminary/intraday values library (market-value-integrity L0/L5,
+# config#2459). Physically SEPARATE from ``universe`` — mirrors the
+# ``delisted_history`` precedent (config#1943 Leg 3, see
+# ``nousergon-data store.arctic_store.get_delisted_history_lib``): a new
+# consumer that reads prices for a "published"/"final" artifact must go
+# through :func:`read_settled_only`, which structurally can never touch this
+# library, rather than relying on per-caller discipline to filter out
+# preliminary rows. Producers (intraday/preliminary collectors) write here
+# directly via ``open_preliminary_lib``; nothing in the settled read path
+# ever opens this library.
+PRELIMINARY_LIB = "preliminary"
+
+# Bitemporal schema fields (config#2459 scope item 1). Additive to the
+# existing canonical universe/macro layout — same discipline as
+# ``TOTAL_RETURN_COL`` (nousergon-data store.arctic_store): absent on
+# every symbol written before this PR lands, and a no-op there. New
+# writers add these six columns; nothing in the existing OHLCV+source+
+# FEATURES contract changes shape or order because of them.
+#
+#   settled         bool      True once a value is treated as final/
+#                              published-report-eligible; False for
+#                              preliminary/intraday rows (also enforced
+#                              structurally by the preliminary/universe
+#                              library split — this column is a same-
+#                              library-would-be-redundant belt for anyone
+#                              inspecting a raw frame, not the sole guard).
+#   as_of           Timestamp UTC capture time — when this datum was
+#                              observed/ingested, independent of the
+#                              trading day it describes ("knowledge time"
+#                              axis half A).
+#   source_tier     str       Coarse vendor-quality tier (e.g. "primary",
+#                              "secondary", "derived") — distinct from the
+#                              existing ``PROVENANCE_COL`` ("source"),
+#                              which names the specific vendor
+#                              (polygon/yfinance/fred). ``source`` already
+#                              satisfies the bitemporal "source" field
+#                              (config#2459 asks for a source field among
+#                              the six; it does not ask for a second,
+#                              redundant vendor-name column) — see
+#                              ``to_arctic_canonical`` in nousergon-data
+#                              for how the existing column is reused rather
+#                              than duplicated.
+#   valid_date      date      The trading/business date this datum
+#                              describes (the pre-existing DataFrame index
+#                              already carries this for OHLCV rows; this
+#                              column exists for symbols/records where the
+#                              valid date and the physical index key can
+#                              diverge, e.g. a correction record whose
+#                              index is the correction's own timestamp).
+#   knowledge_time  Timestamp When the system's BELIEF about this datum
+#                              was last updated — equal to ``as_of`` on
+#                              first write, advanced on every correction
+#                              (see ``write_correction`` below). Together
+#                              with ``valid_date`` this is the bitemporal
+#                              pair that answers "what did we believe on
+#                              date X" queries.
+SETTLED_COL: str = "settled"
+AS_OF_COL: str = "as_of"
+SOURCE_TIER_COL: str = "source_tier"
+VALID_DATE_COL: str = "valid_date"
+KNOWLEDGE_TIME_COL: str = "knowledge_time"
+
+# Ordered list of the new bitemporal columns, appended (in this order)
+# after PROVENANCE_COL/FEATURES in the canonical layout — see
+# ``to_arctic_canonical``'s ``BITEMPORAL_COLS`` splice.
+BITEMPORAL_COLS: tuple[str, ...] = (
+    SETTLED_COL,
+    AS_OF_COL,
+    SOURCE_TIER_COL,
+    VALID_DATE_COL,
+    KNOWLEDGE_TIME_COL,
+)
 
 # Point-in-time constituent membership map, written weekly by
 # alpha-engine-data ``collectors/historical_constituents.py`` (#490/#645) to
@@ -135,6 +208,197 @@ def open_macro_lib(
             f"ArcticDB {MACRO_LIB!r} library open failed on bucket "
             f"{bucket!r} (uri={arctic_uri(bucket, region=region)}): {exc}"
         ) from exc
+
+
+def open_preliminary_lib(
+    bucket: str, *, region: str | None = None, create_if_missing: bool = False
+) -> "Library":
+    """Open the ``preliminary`` library on ``bucket`` (config#2459).
+
+    Structurally separate from :data:`UNIVERSE_LIB` — the physical-library
+    split that lets intraday/preliminary values exist without any risk of
+    a "final report" consumer accidentally reading them (mirrors the
+    ``delisted_history`` precedent). Producers writing intraday/preliminary
+    ticks call this directly; nothing that reads for a published artifact
+    should — use :func:`read_settled_only` instead, which never opens this
+    library.
+
+    Raises ``RuntimeError`` on any library-open failure, matching
+    :func:`open_universe_lib` / :func:`open_macro_lib`.
+
+    ``create_if_missing`` defaults to ``False`` (read-only-by-default
+    convention); the preliminary-data producer passes ``True`` to bootstrap
+    on a fresh bucket.
+    """
+    arctic = open_arctic(bucket, region=region)
+    try:
+        return arctic.get_library(PRELIMINARY_LIB, create_if_missing=create_if_missing)
+    except Exception as exc:
+        raise RuntimeError(
+            f"ArcticDB {PRELIMINARY_LIB!r} library open failed on bucket "
+            f"{bucket!r} (uri={arctic_uri(bucket, region=region)}): {exc}"
+        ) from exc
+
+
+def read_settled_only(
+    bucket: str,
+    symbol: str,
+    *,
+    region: str | None = None,
+    as_of=None,
+    **read_kwargs,
+) -> "pd.DataFrame | None":
+    """THE read-path chokepoint for a published/final-report price read
+    (config#2459 scope item 2).
+
+    Opens :data:`UNIVERSE_LIB` — never :data:`PRELIMINARY_LIB` — so a
+    caller cannot accidentally read preliminary/intraday data into a
+    "final" artifact just by getting the library name wrong; the function
+    itself hard-codes the settled library and offers no parameter that
+    could point it at ``preliminary``. Returns ``None`` iff ArcticDB's own
+    read returns ``None`` data (rare — e.g. some empty-symbol read modes);
+    callers that always expect a frame should check for this the same way
+    they would guard any other ArcticDB read.
+
+    If the bitemporal ``settled`` column (:data:`SETTLED_COL`) is present
+    in the returned frame, rows where it is falsy are dropped — belt on
+    top of the physical library split, not a substitute for it (most
+    existing symbols predate the column and have none, in which case
+    every row is treated as settled, matching current behavior
+    byte-for-byte). Because the whole point of the physical split is that
+    an unsettled row should NEVER be able to land in :data:`UNIVERSE_LIB`
+    in the first place, finding one here is itself a data-integrity
+    violation, not a routine occurrence — so unlike a normal filter this
+    logs at ERROR (best-effort import of :func:`gate_alerts
+    .alert_gate_failure`, so a monitored caller's flow-doctor singleton
+    picks it up the same way any other L0-layer gate failure would)
+    before silently continuing to drop the rows. Never raises for the
+    alerting side-effect itself — a broken alert path must not turn a
+    read into a hard failure.
+
+    ``as_of`` forwards to ``lib.read`` for a bitemporal "what did we
+    believe as of version/timestamp X" query (correction-record
+    versioning, config#2459 scope item 3) — an int version, a
+    ``pd.Timestamp``, or ``None`` for the current head version. A plain
+    ``str`` is ArcticDB *snapshot-name* lookup, not a point-in-time query
+    — pass a ``pd.Timestamp``/``int`` for the bitemporal use case.
+
+    Any other ``read_kwargs`` (e.g. ``columns``, ``date_range``) forward
+    to ``lib.read`` unchanged. Note: passing ``columns=[...]`` without
+    ``SETTLED_COL`` in the list makes the settled-row filter a no-op (the
+    column isn't in the returned frame to filter on) — the physical
+    library split is still the load-bearing guarantee in that case.
+
+    Raises ``RuntimeError`` on library-open failure (via
+    :func:`open_universe_lib`); propagates ArcticDB's own exception types
+    (e.g. ``NoSuchVersionException``) for read failures — callers that want
+    a soft-fail should catch at the call site, matching the rest of this
+    module's read helpers.
+    """
+    lib = open_universe_lib(bucket, region=region)
+    result = lib.read(symbol, as_of=as_of, **read_kwargs)
+    # arcticdb's Library.read() return type is a union that includes
+    # LazyDataFrame/ExpressionNode (only reachable when the caller passes
+    # lazy=True, which read_kwargs never does here) — cast matches the
+    # existing precedent in preflight.py (BasePreflight.check_arcticdb_*)
+    # rather than inventing a second pattern for the same stub gap.
+    df = cast("pd.DataFrame | None", result.data)
+    if df is not None and not df.empty and SETTLED_COL in df.columns:
+        mask = df[SETTLED_COL].fillna(False).astype(bool)
+        if not bool(mask.all()):
+            _n_dropped = int((~mask).sum())
+            try:
+                from nousergon_lib.gate_alerts import alert_gate_failure
+
+                alert_gate_failure(
+                    layer="L0",
+                    series=symbol,
+                    detail=(
+                        f"read_settled_only dropped {_n_dropped} unsettled "
+                        f"row(s) found INSIDE the settled library "
+                        f"({UNIVERSE_LIB!r}) — the physical preliminary/"
+                        f"settled split should make this impossible; a "
+                        f"producer likely wrote an unsettled row to the "
+                        f"wrong library"
+                    ),
+                    severity="error",
+                )
+            except Exception:  # noqa: BLE001 — alerting must never break a read.
+                log.error(
+                    "read_settled_only: dropped %d unsettled row(s) for "
+                    "%r found inside %r (alert_gate_failure unavailable)",
+                    _n_dropped, symbol, UNIVERSE_LIB,
+                )
+            df = cast("pd.DataFrame", df[mask])
+    return df
+
+
+def write_correction(
+    lib,
+    symbol: str,
+    df: "pd.DataFrame",
+    *,
+    reason: str,
+    source: str,
+    correction_time=None,
+) -> "VersionedItem":
+    """Write a post-hoc correction to a previously-published settled
+    value as a NEW ArcticDB version — never an in-place overwrite
+    (config#2459 scope item 3).
+
+    This is deliberately a thin wrapper, not a new storage mechanism:
+    ArcticDB already versions every ``lib.write``, and THIS call always
+    passes ``prune_previous_versions=False`` (hard-coded below, not a
+    caller option) so the version this call creates never prunes an
+    earlier one out from under itself. Investigated and confirmed against
+    a local ``lmdb://`` instance (see ``tests/test_arcticdb_bitemporal.py``
+    ``test_write_correction_*``): a symbol written, then "corrected",
+    keeps its original version fully readable by version index AND by a
+    timestamp taken at/after the original write and before the
+    correction. This is the SOTA approach the issue asks for — no side
+    table needed; the version history IS the bitemporal correction log.
+
+    ``df`` is the FULL corrected frame (same identity-preserving
+    discipline as every other write site in this codebase — see
+    ``nousergon-data corporate_actions.migrate_symbol`` / this module's
+    ``delisted_history`` precedent) — pass the complete series with the
+    correction applied, not a delta.
+
+    ``reason`` and ``source`` are stamped into the write's metadata dict
+    (queryable via ``lib.read(symbol, as_of=...).metadata`` or
+    ``lib.read_metadata(symbol)``) along with ``correction_time`` (UTC,
+    defaults to ``pd.Timestamp.now(tz="UTC")``) — this is the audit trail
+    scope item 3 asks for (reason/source/timestamp per correction),
+    riding on ArcticDB's native per-write metadata rather than a bespoke
+    side-table.
+
+    Returns the ``VersionedItem`` ArcticDB gives back from the write
+    (carries the new version number + write timestamp) so the caller can
+    log/alert on it.
+
+    Caveat this function CANNOT enforce on its own: the "prior value
+    stays queryable forever" guarantee depends on every OTHER writer that
+    ever touches this symbol also avoiding version pruning. A later,
+    ordinary write to the same symbol with ``prune_previous_versions=True``
+    (the convention several producers in this fleet already use — see
+    ``nousergon-data builders/daily_append.py``) can still prune away a
+    correction's predecessor version. This helper only controls the one
+    write it makes; it is not a library-wide pruning policy and does not
+    (cannot, from a single call site) prevent a differently-configured
+    writer from pruning history later. Treat "never prune the ``universe``
+    library" as an operational invariant the correction-audit-trail
+    feature depends on, not something this function alone guarantees.
+    """
+    import pandas as pd
+
+    ts = correction_time if correction_time is not None else pd.Timestamp.now(tz="UTC")
+    metadata = {
+        "correction": True,
+        "reason": reason,
+        "source": source,
+        "correction_time": ts.isoformat(),
+    }
+    return lib.write(symbol, df, metadata=metadata, prune_previous_versions=False)
 
 
 def _load_constituent_membership(
