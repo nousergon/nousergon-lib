@@ -100,7 +100,6 @@ class TestConcurrentWriteRace:
         first put_object call raises PreconditionFailed once, then the
         retry (against the now-current ETag) succeeds and the racing
         writer's contribution is preserved (both increments land)."""
-        from nousergon_lib.quant.stats import trial_accumulator as mod
 
         real_put_object = s3.put_object
         call_count = {"n": 0}
