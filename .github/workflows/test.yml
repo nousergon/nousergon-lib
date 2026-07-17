@@ -13,9 +13,9 @@ name: Tests
 # chokepoint that catches the next regression of the class at lib-build
 # time rather than consumer-side.
 
-on:
-
 permissions: {}
+
+on:
   pull_request:
     branches: [main]
   push:

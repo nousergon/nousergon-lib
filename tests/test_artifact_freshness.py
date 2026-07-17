@@ -210,6 +210,42 @@ class TestResolveCurrentCycle:
         assert tick == datetime(2026, 5, 23, 9, 0, tzinfo=timezone.utc)
         assert label == "2026-W21"
 
+    def test_sunday_after_cron_returns_this_sunday(self):
+        # Sun 2026-05-31 18:00 UTC — sunday_sf cron at 09:00 UTC has fired.
+        now = datetime(2026, 5, 31, 18, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="sunday_sf")
+        tick, label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 5, 31, 9, 0, tzinfo=timezone.utc)
+        # Sun 05-31 is the last day of ISO week W22; -SUN suffix distinguishes
+        # the Sunday cycle from the same week's saturday_sf label.
+        assert label == "2026-W22-SUN"
+
+    def test_sunday_before_cron_returns_last_sunday(self):
+        # Sun 2026-05-31 08:00 UTC — sunday_sf cron at 09:00 UTC has not fired.
+        now = datetime(2026, 5, 31, 8, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="sunday_sf")
+        tick, label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
+        assert label == "2026-W21-SUN"
+
+    def test_midweek_returns_last_sunday(self):
+        # Wed 2026-05-27 — last Sunday is 2026-05-24 (ISO week W21).
+        now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="sunday_sf")
+        tick, label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
+        assert label == "2026-W21-SUN"
+
+    def test_sunday_label_distinct_from_saturday_same_weekend(self):
+        # Same calendar weekend: saturday_sf and sunday_sf must NOT collide on
+        # the cycle/dedup label (Sat and Sun share one ISO week number).
+        now = datetime(2026, 5, 31, 18, 0, tzinfo=timezone.utc)
+        _, sat_label = resolve_current_cycle(_spec(cadence="saturday_sf"), now)
+        _, sun_label = resolve_current_cycle(_spec(cadence="sunday_sf"), now)
+        assert sat_label == "2026-W22"
+        assert sun_label == "2026-W22-SUN"
+        assert sat_label != sun_label
+
     def test_weekday_sf_after_cron_returns_today_trading_day(self):
         # Wed 2026-05-27 15:00 UTC — cron at 13:00 UTC has fired.
         now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
@@ -679,9 +715,15 @@ def test_cadence_symbols_match_documented_set():
     ``event_driven`` (config#1718) is a first-class member: it carries a
     cycle-resolution branch (per-UTC-day label), a dedup-key label, a
     freshness-floor branch, and a check_freshness short-circuit — see
-    TestEventDriven* below."""
+    TestEventDriven* below.
+
+    ``sunday_sf`` (config-I2856, ModelZoo Sunday SF) is the weekly
+    counterpart to ``saturday_sf`` — anchored to Sunday 09:00 UTC — and
+    carries the same four branches (cycle-resolution with a ``-SUN`` label,
+    dedup-key via resolve_current_cycle, the weekly stale-window, and the
+    7-day cycle length)."""
     assert CADENCE_SYMBOLS == frozenset(
-        {"saturday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"}
+        {"saturday_sf", "sunday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"}
     )
 
 

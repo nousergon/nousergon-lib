@@ -25,9 +25,9 @@ name: Version-bump check
 #   - ``auto-version-bump.yml``: the sole routine version writer.
 #   - ``tests/test_version_pin.py``: pyproject/__init__ lockstep invariant.
 
-on:
-
 permissions: {}
+
+on:
   pull_request:
     branches: [main]
     # labeled/unlabeled included so applying release:manual re-evaluates

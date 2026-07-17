@@ -15,9 +15,9 @@ name: Publish to PyPI
 # workflow_dispatch is kept for manual recovery (failed first attempt,
 # pending-trusted-publisher bootstrap, etc.).
 
-on:
-
 permissions: {}
+
+on:
   push:
     branches: [main]
   workflow_dispatch:
