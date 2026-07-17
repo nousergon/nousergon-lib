@@ -24,7 +24,7 @@ dependencies = [
     # ``krepis`` package in v0.66.0; ``nousergon_lib.<module>`` now
     # re-exports ``krepis.<module>`` for back-compat (see
     # tests/test_krepis_reexport.py). New code imports krepis directly.
-    "krepis>=0.10.1",
+    "krepis>=0.14.0",
     # Pydantic V2 evaluates field annotations at class-construction time
     # via get_type_hints, which on Python 3.9 cannot eval PEP 604 union
     # syntax (``str | None``) even when guarded by
