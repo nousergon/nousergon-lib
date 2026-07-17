@@ -25,6 +25,7 @@ import logging
 import time
 
 import boto3
+from krepis import alerts
 
 from nousergon_lib import ec2_spot
 
@@ -36,6 +37,7 @@ from nousergon_lib import ec2_spot
 from nousergon_lib.ec2_spot import (
     SpotCapacityExhausted,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
     SpotLaunchError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
+    SpotQuotaExceededError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
 )
 
 logger = logging.getLogger(__name__)
@@ -67,11 +69,16 @@ def launch_with_fallback(
     extra_tags: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Launch a box; spot first, on-demand fallback on SpotCapacityExhausted
-    (or immediately on-demand if ``force_on_demand``, e.g. config#1645's
-    bounded relaunch escalation after repeated mid-run spot interruption).
-    Returns ``(instance_id, market)`` where market is ``"spot"`` or
-    ``"on-demand"``. Raises ``SpotLaunchError`` (or its
-    ``SpotCapacityExhausted`` subclass) if every attempt is exhausted/fails.
+    OR SpotQuotaExceededError (config#2698 — an account-wide spot quota
+    ceiling, e.g. ``MaxSpotInstanceCountExceeded``, gets the identical
+    on-demand fallback as ordinary per-AZ capacity exhaustion, plus an
+    operator page since a quota ceiling only clears via a human-requested
+    increase), or immediately on-demand if ``force_on_demand`` (e.g.
+    config#1645's bounded relaunch escalation after repeated mid-run spot
+    interruption). Returns ``(instance_id, market)`` where market is
+    ``"spot"`` or ``"on-demand"``. Raises ``SpotLaunchError`` (or its
+    ``SpotCapacityExhausted``/``SpotQuotaExceededError`` subclasses) if
+    every attempt is exhausted/fails.
 
     ``extra_tags`` (config#2292, root fix for config#2267 site 2): additional
     ``{key: value}`` instance tags threaded straight through to
@@ -107,6 +114,22 @@ def launch_with_fallback(
     except SpotCapacityExhausted:
         logger.warning(
             "spot capacity exhausted across all type×subnet pools — relaunching ON-DEMAND"
+        )
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
+        return iid, "on-demand"
+    except SpotQuotaExceededError as exc:
+        # Account-wide (config#2698) — distinct from ordinary capacity
+        # rotation exhaustion, so this gets its own operator page: capacity
+        # exhaustion self-heals as AWS capacity shifts, but a quota ceiling
+        # only clears via a service-quota increase, which needs a human to
+        # notice and request.
+        logger.warning("spot quota exceeded (%s) — relaunching ON-DEMAND", exc)
+        alerts.publish(
+            f"EC2 spot quota exceeded for {tag_name!r} in {region} — "
+            f"falling back to on-demand: {exc}",
+            severity="warning",
+            source="nousergon_lib.spot_dispatch.launch_with_fallback",
+            dedup_key=f"spot-quota-exceeded-{region}",
         )
         iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
         return iid, "on-demand"
