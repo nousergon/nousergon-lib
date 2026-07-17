@@ -31,7 +31,8 @@ ships the freshness-monitor Lambda that wires the two together.
 **Public surface:**
 
 - :data:`CADENCE_SYMBOLS` — supported cron-cadence symbols
-  (``saturday_sf`` / ``weekday_sf`` / ``eod_sf`` / ``continuous``).
+  (``saturday_sf`` / ``sunday_sf`` / ``weekday_sf`` / ``eod_sf`` /
+  ``continuous`` / ``event_driven``).
 - :class:`ArtifactSpec` — registry-row dataclass.
 - :class:`CheckResult` — single-probe outcome dataclass.
 - :func:`check_freshness` — pure ``(s3_client, spec, now) → CheckResult``.
@@ -98,11 +99,11 @@ from nousergon_lib.trading_calendar import (
 # require both a cycle-resolution rule in ``resolve_current_cycle`` and
 # a window-label rule in ``resolve_dedup_key``.
 CadenceSymbol = Literal[
-    "saturday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"
+    "saturday_sf", "sunday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"
 ]
 
 CADENCE_SYMBOLS: Final[frozenset[str]] = frozenset(
-    {"saturday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"}
+    {"saturday_sf", "sunday_sf", "weekday_sf", "eod_sf", "continuous", "event_driven"}
 )
 
 # ``event_driven`` is the cadence for artifacts written ONLY when a gated
@@ -128,8 +129,12 @@ CADENCE_SYMBOLS: Final[frozenset[str]] = frozenset(
 # ``~/Development/CLAUDE.md`` § Architecture diagrams (Weekly Freshness SF at
 # 09:00 UTC, Pre-open Trading SF at 13:00 UTC). Post-close Trading SF is daemon-triggered
 # post-close so its "expected cron" anchors to a conservative 21:00 UTC
-# (after the daemon shutdown + EOD reconcile typically completes).
+# (after the daemon shutdown + EOD reconcile typically completes). ModelZoo
+# Sunday SF fires 09:00 UTC Sun (EventBridge rule ``alpha-engine-modelzoo-sunday``,
+# ``cron(0 9 ? * SUN *)``) — the weekly counterpart to saturday_sf, anchored to
+# Sunday instead of Saturday.
 _SATURDAY_SF_CRON_UTC: Final[int] = 9
+_SUNDAY_SF_CRON_UTC: Final[int] = 9
 _WEEKDAY_SF_CRON_UTC: Final[int] = 13
 _EOD_SF_ANCHOR_UTC: Final[int] = 21
 
@@ -497,6 +502,14 @@ def _most_recent_saturday(now_utc: datetime) -> date:
     return d - timedelta(days=days_back)
 
 
+def _most_recent_sunday(now_utc: datetime) -> date:
+    """Most recent calendar Sunday at or before ``now_utc.date()``."""
+    d = now_utc.date()
+    # weekday(): Mon=0, Sun=6
+    days_back = (d.weekday() - 6) % 7
+    return d - timedelta(days=days_back)
+
+
 def resolve_current_cycle(
     spec: ArtifactSpec, now: datetime
 ) -> tuple[datetime, str]:
@@ -540,6 +553,23 @@ def resolve_current_cycle(
             )
         iso_year, iso_week, _ = sat.isocalendar()
         return tick, f"{iso_year}-W{iso_week:02d}"
+
+    if spec.cadence == "sunday_sf":
+        # Weekly counterpart to saturday_sf, anchored to Sunday 09:00 UTC
+        # (ModelZoo Sunday SF). Find the most recent Sunday whose tick passed.
+        sun = _most_recent_sunday(now_utc)
+        tick = datetime(
+            sun.year, sun.month, sun.day,
+            _SUNDAY_SF_CRON_UTC, 0, tzinfo=timezone.utc,
+        )
+        if tick > now_utc:
+            sun = sun - timedelta(days=7)
+            tick = datetime(
+                sun.year, sun.month, sun.day,
+                _SUNDAY_SF_CRON_UTC, 0, tzinfo=timezone.utc,
+            )
+        iso_year, iso_week, _ = sun.isocalendar()
+        return tick, f"{iso_year}-W{iso_week:02d}-SUN"
 
     if spec.cadence in ("weekday_sf", "eod_sf"):
         cron_hour = (
@@ -846,7 +876,7 @@ def _freshness_floor(
         non-session gap, so the wall-clock window is already correct; the
         idle gate handles everything outside the window.
     """
-    if spec.cadence == "saturday_sf":
+    if spec.cadence in ("saturday_sf", "sunday_sf"):
         return now_utc - timedelta(days=_SATURDAY_SF_STALE_DAYS)
     if spec.cadence in ("weekday_sf", "eod_sf"):
         floor_day = previous_trading_day(last_closed_trading_day(now_utc))
@@ -1169,7 +1199,7 @@ def _cycle_length_seconds(spec: ArtifactSpec) -> float:
     arithmetic. The exact length doesn't need to track NYSE holidays
     (the grace period is a coarse cold-start gate, not an SLA).
     """
-    if spec.cadence == "saturday_sf":
+    if spec.cadence in ("saturday_sf", "sunday_sf"):
         return 7 * 24 * 3600
     if spec.cadence in ("weekday_sf", "eod_sf"):
         return 24 * 3600
