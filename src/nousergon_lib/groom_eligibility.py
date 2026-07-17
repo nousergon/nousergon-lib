@@ -21,8 +21,8 @@ lists / counts in.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Optional, Sequence
 
 # ── Label semantics (mirrors groom_driver.py — contract-tested both sides) ──
 
@@ -143,7 +143,7 @@ def filter_for_tiers(tiers: Iterable[str]) -> str:
     return name
 
 
-def tier_of(labels: Iterable[str]) -> Optional[str]:
+def tier_of(labels: Iterable[str]) -> str | None:
     """Complexity tier for a label set, or None if excluded from grooming.
 
     Unlabeled ⇒ "mid" (the standing default). ``complexity:ultra`` and the
@@ -167,7 +167,7 @@ def is_gate_excluded(labels: Iterable[str]) -> bool:
     return bool(label_set & GATE_SOFT_EXCLUDE_LABELS) and GATE_DUE_LABEL not in label_set
 
 
-def is_actionable(labels: Iterable[str]) -> Optional[str]:
+def is_actionable(labels: Iterable[str]) -> str | None:
     """The tier this issue is actionable in, or None (excluded/gated)."""
     tier = tier_of(labels)
     if tier is None or is_gate_excluded(labels):

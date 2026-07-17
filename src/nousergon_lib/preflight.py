@@ -41,10 +41,6 @@ log = logging.getLogger(__name__)
 # alternate path.
 _DEFAULT_GIT_SHA_FILE = Path("/var/task/GIT_SHA.txt")
 
-# Public-repo branch-HEAD API. No auth required; 60 req/hr unauth rate
-# limit is fine for Lambda cold-starts and CI runs.
-_GITHUB_BRANCH_URL = "https://api.github.com/repos/{repo}/branches/{branch}"
-
 
 class BasePreflight:
     """Shared preflight primitives.
@@ -300,7 +296,7 @@ class BasePreflight:
         today = date.today()
         cutoff = today - timedelta(days=max_stale_days)
 
-        def _last_date_for(sym: str) -> tuple[str, "date | None", "str | None"]:
+        def _last_date_for(sym: str) -> tuple[str, date | None, str | None]:
             try:
                 # See the analogous cast on check_arcticdb_universe_fresh
                 # above: VersionedItem.data's declared type is a broad
@@ -386,6 +382,15 @@ class BasePreflight:
         which is exactly the deploy-drift mode that motivated this
         check (2026-04-20 coverage-gap session).
 
+        A mismatch is not automatically drift: rapid-fire back-to-back
+        merges mean the image can finish building from an older `main`
+        HEAD after a newer commit has already landed. If ``baked`` is
+        still an ancestor of ``upstream`` (i.e. reachable by walking
+        upstream's history backwards), the deployed code is a strict
+        prefix of current main — a benign race, not drift. Only a SHA
+        that is *not* an ancestor (force-push, history rewrite, or a
+        deploy built from an unrelated branch) hard-fails.
+
         Degraded modes (warn, don't fail) — chosen so a GitHub outage
         or an unstamped legacy image doesn't block a trading-hours
         Lambda:
@@ -393,7 +398,10 @@ class BasePreflight:
           checking; log warn and continue.
         - GitHub API unreachable           → log warn and continue.
 
-        Hard-fail mode — when both stamps are present and differ.
+        Hard-fail mode — when both stamps are present, differ, and
+        ``baked`` is not an ancestor of ``upstream`` (including when
+        the ancestry check itself can't be resolved — an unmet
+        mismatch defaults to hard-fail, never to a silent pass).
 
         Args:
             repo: ``"owner/name"`` — e.g. ``"nousergon/crucible-predictor"``.
@@ -416,17 +424,27 @@ class BasePreflight:
             # _fetch_origin_main_sha already logged the reason
             return
 
-        if baked != upstream:
-            raise RuntimeError(
-                f"Deploy drift: image was built from {baked[:12]} but "
-                f"{repo}@{branch} is now at {upstream[:12]}. The CI deploy "
-                f"workflow did not promote the latest commit. Re-run "
-                f"`.github/workflows/deploy.yml` on main (or the local "
-                f"deploy.sh) before resuming. Refusing to proceed — "
-                f"running stale code on new signals is how 2026-04-20 happened."
-            )
+        if baked == upstream:
+            log.info("Deploy-drift: image at %s matches %s@%s ✓", baked[:12], repo, branch)
+            return
 
-        log.info("Deploy-drift: image at %s matches %s@%s ✓", baked[:12], repo, branch)
+        if _is_ancestor(repo, base=baked, head=upstream, timeout=timeout):
+            log.info(
+                "Deploy-drift: image at %s is behind %s@%s (%s) but is a valid "
+                "ancestor — benign build/merge race, not drift.",
+                baked[:12], repo, branch, upstream[:12],
+            )
+            return
+
+        raise RuntimeError(
+            f"Deploy drift: image was built from {baked[:12]} but "
+            f"{repo}@{branch} is now at {upstream[:12]}, and {baked[:12]} is "
+            f"not an ancestor of it. The CI deploy workflow did not promote "
+            f"the latest commit (or history was rewritten/force-pushed). "
+            f"Re-run `.github/workflows/deploy.yml` on main (or the local "
+            f"deploy.sh) before resuming. Refusing to proceed — "
+            f"running stale code on new signals is how 2026-04-20 happened."
+        )
 
 
 def _read_baked_git_sha(sha_file: Path) -> str | None:
@@ -445,6 +463,17 @@ def _read_baked_git_sha(sha_file: Path) -> str | None:
     return sha
 
 
+def _safe_urlopen(req, **kwargs):
+    """urlopen wrapper that fails loudly on any non-https scheme (S310: bandit
+    cannot statically prove the URL's scheme, but every call site here builds
+    it from a hardcoded https:// base -- this makes that guarantee explicit
+    and enforced at runtime rather than just asserted by code review)."""
+    url = req.full_url if isinstance(req, urllib.request.Request) else req
+    if not url.startswith("https://"):
+        raise ValueError(f"refusing non-https URL: {url!r}")
+    return urllib.request.urlopen(req, **kwargs)  # noqa: S310 -- scheme validated above
+
+
 def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0) -> str | None:
     """Fetch HEAD SHA of ``branch`` for ``repo`` via GitHub REST API.
 
@@ -453,10 +482,18 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
     the consumer. ``repo`` is ``"owner/name"`` (e.g.
     ``"nousergon/crucible-predictor"``).
     """
-    url = _GITHUB_BRANCH_URL.format(repo=repo, branch=branch)
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+    # S310 fires on urllib.request.Request(...) whenever the URL argument is
+    # a variable rather than an inline literal (it cannot statically prove
+    # the scheme through the indirection) — inlining the f-string directly,
+    # same as the alpha-engine-config precedent (config#2532), keeps the
+    # scheme provably-hardcoded-https at the call site instead of needing a
+    # noqa here on top of the _safe_urlopen runtime guard below.
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/branches/{branch}",
+        headers={"Accept": "application/vnd.github+json"},
+    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _safe_urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
         return payload.get("commit", {}).get("sha")
     except (OSError, json.JSONDecodeError) as exc:
@@ -467,3 +504,43 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
         # OSError → URLError wrap point in do_open).
         log.warning("Deploy-drift: GitHub API unreachable (%s) — cannot compare", exc)
         return None
+
+
+def _is_ancestor(repo: str, base: str, head: str, timeout: float = 5.0) -> bool:
+    """Return ``True`` if ``base`` is an ancestor of (or equal to) ``head``.
+
+    Uses GitHub's compare-commits API rather than local ``git
+    merge-base`` — Lambda images never bake in a ``.git`` object
+    database (only source directories are ``COPY``'d), so there is no
+    local history to walk. ``status`` is one of ``identical`` (same
+    commit), ``ahead`` (``head`` has commits ``base`` doesn't, ``base``
+    reachable from ``head``), ``behind`` (``base`` has commits ``head``
+    doesn't — ``base`` is *not* an ancestor of ``head``), or
+    ``diverged`` (neither is an ancestor of the other). Only
+    ``identical``/``ahead`` count as a benign race; ``behind``/
+    ``diverged`` are real drift.
+
+    Returns ``False`` — hard-fail, not warn-and-continue — on any
+    network/parse error. Unlike ``_fetch_origin_main_sha``, we already
+    know ``baked != upstream`` by the time this is called; failing to
+    resolve *why* they differ must not silently pass a possibly-real
+    drift.
+    """
+    # Inlined f-string (not a formatted variable) — same S310 rationale as
+    # _fetch_origin_main_sha above: keeps the https:// scheme provably
+    # hardcoded at the call site for ruff's static check.
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/compare/{base}...{head}",
+        headers={"Accept": "application/vnd.github+json"},
+    )
+    try:
+        with _safe_urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read())
+        status = payload.get("status")
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning(
+            "Deploy-drift: GitHub compare API unreachable (%s) — cannot resolve "
+            "ancestry, treating mismatch as drift", exc,
+        )
+        return False
+    return status in ("identical", "ahead")

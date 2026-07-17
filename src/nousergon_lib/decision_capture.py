@@ -50,9 +50,8 @@ from typing import Any, Literal
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from krepis.model_metadata import ModelMetadata
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +150,7 @@ class DecisionArtifact(BaseModel):
     data_snapshot_id: str | None = None
 
     @model_validator(mode="after")
-    def _llm_fields_paired(self) -> "DecisionArtifact":
+    def _llm_fields_paired(self) -> DecisionArtifact:
         """``model_metadata`` and ``full_prompt_context`` must both be
         present (LLM agent) or both be ``None`` (deterministic decision).
 

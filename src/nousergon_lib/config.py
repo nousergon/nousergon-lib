@@ -71,8 +71,9 @@ Two entry points::
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import Union
 
 __all__ = ["resolve_experiment_config", "DEFAULT_EXPERIMENT_ID"]
 
@@ -85,7 +86,7 @@ _CONFIG_REPO_DIRNAME = "alpha-engine-config"
 PathLike = Union[str, os.PathLike]
 
 
-def _config_roots(repo_root: Path, github_workspace: Optional[str]) -> List[Path]:
+def _config_roots(repo_root: Path, github_workspace: str | None) -> list[Path]:
     """Build the ordered config-repo roots searched for the experiment package.
 
     Consensus across all five inline copies:
@@ -111,13 +112,13 @@ def _candidate_paths(
     *,
     repo_root: Path,
     experiment_id: str,
-    github_workspace: Optional[str],
+    github_workspace: str | None,
     repo_local_fallbacks: Sequence[Path],
-) -> List[Path]:
+) -> list[Path]:
     """Assemble the full ordered candidate list (experiment → legacy → local)."""
     roots = _config_roots(repo_root, github_workspace)
     # 1. experiment-package copy, per root
-    candidates: List[Path] = [
+    candidates: list[Path] = [
         root / "experiments" / experiment_id / subdir / filename for root in roots
     ]
     # 2. legacy top-level copy, per root
@@ -160,14 +161,14 @@ def resolve_experiment_config(
     *,
     repo_root: PathLike,
     extra_fallbacks: Iterable[PathLike] = (),
-    repo_local_fallback: Optional[PathLike] = None,
-    experiment_id: Optional[str] = None,
-    github_workspace: Union[str, bool, None] = None,
+    repo_local_fallback: PathLike | None = None,
+    experiment_id: str | None = None,
+    github_workspace: str | bool | None = None,
     resolve: bool = False,
     resolve_symlinks: bool = False,
     exclude_suffixes: Sequence[str] = (),
-    error_message: Optional[str] = None,
-) -> Union[List[Path], Path]:
+    error_message: str | None = None,
+) -> list[Path] | Path:
     """Resolve a config file experiment-package-first (config#1042 consensus).
 
     The canonical lift of the inline ``_find_config`` / ``load_config`` /
@@ -239,7 +240,7 @@ def resolve_experiment_config(
     # Resolve the GITHUB_WORKSPACE opt-in: True → read env; str → use as-is;
     # None/False → omit the CI root.
     if github_workspace is True:
-        ws: Optional[str] = os.environ.get("GITHUB_WORKSPACE")
+        ws: str | None = os.environ.get("GITHUB_WORKSPACE")
     elif github_workspace in (None, False):
         ws = None
     else:
@@ -248,7 +249,7 @@ def resolve_experiment_config(
     # Repo-local fallback chain: the single default (or override) first, then
     # any extra_fallbacks, in caller order.
     if repo_local_fallback is not None:
-        repo_local_fallbacks: List[Path] = [Path(repo_local_fallback)]
+        repo_local_fallbacks: list[Path] = [Path(repo_local_fallback)]
     else:
         repo_local_fallbacks = [repo_root_path / subdir / filename]
     repo_local_fallbacks += [Path(p) for p in extra_fallbacks]

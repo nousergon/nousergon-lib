@@ -27,8 +27,9 @@ Statistical Inference".
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from statistics import NormalDist
-from typing import Callable, Sequence, TypedDict
+from typing import Callable, TypedDict
 
 import numpy as np
 

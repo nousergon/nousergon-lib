@@ -79,7 +79,7 @@ def test_missing_pillars_renormalize_weights():
 
 def test_no_usable_pillars_returns_null_score():
     out = compute_cross_sectional_attractiveness(
-        {"ZZZ": {p: None for p in PILLAR_ORDER}},
+        {"ZZZ": dict.fromkeys(PILLAR_ORDER)},
         DEFAULT_PILLAR_WEIGHTS,
     )
     assert out["ZZZ"]["attractiveness_score"] is None

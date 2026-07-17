@@ -9,7 +9,7 @@ share byte-identical numbers for the same factor-profile inputs.
 
 from __future__ import annotations
 
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 PILLAR_ORDER: tuple[str, ...] = (
     "quality",
@@ -98,7 +98,7 @@ def normalize_pillar_weights(raw: dict[str, float] | None) -> dict[str, float]:
 
 
 def compute_cross_sectional_attractiveness(
-    pillar_scores_by_ticker: dict[str, dict[str, Optional[float]]],
+    pillar_scores_by_ticker: dict[str, dict[str, float | None]],
     pillar_weights: dict[str, float],
 ) -> dict[str, dict]:
     """Blend sector-neutral pillar percentiles into cross-sectional attractiveness scores.

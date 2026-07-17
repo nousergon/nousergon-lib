@@ -71,7 +71,7 @@ def s3():
 
 
 def _reg(s3, **kw):
-    defaults = dict(date="2026-04-23", bucket="test-bucket", marker_prefix="backtest", s3_client=s3)
+    defaults = {"date": "2026-04-23", "bucket": "test-bucket", "marker_prefix": "backtest", "s3_client": s3}
     defaults.update(kw)
     return PhaseRegistry(**defaults)
 
