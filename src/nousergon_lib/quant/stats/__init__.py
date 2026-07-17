@@ -16,6 +16,10 @@ Modules:
   - ``intervals``               — bootstrap CI, Newey-West SE, Wilson score interval
   - ``risk_matched_benchmark``  — EW-high-vol + beta-matched-SPY baselines + IR
   - ``regime_sortino``          — regime-stratified cross-sectional pick-alpha Sortino
+  - ``trial_accumulator``       — cumulative multiple-testing trial count (config#2454);
+                                   the shared S3-backed counter ``dsr``'s ``n_trials``
+                                   reads from, incremented by the backtester's 4 sweep
+                                   producers
 
 Example::
 
@@ -23,6 +27,9 @@ Example::
     from nousergon_lib.quant.stats.pbo import cscv_pbo
     from nousergon_lib.quant.stats.multiple_testing import benjamini_hochberg
     from nousergon_lib.quant.stats.intervals import bootstrap_ci, wilson_score_interval
+    from nousergon_lib.quant.stats.trial_accumulator import (
+        increment_trial_count, read_cumulative_trial_count,
+    )
 """
 
 from __future__ import annotations
