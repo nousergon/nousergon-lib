@@ -61,7 +61,7 @@ jobs:
         # call inside the relevant module / tests mock the model load.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts]" pytest-cov
+          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,github_app]" pytest-cov
 
       - name: Run pytest
         run: python -m pytest -q --cov --cov-report=term-missing
@@ -96,7 +96,7 @@ jobs:
         # them — see rag/rerank.py).
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,type-check]"
+          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,github_app,type-check]"
           pip install pyright
 
       - name: Run pyright
