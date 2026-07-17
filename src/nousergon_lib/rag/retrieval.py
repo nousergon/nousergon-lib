@@ -23,9 +23,9 @@ generation regardless of method.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
-from typing import Iterable, Literal
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +157,8 @@ def _vector_search(
     top_k: int,
 ) -> list[RetrievalResult]:
     """pgvector cosine top-K via the HNSW index on ``embedding``."""
-    from .embeddings import embed_query
     from .db import get_connection
+    from .embeddings import embed_query
 
     query_vec = embed_query(query)
     where, params = _build_metadata_where(tickers, doc_types, min_date)
@@ -166,6 +166,13 @@ def _vector_search(
     # metadata-filter params; then the ORDER BY vector + LIMIT.
     select_params: list = [str(query_vec)]
     order_params: list = [str(query_vec), top_k]
+    # S608 false positive: `where` is built by _build_metadata_where, which
+    # only ever composes fixed column/operator strings ("d.ticker = ANY(%s)"
+    # etc.) — every actual value flows through the %s placeholders passed to
+    # cur.execute below, never string-interpolated. ruff has no data-flow
+    # analysis for this rule and flags any f-string touching a `sql = f"""`
+    # block regardless (see pyproject.toml's S603 note for the same class of
+    # ruff limitation).
     sql = f"""
         SELECT c.id, c.content, d.ticker, d.doc_type, d.filed_date, c.section_label,
                1 - (c.embedding <=> %s::vector) AS similarity
@@ -174,7 +181,7 @@ def _vector_search(
         {where}
         ORDER BY c.embedding <=> %s::vector
         LIMIT %s
-    """
+    """  # noqa: S608
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, select_params + params + order_params)
@@ -241,6 +248,10 @@ def _keyword_search(
     rank_params: list = [query]   # ts_rank_cd query in SELECT
     fts_params: list = [query]    # OR-tsquery in WHERE
     order_params: list = [top_k]
+    # S608 false positive: same as _vector_search above — `where` and
+    # `or_tsquery` are fixed SQL-fragment strings (column names, PG function
+    # calls, %s placeholders), never user data. Actual values flow through
+    # rank_params/fts_params/order_params to cur.execute below.
     sql = f"""
         SELECT c.id, c.content, d.ticker, d.doc_type, d.filed_date, c.section_label,
                ts_rank_cd(c.content_tsv, {or_tsquery}) AS rank
@@ -249,7 +260,7 @@ def _keyword_search(
         {where}
         ORDER BY rank DESC
         LIMIT %s
-    """
+    """  # noqa: S608
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, rank_params + params + fts_params + order_params)
@@ -358,7 +369,7 @@ def _minmax_normalize(scores: dict[str, float]) -> dict[str, float]:
     values = list(scores.values())
     lo, hi = min(values), max(values)
     if hi == lo:
-        return {k: 1.0 for k in scores}
+        return dict.fromkeys(scores, 1.0)
     span = hi - lo
     return {k: (v - lo) / span for k, v in scores.items()}
 

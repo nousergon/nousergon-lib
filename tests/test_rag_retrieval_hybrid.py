@@ -27,7 +27,6 @@ from nousergon_lib.rag.retrieval import (
     retrieve,
 )
 
-
 # ── _minmax_normalize ───────────────────────────────────────────────────────
 
 

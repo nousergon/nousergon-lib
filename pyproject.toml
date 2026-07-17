@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.123.0"
+version = "0.124.2"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -24,7 +24,7 @@ dependencies = [
     # ``krepis`` package in v0.66.0; ``nousergon_lib.<module>`` now
     # re-exports ``krepis.<module>`` for back-compat (see
     # tests/test_krepis_reexport.py). New code imports krepis directly.
-    "krepis>=0.10.1",
+    "krepis>=0.14.0",
     # Pydantic V2 evaluates field annotations at class-construction time
     # via get_type_hints, which on Python 3.9 cannot eval PEP 604 union
     # syntax (``str | None``) even when guarded by
@@ -45,6 +45,13 @@ quant = ["numpy>=1.24"]
 # separate from [quant] so the numpy-only consumers (e.g. robodashboard)
 # don't pull pandas+sklearn.
 quant-xs = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.0"]
+# Per-series L2 data-contract validation gates (nousergon_lib.series_contract
+# — alpha-engine-config#2456): schema/sanity/staleness/continuity/outlier/
+# calendar-monotonic checks over an OHLCV DataFrame. pandas-only (no numpy
+# API used directly; pandas vendors it) — kept as its own extra rather than
+# folded into [arcticdb] so a pure-validation consumer (predictor,
+# backtester) doesn't have to pull the ArcticDB C++ extension transitively.
+series-contract = ["pandas>=2.0"]
 # Statistical evaluation utilities (nousergon_lib.quant.stats — PSR/DSR, IC,
 # expectancy, BH-FDR, risk-matched benchmarks). numpy + pandas always; scipy is
 # used by information_coefficient for the p-value (numpy fallback otherwise).
@@ -56,6 +63,9 @@ quant-stats = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.7"]
 # (e.g. an EXTERNAL provider outage) is a green notification, not a red failure.
 # Bump to >=0.6.0,<0.7 when 0.6.0 final ships and the soak passes.
 flow_doctor = ["krepis[flow_doctor]"]  # delegate the pin to krepis (owns the flow-doctor glue)
+# GitHub App installation-token minting (nousergon_lib.github_app) — RS256
+# App JWTs need PyJWT with its crypto backend (config-I2785).
+github_app = ["PyJWT[crypto]>=2.8"]
 contracts = ["jsonschema>=4.21"]
 rag = [
     "psycopg2-binary>=2.9",
@@ -94,6 +104,16 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+# Ratchet floor (config#2530): measured 92.78% with the same [dev,rag,
+# arcticdb,quant,quant-xs,quant-stats,contracts] extras test.yml's pytest job
+# installs, rounded down to integer. Prevents regression; raise
+# opportunistically as coverage grows.
+fail_under = 92
+
 [tool.pyright]
 # CI gate (config#2534): basic mode pinned to the 3.9 floor — the oldest
 # supported version is where PEP604-class regressions actually bite (see
@@ -116,3 +136,48 @@ typeCheckingMode = "basic"
 # before running pyright, so no venvPath/executionEnvironments indirection
 # is needed — pyright resolves imports from the active interpreter's
 # site-packages by default.
+
+[tool.ruff]
+line-length = 120
+# py39, not the repo's newer CI matrix ceiling: `requires-python = ">=3.9"`
+# above is the actual floor (EC2 always-on micro instance still runs 3.9;
+# see that field's comment), and ruff's target-version controls which
+# syntax UP-rules are allowed to assume is available. Targeting a newer
+# version here would let UP-fixes rewrite code into syntax that breaks on
+# the floor this package still has to run on.
+target-version = "py39"
+
+[tool.ruff.lint]
+# Baseline mirrors the fleet's established ruff selection (metron:
+# E, W, F, I, UP, B, C4) plus S (flake8-bandit) — config#2532 propagates the
+# S ruleset as a SAST-lite layer for private repos where CodeQL isn't free.
+select = ["E", "W", "F", "I", "UP", "B", "C4", "S"]
+# E501: line length is a formatter concern, not correctness — deferred to ruff-format.
+# S603 (subprocess-untrusted-input) is deliberately NOT ignored file-by-file — it is
+# excluded from selection fleet-wide, following alpha-engine-config's precedent
+# (config#2532, PR#2643). Verified empirically (ruff 0.14.14): S603 fires on ANY
+# non-inline-literal subprocess argv, including a shutil.which()-resolved,
+# None-checked absolute path assigned to a variable one line above the call (ruff has
+# no data-flow analysis for this rule; see astral-sh/ruff#4045, upstream bandit B603
+# docs: "even if you validate user input, this check will still report"). Selecting a
+# rule that a fail-loud/no-noqa policy cannot satisfy by any code change would force a
+# blanket suppression at every call site, which is worse than not selecting it. S607
+# (partial-executable-path) IS selected and enforced for real — that is the rule that
+# maps to an actual root-cause fix (resolve the binary to an absolute path via
+# shutil.which() and fail loudly if missing), and every producer-path finding under it
+# is fixed, not suppressed.
+ignore = ["E501", "S603"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files: assert is the point (S101); dummy credential-shaped literals
+# passed as fixture args (S106) or bound to names like GH_TOKEN/API_KEY
+# (S105) are fixture noise, not real secrets; seeded random.Random(...)
+# calls (S311) exercise deterministic-sampling code under test, never
+# security-sensitive. Fail-loud rule (config#2532) is scoped to
+# producer/writer paths — these are not those. E402 (import not at top):
+# the fleet's established `pytest.importorskip("numpy")` / `pd =
+# pytest.importorskip("pandas")` guard-then-import pattern (test.yml's own
+# per-extra-skip convention — see that workflow's install-step comment) is
+# an intentional module-level ordering, not an accidental one; the skip
+# must run before the guarded import is attempted.
+"tests/**" = ["S101", "S105", "S106", "S311", "E402"]

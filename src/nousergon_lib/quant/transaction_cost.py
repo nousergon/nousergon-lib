@@ -39,8 +39,8 @@ Design:
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping, Optional
 
 # Institutional defaults — large-cap US equities / IBKR-paper calibration.
 _DEFAULT_HALF_SPREAD_BPS = 2.5
@@ -74,7 +74,7 @@ class TransactionCostModel:
     min_cost_bps: float = _DEFAULT_MIN_COST_BPS
 
     @classmethod
-    def from_config(cls, config: dict | None) -> "TransactionCostModel":
+    def from_config(cls, config: dict | None) -> TransactionCostModel:
         """Build from the optional ``transaction_cost`` block of the config;
         absent keys fall back to the institutional defaults."""
         cfg = ((config or {}).get("transaction_cost") or {}) if config else {}
@@ -148,8 +148,8 @@ class TransactionCostModel:
 
 
 def tradeability_percentiles(
-    cost_bps_by_name: Mapping[str, Optional[float]],
-) -> dict[str, Optional[float]]:
+    cost_bps_by_name: Mapping[str, float | None],
+) -> dict[str, float | None]:
     """Map per-name expected cost (bps) → a 0-100 cross-sectional tradeability
     score where **lower cost ⇒ HIGHER score** (100 = the cheapest/most tradeable
     name in the cross-section). Uses average-rank percentile (ties share their
@@ -162,7 +162,7 @@ def tradeability_percentiles(
     import bisect
 
     ranked = {k: float(v) for k, v in cost_bps_by_name.items() if v is not None}
-    out: dict[str, Optional[float]] = {k: None for k in cost_bps_by_name}
+    out: dict[str, float | None] = dict.fromkeys(cost_bps_by_name)
     if not ranked:
         return out
     # Rank on -cost so cheapest → highest percentile.

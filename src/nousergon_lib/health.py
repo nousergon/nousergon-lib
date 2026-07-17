@@ -49,7 +49,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Final, List, Literal, Optional
+from typing import Any, Final, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +166,7 @@ class Deliverable:
 # ── Status derivation ────────────────────────────────────────────────────────
 
 
-def missing_required(deliverables: List[Deliverable]) -> List[Deliverable]:
+def missing_required(deliverables: list[Deliverable]) -> list[Deliverable]:
     """Return the required deliverables that were not produced.
 
     Factored out of :func:`derive_status` so the "is this run structurally
@@ -177,9 +177,9 @@ def missing_required(deliverables: List[Deliverable]) -> List[Deliverable]:
 
 
 def derive_status(
-    deliverables: List[Deliverable],
-    error: Optional[str] = None,
-    warnings: Optional[List[str]] = None,
+    deliverables: list[Deliverable],
+    error: str | None = None,
+    warnings: list[str] | None = None,
 ) -> Status:
     """Derive the run status from its outcome — pure, no side effects.
 
@@ -219,12 +219,12 @@ def derive_status(
 
 def build_health_payload(
     module_name: str,
-    deliverables: List[Deliverable],
+    deliverables: list[Deliverable],
     run_date: str,
     duration_seconds: float,
-    summary: Optional[dict] = None,
-    warnings: Optional[List[str]] = None,
-    error: Optional[str] = None,
+    summary: dict | None = None,
+    warnings: list[str] | None = None,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """Build the canonical health payload without touching S3.
 
@@ -255,13 +255,13 @@ def build_health_payload(
 
 def write_health(
     module_name: str,
-    deliverables: List[Deliverable],
+    deliverables: list[Deliverable],
     run_date: str,
     duration_seconds: float,
     *,
-    summary: Optional[dict] = None,
-    warnings: Optional[List[str]] = None,
-    error: Optional[str] = None,
+    summary: dict | None = None,
+    warnings: list[str] | None = None,
+    error: str | None = None,
     bucket: str = DEFAULT_HEALTH_BUCKET,
     s3_client: Any = None,
 ) -> dict[str, Any]:
@@ -317,7 +317,7 @@ def read_health(
     *,
     bucket: str = DEFAULT_HEALTH_BUCKET,
     s3_client: Any = None,
-) -> Optional[dict]:
+) -> dict | None:
     """Read the health JSON for ``module_name``. Returns ``None`` if absent.
 
     Ported from the copies' ``read_health``: any read failure (missing key,
@@ -337,7 +337,7 @@ def read_health(
 
 
 def check_upstream_health(
-    modules: List[str],
+    modules: list[str],
     *,
     bucket: str = DEFAULT_HEALTH_BUCKET,
     max_age_hours: float = 48,

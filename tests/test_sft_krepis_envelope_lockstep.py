@@ -31,12 +31,12 @@ dialects). It fails on any of:
 
 from __future__ import annotations
 
-from pydantic import ValidationError
-
 from krepis.llm import LLMResult, LLMUsage
 from krepis.llm_capture import SFT_SCHEMA_VERSION as KREPIS_SFT_SCHEMA_VERSION
 from krepis.llm_capture import build_sft_record
 from krepis.llm_capture import content_hash as krepis_content_hash
+from pydantic import ValidationError
+
 from nousergon_lib.sft import SFT_SCHEMA_VERSION as NOUSERGON_LIB_SFT_SCHEMA_VERSION
 from nousergon_lib.sft import SftRecord
 from nousergon_lib.sft import content_hash as nousergon_lib_content_hash

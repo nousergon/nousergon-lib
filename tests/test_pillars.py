@@ -16,7 +16,6 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-
 # ── Vocabulary invariants ────────────────────────────────────────────────
 
 
@@ -312,7 +311,6 @@ class TestQualitativePillarAssessment:
         assert assessment.catalyst_horizon_modulation == 0
 
     def test_catalyst_horizon_modulation_bounds(self):
-        from nousergon_lib.pillars import QualitativePillarAssessment
 
         with pytest.raises(ValidationError):
             _make_full_assessment(catalyst_horizon_modulation=25)
@@ -476,7 +474,7 @@ def _make_breakdown(pillar_contributions=None, legacy_blend=None,
     """Helper — build a CompositeBreakdown defaulting to Phase 4 cutover
     state: 6 pillar contributions with pillar_weight=0 + legacy_blend
     carrying all the weight."""
-    from nousergon_lib.pillars import CompositeBreakdown, PILLARS
+    from nousergon_lib.pillars import PILLARS, CompositeBreakdown
 
     if pillar_contributions is None:
         pillar_contributions = [
@@ -630,9 +628,7 @@ class TestCompositeBreakdown:
 
     def test_weights_sum_invariant_enforced(self):
         """Σ pillar_weights + Σ legacy_weights must equal 1.0 within 1e-6."""
-        from nousergon_lib.pillars import (
-            CompositeBreakdown, PillarContribution, PILLARS
-        )
+        from nousergon_lib.pillars import PILLARS, CompositeBreakdown
 
         # Build pillar contributions that sum to 0.6
         pillar_contribs = [

@@ -20,7 +20,6 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-
 # ── Quant analyst ────────────────────────────────────────────────────────
 
 
@@ -95,6 +94,7 @@ class TestStanceLiteral:
         cardinality so a future PR can't quietly slip in a new option
         without surfacing the cross-repo impact."""
         import typing
+
         from nousergon_lib.agent_schemas import StanceLiteral
         args = typing.get_args(StanceLiteral)
         assert args == ("momentum", "value", "quality", "catalyst"), (
@@ -110,6 +110,7 @@ class TestStanceLiteral:
         future ``Momentum``/``MOMENTUM`` or ``momenta`` drift doesn't
         silently break consumers via missed string match."""
         import typing
+
         from nousergon_lib.agent_schemas import StanceLiteral
         for v in typing.get_args(StanceLiteral):
             assert v == v.lower(), f"stance vocabulary not lowercase: {v!r}"
@@ -122,6 +123,7 @@ class TestStanceLiteral:
         StanceLiteral exactly so the discrete label, continuous
         loadings, and iteration order all align."""
         import typing
+
         from nousergon_lib.agent_schemas import STANCE_NAMES, StanceLiteral
         assert STANCE_NAMES == typing.get_args(StanceLiteral)
 
@@ -138,6 +140,7 @@ class TestStanceLoadings:
 
     def test_typical_payload_round_trips(self):
         import json
+
         from nousergon_lib.agent_schemas import StanceLoadings
 
         s = StanceLoadings(momentum=0.65, value=0.10, quality=0.20, catalyst=0.05)
@@ -479,8 +482,9 @@ class TestCIORawOutput:
     def test_rule_tag_vocabulary_is_nine_tags(self):
         """Locked vocabulary — adding/removing a tag is a deliberate
         prompt-version + analysis-layer change, not an accident."""
-        from nousergon_lib.agent_schemas import CIORuleTagLiteral
         from typing import get_args
+
+        from nousergon_lib.agent_schemas import CIORuleTagLiteral
 
         tags = set(get_args(CIORuleTagLiteral))
         assert tags == {

@@ -4,10 +4,7 @@ primitive shared by alpha-engine-research and alpha-engine.
 
 from __future__ import annotations
 
-import pytest
-
 from nousergon_lib.universe import filter_to_universe, in_universe
-
 
 SP500_FIXTURE = frozenset({"AAPL", "MSFT", "GOOGL", "JPM", "XOM"})
 

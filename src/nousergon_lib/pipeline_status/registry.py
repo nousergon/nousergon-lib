@@ -27,10 +27,9 @@ how the two stay in sync without a runtime coupling.
 
 from __future__ import annotations
 
-from typing import Annotated, Final, Literal, Optional, Union
+from typing import Annotated, Final, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ── Substantive-state filtering (§3.2 of the plan doc) ────────────────────
 
@@ -186,7 +185,7 @@ RegistryEntry = Annotated[
 # (Saturday 89 / Weekday 36 / EOD 21 total states; nested Parallel branches
 # walked). Reviewed against ROADMAP L3050 + the post-2026-05-15
 # artifact-archive pages (dashboard #86: pages 16-22).
-STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] = {
+STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     # ── Weekly Freshness SF (27 substantive Task steps) ──────────────────────────
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
@@ -320,6 +319,22 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         "artifact_id resolves in ARTIFACT_REGISTRY.yaml before any spot "
         "launch. No per-run rendered artifact — a preventive guard "
         "(fail-open on fetch/parse misses, mirroring LibPinDriftCheck).",
+    ),
+    # config#2249: fast pre-dispatch substrate health gate, immediately
+    # before MorningEnrich (the first state to actually dispatch work to
+    # the Saturday box). Replaces discovering a dead dispatch box (disk
+    # full, or an unresponsive SSM agent) only after MorningEnrich burns
+    # its full retry ladder (config#2279) with a fast, named
+    # SubstrateUnhealthy failure — a blocking guard, not a fail-open one
+    # (a dead box means the run genuinely cannot proceed).
+    "SubstrateHealthGate": ArtifactReason(
+        reason="Pre-dispatch substrate health check (config#2249) — "
+        "issues a quick SSM disk-headroom probe against the Saturday "
+        "dispatch box immediately before MorningEnrich and fails fast "
+        "(named SubstrateUnhealthy: disk_full / ssm_unresponsive / "
+        "ssm_command_never_registered) rather than burning MorningEnrich's "
+        "full retry ladder against a dead box. No per-run rendered "
+        "artifact — a blocking preventive guard.",
     ),
     # config#2278: fail-open + alert SNS publishes fired when LibPinDriftCheck
     # / PipelineContractCheck itself can't check (Lambda failed after
@@ -667,9 +682,31 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
         page="eod-report",
         artifact_label="EOD reconcile briefing",
     ),
+    "SkipEODReconcileDataGap": ArtifactReason(
+        reason="Loud, distinctly-labeled fail-open SNS alert (nousergon-data "
+        "#813) fired when the post-market data-spot phase exhausts its retry "
+        "budget (most likely a spot interruption) and EODReconcile is "
+        "skipped rather than crashing into the generic HandleFailure path — "
+        "today's close is genuinely absent from ArcticDB. Recovery is "
+        "automatic/operator-driven: chronic-gap-heal backfills the missing "
+        "bar, then an operator-replay execution with "
+        "skip_post_market_data=true reruns EODReconcile alone. No persisted "
+        "artifact (the email IS the surface); see EODReconcile for the "
+        "briefing this alert stands in for."
+    ),
     "DailySubstrateHealthCheck": ArchivePageRef(
         page="fleet-status",
         artifact_label="Daily substrate health check",
+    ),
+    "PublishSubstrateHealthCheckDegradedAlert": ArtifactReason(
+        reason="Best-effort fail-open SNS alert (config#2326) fired when the "
+        "EOD daily substrate health check degrades (crashed, timed out, or "
+        "finished non-Success) — surfaces the miss without blocking the "
+        "cost-guard instance stop; its own Catch still routes to "
+        "StopTradingInstance so an SNS-side failure can't delay/block the "
+        "cost-guard either. No persisted artifact (the email IS the "
+        "surface); see DailySubstrateHealthCheck for the check this alert "
+        "reports on."
     ),
     "StopTradingInstance": ArtifactReason(
         reason="EC2 stopInstances on the trading instance; no artifact — "
@@ -694,7 +731,7 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, Union[ArchivePageRef, ArtifactReason]]] =
 }
 
 
-def lookup_registry(state_name: str) -> Optional[Union[ArchivePageRef, ArtifactReason]]:
+def lookup_registry(state_name: str) -> ArchivePageRef | ArtifactReason | None:
     """Return the registry entry for ``state_name`` (None if absent).
 
     ``None`` here signals "this state is not in the registry" — distinct

@@ -11,9 +11,10 @@ See ``private-docs/fleet_telegram_forum_topics_ops.md`` in alpha-engine-config.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any
 
 
 class FleetTelegramTopic(str, Enum):
@@ -34,8 +35,8 @@ class FleetTelegramTopicSpec:
     topic: FleetTelegramTopic
     thread_id_env: str
     ssm_param: str
-    notify_on: Tuple[str, ...]
-    notify_on_category: Tuple[str, ...] = ()
+    notify_on: tuple[str, ...]
+    notify_on_category: tuple[str, ...] = ()
     disable_notification: bool = False
     parse_mode: str = "Markdown"
 
@@ -88,14 +89,14 @@ _FLEET_TELEGRAM_TOPIC_SPECS: Mapping[FleetTelegramTopic, FleetTelegramTopicSpec]
 }
 
 # Executor daemon: error mirror + trade fills + ops degradation.
-EXECUTOR_FLOW_DOCTOR_TELEGRAM_TOPICS: Tuple[FleetTelegramTopic, ...] = (
+EXECUTOR_FLOW_DOCTOR_TELEGRAM_TOPICS: tuple[FleetTelegramTopic, ...] = (
     FleetTelegramTopic.CRITICAL,
     FleetTelegramTopic.OPS_HEALTH,
     FleetTelegramTopic.TRADES,
 )
 
 # External observers / SF notifiers (T2): pipeline milestones + critical mirror.
-PIPELINE_OBSERVER_TELEGRAM_TOPICS: Tuple[FleetTelegramTopic, ...] = (
+PIPELINE_OBSERVER_TELEGRAM_TOPICS: tuple[FleetTelegramTopic, ...] = (
     FleetTelegramTopic.CRITICAL,
     FleetTelegramTopic.PIPELINE,
     FleetTelegramTopic.OPS_HEALTH,
@@ -115,12 +116,16 @@ def fleet_telegram_thread_id_env(topic: FleetTelegramTopic) -> str:
 def fleet_telegram_notifier_dict(
     topic: FleetTelegramTopic,
     *,
-    bot_token: str = "${TELEGRAM_BOT_TOKEN}",
-    chat_id: str = "${TELEGRAM_CHAT_ID}",
-) -> Dict[str, Any]:
+    # S107-suppressed defaults: these are literal `${ENV_VAR}` YAML-interpolation
+    # placeholders emitted into the flow-doctor config template, not real
+    # credentials — the actual secret is resolved by flow-doctor from env at
+    # its own runtime, never held here.
+    bot_token: str = "${TELEGRAM_BOT_TOKEN}",  # noqa: S107
+    chat_id: str = "${TELEGRAM_CHAT_ID}",  # noqa: S107
+) -> dict[str, Any]:
     """Build one flow-doctor yaml-compatible telegram notifier dict."""
     spec = fleet_telegram_topic_spec(topic)
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "type": "telegram",
         "bot_token": bot_token,
         "chat_id": chat_id,
@@ -137,9 +142,13 @@ def fleet_telegram_notifier_dict(
 def fleet_telegram_notifier_dicts(
     topics: Sequence[FleetTelegramTopic],
     *,
-    bot_token: str = "${TELEGRAM_BOT_TOKEN}",
-    chat_id: str = "${TELEGRAM_CHAT_ID}",
-) -> List[Dict[str, Any]]:
+    # S107-suppressed defaults: these are literal `${ENV_VAR}` YAML-interpolation
+    # placeholders emitted into the flow-doctor config template, not real
+    # credentials — the actual secret is resolved by flow-doctor from env at
+    # its own runtime, never held here.
+    bot_token: str = "${TELEGRAM_BOT_TOKEN}",  # noqa: S107
+    chat_id: str = "${TELEGRAM_CHAT_ID}",  # noqa: S107
+) -> list[dict[str, Any]]:
     """Build ordered notifier dicts for ``FlowDoctor.from_config(notify=...)``."""
     return [
         fleet_telegram_notifier_dict(
@@ -149,7 +158,7 @@ def fleet_telegram_notifier_dicts(
     ]
 
 
-def fleet_telegram_ssm_params() -> Dict[str, str]:
+def fleet_telegram_ssm_params() -> dict[str, str]:
     """Map env var → SSM parameter path for ops seeding (values NOT in git)."""
     return {
         spec.thread_id_env: spec.ssm_param
