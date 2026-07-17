@@ -165,7 +165,6 @@ def increment_trial_count(
     s3 = _client(s3_client)
     from botocore.exceptions import ClientError
 
-    last_state: CumulativeTrialCount = _empty_state()
     for attempt in range(_MAX_RETRIES):
         state, etag = _get_with_etag(s3, bucket, key)
         new_total = int(state["total"]) + int(n_trials)
@@ -176,9 +175,8 @@ def increment_trial_count(
             "last_updated": run_date,
             "by_producer": new_by_producer,
         }
-        last_state = new_state
         body = json.dumps(new_state, indent=2, sort_keys=True).encode("utf-8")
-        put_kwargs = dict(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+        put_kwargs = {"Bucket": bucket, "Key": key, "Body": body, "ContentType": "application/json"}
         if etag is None:
             put_kwargs["IfNoneMatch"] = "*"
         else:
@@ -252,7 +250,7 @@ def backfill_cumulative_trial_count(
         "by_producer": {k: int(v) for k, v in per_producer_totals.items()},
     }
     body = json.dumps(new_state, indent=2, sort_keys=True).encode("utf-8")
-    put_kwargs = dict(Bucket=bucket, Key=key, Body=body, ContentType="application/json")
+    put_kwargs = {"Bucket": bucket, "Key": key, "Body": body, "ContentType": "application/json"}
     if etag is not None:
         put_kwargs["IfMatch"] = etag
     else:

@@ -212,7 +212,7 @@ def open_macro_lib(
 
 def open_preliminary_lib(
     bucket: str, *, region: str | None = None, create_if_missing: bool = False
-) -> "Library":
+) -> Library:
     """Open the ``preliminary`` library on ``bucket`` (config#2459).
 
     Structurally separate from :data:`UNIVERSE_LIB` — the physical-library
@@ -247,7 +247,7 @@ def read_settled_only(
     region: str | None = None,
     as_of=None,
     **read_kwargs,
-) -> "pd.DataFrame | None":
+) -> pd.DataFrame | None:
     """THE read-path chokepoint for a published/final-report price read
     (config#2459 scope item 2).
 
@@ -336,12 +336,12 @@ def read_settled_only(
 def write_correction(
     lib,
     symbol: str,
-    df: "pd.DataFrame",
+    df: pd.DataFrame,
     *,
     reason: str,
     source: str,
     correction_time=None,
-) -> "VersionedItem":
+) -> VersionedItem:
     """Write a post-hoc correction to a previously-published settled
     value as a NEW ArcticDB version — never an in-place overwrite
     (config#2459 scope item 3).
