@@ -28,13 +28,19 @@ def test_arctic_uri_default_region(monkeypatch):
 def test_arctic_uri_region_from_env(monkeypatch):
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
     uri = ae_arctic.arctic_uri("test-bucket")
-    assert "s3.eu-west-1.amazonaws.com" in uri
+    assert uri == (
+        "s3s://s3.eu-west-1.amazonaws.com:test-bucket"
+        "?path_prefix=arcticdb&aws_auth=true"
+    )
 
 
 def test_arctic_uri_explicit_region_overrides_env(monkeypatch):
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
     uri = ae_arctic.arctic_uri("test-bucket", region="us-west-2")
-    assert "s3.us-west-2.amazonaws.com" in uri
+    assert uri == (
+        "s3s://s3.us-west-2.amazonaws.com:test-bucket"
+        "?path_prefix=arcticdb&aws_auth=true"
+    )
 
 
 def test_arctic_uri_matches_existing_preflight_format(monkeypatch):
