@@ -1,0 +1,23 @@
+name: Gitleaks scan
+
+# Thin caller (in-repo local-path reference since this repo IS the reusable
+# workflow's host — other repos call it remotely, see gitleaks-scan.yml's
+# header). All scan behavior lives there; edit it, not this file.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Monday 06:00 UTC — 2h ahead of the config-I2528 fleet security-alert
+    # sweep (Mon 08:00 UTC) so a fresh finding is registered as a
+    # code-scanning alert before the sweep enumerates alerts for the week.
+    - cron: "0 6 * * MON"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gitleaks:
+    uses: ./.github/workflows/gitleaks-scan.yml
