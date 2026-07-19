@@ -107,6 +107,73 @@ def test_migration_0001_packaged_and_idempotent():
     )
 
 
+def test_schema_sql_declares_news_dedup_key():
+    """config#2957: 'news' must dedup on external_id, not just
+    (ticker, doc_type, filed_date, source) — else same-day articles for
+    one (ticker, source) collapse onto a single row. Pin the partial
+    unique indexes in schema.sql so a future schema rewrite that drops
+    them fails here instead of silently reintroducing the collapse.
+    """
+    import importlib.resources as ir
+
+    schema = (ir.files("nousergon_lib.rag") / "schema.sql").read_text()
+    assert "external_id" in schema, (
+        "schema.sql missing external_id column on rag.documents"
+    )
+    assert "documents_unique_non_news" in schema and "documents_unique_news" in schema, (
+        "schema.sql missing the partial unique indexes that replace the "
+        "blanket UNIQUE(ticker, doc_type, filed_date, source) constraint"
+    )
+    assert "WHERE doc_type <> 'news'" in schema, (
+        "non-news partial index must exclude external_id from its key so "
+        "NULL-vs-NULL doesn't silently stop catching non-news duplicates"
+    )
+    assert "WHERE doc_type = 'news'" in schema, (
+        "news partial index must key on external_id for per-article dedup"
+    )
+
+
+def test_migration_0002_packaged_and_idempotent():
+    """0002_news_external_id.sql ships as package data and uses
+    idempotent DDL so re-runs against an already-migrated DB are no-ops.
+    """
+    import importlib.resources as ir
+
+    files = ir.files("nousergon_lib.rag")
+    migration = files / "migrations" / "0002_news_external_id.sql"
+    assert migration.is_file(), (
+        "migrations/0002_news_external_id.sql should ship as package data "
+        "(check pyproject.toml::tool.setuptools.package-data)"
+    )
+
+    content = migration.read_text()
+    assert "ADD COLUMN IF NOT EXISTS external_id" in content, (
+        "migration must use ADD COLUMN IF NOT EXISTS for idempotency"
+    )
+    assert "DROP CONSTRAINT IF EXISTS" in content, (
+        "migration must use DROP CONSTRAINT IF EXISTS for idempotency"
+    )
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS documents_unique_non_news" in content, (
+        "migration must use CREATE INDEX IF NOT EXISTS for idempotency"
+    )
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS documents_unique_news" in content, (
+        "migration must use CREATE INDEX IF NOT EXISTS for idempotency"
+    )
+
+
+def test_document_exists_accepts_external_id():
+    """Signature guard: document_exists/ingest_document must accept the
+    new external_id kwarg (config#2957) so news ingestion can pass a
+    per-article identity. Live DB behavior is integration-tested in the
+    consumer repo (nousergon-data) via injected fakes."""
+    import inspect
+
+    from nousergon_lib.rag import document_exists, ingest_document
+
+    assert "external_id" in inspect.signature(document_exists).parameters
+    assert "external_id" in inspect.signature(ingest_document).parameters
+
+
 def test_is_available_safe_when_db_unreachable(monkeypatch):
     """is_available() must never raise — it's a probe, not an assertion."""
     from nousergon_lib.rag import is_available

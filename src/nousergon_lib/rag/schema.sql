@@ -18,14 +18,33 @@ CREATE TABLE IF NOT EXISTS rag.documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     ticker VARCHAR(10) NOT NULL,
     sector VARCHAR(50),
-    doc_type VARCHAR(50) NOT NULL,      -- '10-K', '10-Q', 'earnings_transcript', 'thesis'
+    doc_type VARCHAR(50) NOT NULL,      -- '10-K', '10-Q', 'earnings_transcript', 'thesis', 'news'
     source VARCHAR(50) NOT NULL,         -- 'sec_edgar', 'fmp', 'alpha_engine'
     filed_date DATE NOT NULL,
     ingested_at TIMESTAMPTZ DEFAULT NOW(),
     title TEXT,
     url TEXT,
-    UNIQUE(ticker, doc_type, filed_date, source)
+    external_id TEXT                     -- per-article identity for news dedup (config#2957); NULL for filings/transcripts/theses
 );
+
+-- Two PARTIAL unique indexes replace a single blanket UNIQUE(ticker,
+-- doc_type, filed_date, source) so 'news' can dedup on per-article
+-- identity while every other doc_type keeps the original 4-column key
+-- untouched (config#2957 — the old blanket key let only the FIRST
+-- article per (ticker, source, day) survive; every subsequent distinct
+-- article that day silently hit the constraint and was dropped).
+-- external_id is excluded from the non-news index deliberately: NULL
+-- never equals NULL under uniqueness semantics, so including it there
+-- would silently stop catching duplicate filings/transcripts/theses
+-- (which never set external_id) instead of preserving the existing
+-- guarantee. See migrations/0002_news_external_id.sql for the
+-- existing-DB migration path.
+CREATE UNIQUE INDEX IF NOT EXISTS documents_unique_non_news
+    ON rag.documents (ticker, doc_type, filed_date, source)
+    WHERE doc_type <> 'news';
+CREATE UNIQUE INDEX IF NOT EXISTS documents_unique_news
+    ON rag.documents (ticker, doc_type, filed_date, source, external_id)
+    WHERE doc_type = 'news';
 
 -- Child table: embedded chunks with section labels.
 --
