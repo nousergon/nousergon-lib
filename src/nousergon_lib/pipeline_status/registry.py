@@ -226,6 +226,35 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="host_research_signals?tab=Briefing+Archive",
         artifact_label="Morning research briefing",
     ),
+    # config#2515 Phase B: thin envelope producer that replaced the
+    # multi-agent Research graph runner as the signals.json producer for
+    # the champion path (scanner -> predictor direct, config#1580 ruling).
+    # LOAD-BEARING — the executor hard-fails Monday without signals.json,
+    # so unlike ThinkTankCoverage/ChallengerShadow this state's SF Catch
+    # is NOT non-blocking. Writes the same S3 key as the old signals.json
+    # for contract safety; no dedicated archive page of its own yet, but
+    # its output is the input the morning research briefing page renders.
+    "SignalsEnvelope": ArtifactReason(
+        reason="signals.json envelope producer (config#2515 Phase B) — "
+        "sources scanner-board + regime-substrate fields into the "
+        "production signals.json; load-bearing (executor hard-fails "
+        "without it). No dedicated archive page yet; see Research/"
+        "ThinkTankCoverage for the surrounding briefing artifacts."
+    ),
+    # config#2515 Phase B: keeps the no_agent champion-baseline shadow
+    # (signals_shadow/no_agent/{trading_day}/signals.json) alive for the
+    # producer leaderboard now that the weekly SF no longer hosts the
+    # multi-agent Research Lambda invocation that used to fire this mode
+    # as a side effect. Observe-only — never read by the executor or the
+    # live gate; non-blocking Catch mirrors ThinkTankCoverage's.
+    "ChallengerShadow": ArtifactReason(
+        reason="Non-blocking observe-only shadow feed (config#2515 Phase "
+        "B) — writes signals_shadow/no_agent/{trading_day}/signals.json "
+        "for the producer leaderboard (scoring/leaderboard_producers.py); "
+        "never read by the executor or the live trading gate. No "
+        "dedicated archive page — the leaderboard that consumes this is "
+        "hosted in the eval_rolling_mean Lambda."
+    ),
     "DataPhase2": ArtifactReason(
         reason="Alt-data + fundamentals refresh; substrate-only, no per-run "
         "rendered artifact."
@@ -693,6 +722,82 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "skip_post_market_data=true reruns EODReconcile alone. No persisted "
         "artifact (the email IS the surface); see EODReconcile for the "
         "briefing this alert stands in for."
+    ),
+    # config-I2702 EOD self-heal loop (deliverable #1): verify-by-artifact
+    # precondition probe that replaced the old $.data_spot_error launch-
+    # phase flag test with a fresh S3 readback of the macro-freshness
+    # sentinel — the actual precondition EODReconcile's _spy_close hard-
+    # depends on. Called fresh at every reconcile-gate entry, including
+    # each HealReProbe iteration below; never cached.
+    "ProbeEODReconcilePrecondition": ArtifactReason(
+        reason="Verify-by-artifact EOD-reconcile precondition probe "
+        "(config-I2702) — invokes alpha-engine-eod-precondition-probe to "
+        "readback-verify run_date's SPY close is queryable in ArcticDB "
+        "before gating EODReconcile/the heal loop. No persisted artifact "
+        "— outcome is encoded in the SF branch taken (CheckSkipEODReconcile)."
+    ),
+    # config-I2702 deliverable #3(a): heal-loop dispatch of the missing
+    # post-market-data workload, force_on_demand=true unconditionally
+    # (already in a degraded-recovery context past the earlier
+    # single-retry-on-spot, so on-demand is preferred over a second spot
+    # gamble). Mirrors LaunchPostMarketDataSpot's registry entry.
+    "HealLaunchPostMarketDataSpot": ArtifactReason(
+        reason="Heal-loop fire-and-forget spot/on-demand re-dispatch "
+        "(config-I2702) of the missing post-market-data workload via "
+        "alpha-engine-data-spot-dispatcher, force_on_demand=true. "
+        "Operational only, no rendered artifact; the phase output is "
+        "substrate (see PostMarketData)."
+    ),
+    # config-I2702 deliverable #3(a): heal-loop dispatch of the missing
+    # post-market-arctic-append workload — the actual SPY-close WRITE
+    # ProbeEODReconcilePrecondition/HealReProbe check for.
+    "HealLaunchArcticAppendSpot": ArtifactReason(
+        reason="Heal-loop fire-and-forget spot/on-demand re-dispatch "
+        "(config-I2702) of the missing post-market-arctic-append "
+        "workload via alpha-engine-data-spot-dispatcher, "
+        "force_on_demand=true. Operational only, no rendered artifact; "
+        "the append output is substrate (see PostMarketArcticAppend)."
+    ),
+    # config-I2702 deliverable #3(b): re-probe after the heal-loop-
+    # dispatched workloads complete. Overwrites $.precondition_probe with
+    # the fresh result — never trusts the earlier probe.
+    "HealReProbe": ArtifactReason(
+        reason="Heal-loop re-probe (config-I2702) after the re-dispatched "
+        "data-spot workload(s) complete — invokes "
+        "alpha-engine-eod-precondition-probe again and overwrites "
+        "$.precondition_probe with the fresh result for "
+        "HealCheckConverged / the next HealLoopGate deadline check. No "
+        "persisted artifact — a re-probe, not a producer."
+    ),
+    # config-I2702 closes-when "convergence notification": informational
+    # (non-paging) — the self-heal succeeded without any operator action.
+    "HealConvergedNotify": ArtifactReason(
+        reason="Informational (non-paging) SNS publish (config-I2702) — "
+        "the EOD self-heal loop converged (SPY close verified present) "
+        "and a reconcile-only replay execution was dispatched "
+        "automatically; no operator action needed. No persisted artifact "
+        "(the email IS the surface); see EODReconcile for the briefing "
+        "the dispatched replay produces."
+    ),
+    # config-I2702 deliverable #3(d): the loud page. Fires only when the
+    # heal loop exhausted its attempt budget, passed the probe-computed
+    # deadline, or a replay execution still can't converge.
+    "HealNonConvergent": ArtifactReason(
+        reason="Loud fail-open SNS alert (config-I2702) fired when the "
+        "EOD self-heal loop did NOT converge — exhausted its 2-attempt "
+        "budget and/or passed its deadline without SPY close landing in "
+        "ArcticDB. Requires a manual operator-replay (I2700 shape: "
+        "skip_post_market_data=true, skip_capture_snapshot=true). No "
+        "persisted artifact (the email IS the surface)."
+    ),
+    # config-I2702: loud page for the narrower case where the precondition
+    # itself converged but the auto-replay StartExecution call failed.
+    "HealReplayDispatchFailed": ArtifactReason(
+        reason="Loud SNS alert (config-I2702) — the heal-loop precondition "
+        "converged (SPY close verified present) but the auto-replay "
+        "StartExecution call itself failed; requires a manual "
+        "operator-replay (I2700 shape). No persisted artifact (the email "
+        "IS the surface)."
     ),
     "DailySubstrateHealthCheck": ArchivePageRef(
         page="fleet-status",
