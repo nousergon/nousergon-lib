@@ -406,14 +406,33 @@ def _build_metadata_where(
 # ── Ingestion helpers (unchanged from v0.5.7) ───────────────────────────────
 
 
-def document_exists(ticker: str, doc_type: str, filed_date: date, source: str) -> bool:
-    """Check if a document has already been ingested (dedup)."""
+def document_exists(
+    ticker: str,
+    doc_type: str,
+    filed_date: date,
+    source: str,
+    external_id: str | None = None,
+) -> bool:
+    """Check if a document has already been ingested (dedup).
+
+    ``external_id`` is the per-article identity news ingestion must pass
+    (config#2957) — without it, distinct same-day articles for one
+    (ticker, source) collapse onto a single existing row. Every other
+    doc_type omits it; the query keys on the original 4-column shape.
+    """
     from .db import execute_query
 
-    rows = execute_query(
-        "SELECT 1 FROM rag.documents WHERE ticker=%s AND doc_type=%s AND filed_date=%s AND source=%s LIMIT 1",
-        (ticker, doc_type, filed_date, source),
-    )
+    if external_id is not None:
+        rows = execute_query(
+            "SELECT 1 FROM rag.documents WHERE ticker=%s AND doc_type=%s "
+            "AND filed_date=%s AND source=%s AND external_id=%s LIMIT 1",
+            (ticker, doc_type, filed_date, source, external_id),
+        )
+    else:
+        rows = execute_query(
+            "SELECT 1 FROM rag.documents WHERE ticker=%s AND doc_type=%s AND filed_date=%s AND source=%s LIMIT 1",
+            (ticker, doc_type, filed_date, source),
+        )
     return len(rows) > 0
 
 
@@ -426,35 +445,39 @@ def ingest_document(
     title: str | None,
     url: str | None,
     chunks: list[dict],
+    external_id: str | None = None,
 ) -> str | None:
     """Ingest a document and its embedded chunks into the RAG store.
 
     Args:
         ticker: Stock symbol.
         sector: GICS sector (optional).
-        doc_type: '10-K', '10-Q', 'earnings_transcript', 'thesis'.
+        doc_type: '10-K', '10-Q', 'earnings_transcript', 'thesis', 'news'.
         source: 'sec_edgar', 'fmp', 'alpha_engine'.
         filed_date: Date the document was filed/published.
         title: Document title (optional).
         url: Source URL (optional).
         chunks: List of dicts with keys: content, section_label, embedding.
+        external_id: Stable per-article identity, REQUIRED for reliable
+            dedup when doc_type='news' (config#2957) — omit for every
+            other doc_type.
 
     Returns:
         Document UUID on success, None on failure.
     """
     from .db import get_connection
 
-    if document_exists(ticker, doc_type, filed_date, source):
+    if document_exists(ticker, doc_type, filed_date, source, external_id):
         logger.debug("Skipping duplicate: %s %s %s", ticker, doc_type, filed_date)
         return None
 
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO rag.documents (ticker, sector, doc_type, source, filed_date, title, url)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """INSERT INTO rag.documents (ticker, sector, doc_type, source, filed_date, title, url, external_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (ticker, sector, doc_type, source, filed_date, title, url),
+                (ticker, sector, doc_type, source, filed_date, title, url, external_id),
             )
             row = cur.fetchone()
             if row is None:
