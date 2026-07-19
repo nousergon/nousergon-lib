@@ -1,0 +1,38 @@
+name: CLAUDE.md guard
+
+# Reusable (workflow_call) fleet primitive: fail the build if CLAUDE.md is
+# ever committed in a PUBLIC alpha-engine repo (config#2581).
+#
+# CLAUDE.md is deliberately gitignored/untracked in every public alpha-engine
+# repo (decision 2026-03-22) because it accumulates infra detail (instance
+# IDs, deploy sequences, service topology) and gitignore-rules narration that
+# functions as an IP-structure roadmap. On 2026-07-14 a context-shrinking
+# pass nearly force-added it publicly in two repos (crucible-dashboard#437,
+# a crucible-evaluator branch) — both caught and remediated only because a
+# human/agent happened to notice, not because anything mechanical stopped
+# it. This check makes the convention structural instead of relying on
+# institutional memory being independently rediscovered each time.
+#
+# Do NOT call this from alpha-engine-config — it is the one alpha-engine
+# repo where CLAUDE.md SHOULD be tracked.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: claude-md-untracked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7
+
+      - name: Fail if CLAUDE.md is tracked
+        run: |
+          if git ls-files | grep -qx CLAUDE.md; then
+            echo "::error::CLAUDE.md is committed in this repo. CLAUDE.md is gitignored/untracked in every public alpha-engine repo by design (2026-03-22) — it accumulates infra/IP-structure detail that must not be public. Remove it from git (git rm --cached CLAUDE.md) and confirm .gitignore still excludes it."
+            exit 1
+          fi
+          echo "CLAUDE.md is not tracked — OK."
