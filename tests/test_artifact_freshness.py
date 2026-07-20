@@ -31,6 +31,8 @@ the third).
 
 from __future__ import annotations
 
+import io
+import json
 from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
@@ -40,9 +42,11 @@ from nousergon_lib.artifact_freshness import (
     CADENCE_SYMBOLS,
     ArtifactSpec,
     CheckResult,
+    CompletenessCheck,
     CycleCompletion,
     DependencyGraph,
     build_dependency_graph,
+    check_completeness,
     check_freshness,
     cycle_completion,
     leaf_alert_decisions,
@@ -1406,3 +1410,109 @@ class TestLocalizeRootCauses:
         rc = localize_root_causes(_pairs({a: "missing", b: "fresh"}))
         assert "b" not in rc  # satisfied leaf omitted
         assert rc["a"] == ("a",)
+
+
+# ── check_completeness (config#3086) ─────────────────────────────────────────
+
+
+def _fake_get_s3(body: bytes, *, raises: Exception | None = None):
+    client = mock.Mock()
+    if raises is not None:
+        client.get_object.side_effect = raises
+    else:
+        client.get_object.return_value = {"Body": io.BytesIO(body)}
+    return client
+
+
+class TestCheckCompleteness:
+    def test_json_count_field_int_value_complete(self):
+        spec = _spec(
+            completeness=CompletenessCheck(kind="json_count_field", field="n_predictions", min_count=10)
+        )
+        client = _fake_get_s3(json.dumps({"n_predictions": 25}).encode())
+        result = check_completeness(client, spec, "predictor/predictions/2026-07-20.json")
+        assert result.state == "complete"
+        assert result.observed_count == 25
+
+    def test_json_count_field_int_value_incomplete(self):
+        spec = _spec(
+            completeness=CompletenessCheck(kind="json_count_field", field="n_predictions", min_count=10)
+        )
+        client = _fake_get_s3(json.dumps({"n_predictions": 3}).encode())
+        result = check_completeness(client, spec, "predictor/predictions/2026-07-20.json")
+        assert result.state == "incomplete"
+        assert result.observed_count == 3
+        assert "min_count=10" in result.reason
+
+    def test_json_count_field_list_value_uses_length(self):
+        spec = _spec(
+            completeness=CompletenessCheck(kind="json_count_field", field="tickers", min_count=2)
+        )
+        client = _fake_get_s3(json.dumps({"tickers": ["AAPL", "MSFT", "NVDA"]}).encode())
+        result = check_completeness(client, spec, "some/key.json")
+        assert result.state == "complete"
+        assert result.observed_count == 3
+
+    def test_json_count_field_missing_key_is_probe_failed(self):
+        spec = _spec(
+            completeness=CompletenessCheck(kind="json_count_field", field="n_predictions", min_count=10)
+        )
+        client = _fake_get_s3(json.dumps({"other_field": 1}).encode())
+        result = check_completeness(client, spec, "some/key.json")
+        assert result.state == "probe_failed"
+
+    def test_csv_row_count_excludes_header(self):
+        spec = _spec(completeness=CompletenessCheck(kind="csv_row_count", min_count=3))
+        csv_body = b"ticker,pnl\nAAPL,1.0\nMSFT,2.0\nNVDA,3.0\n"
+        client = _fake_get_s3(csv_body)
+        result = check_completeness(client, spec, "trades/eod_pnl.csv")
+        assert result.state == "complete"
+        assert result.observed_count == 3
+
+    def test_csv_row_count_incomplete(self):
+        spec = _spec(completeness=CompletenessCheck(kind="csv_row_count", min_count=5))
+        csv_body = b"ticker,pnl\nAAPL,1.0\n"
+        client = _fake_get_s3(csv_body)
+        result = check_completeness(client, spec, "trades/eod_pnl.csv")
+        assert result.state == "incomplete"
+        assert result.observed_count == 1
+
+    def test_parquet_row_count(self):
+        pa = pytest.importorskip("pyarrow")
+        import pyarrow.parquet as pq
+
+        table = pa.table({"ticker": ["AAPL", "MSFT", "NVDA"], "close": [1.0, 2.0, 3.0]})
+        buf = io.BytesIO()
+        pq.write_table(table, buf)
+        spec = _spec(completeness=CompletenessCheck(kind="parquet_row_count", min_count=2))
+        client = _fake_get_s3(buf.getvalue())
+        result = check_completeness(client, spec, "staging/daily_closes/2026-07-20.parquet")
+        assert result.state == "complete"
+        assert result.observed_count == 3
+
+    def test_get_object_error_is_probe_failed(self):
+        spec = _spec(completeness=CompletenessCheck(kind="csv_row_count", min_count=1))
+        client = _fake_get_s3(b"", raises=RuntimeError("network blip"))
+        result = check_completeness(client, spec, "trades/eod_pnl.csv")
+        assert result.state == "probe_failed"
+        assert result.observed_count is None
+
+    def test_malformed_json_is_probe_failed_not_incomplete(self):
+        spec = _spec(
+            completeness=CompletenessCheck(kind="json_count_field", field="n", min_count=1)
+        )
+        client = _fake_get_s3(b"{not valid json")
+        result = check_completeness(client, spec, "some/key.json")
+        assert result.state == "probe_failed"
+
+    def test_completeness_check_requires_field_for_json_kind(self):
+        with pytest.raises(ValueError, match="requires a non-empty"):
+            CompletenessCheck(kind="json_count_field", min_count=1)
+
+    def test_completeness_check_rejects_unknown_kind(self):
+        with pytest.raises(ValueError, match="not in"):
+            CompletenessCheck(kind="xml_row_count", min_count=1)
+
+    def test_completeness_check_rejects_negative_min_count(self):
+        with pytest.raises(ValueError, match="min_count must be"):
+            CompletenessCheck(kind="csv_row_count", min_count=-1)
