@@ -79,10 +79,18 @@ rag = [
 rerank = [
     "sentence-transformers>=3.0",
 ]
+# Parquet row-count completeness predicate (nousergon_lib.artifact_freshness
+# .check_completeness, config#3086, CompletenessCheck.kind="parquet_row_count").
+# Only the Parquet footer metadata is read (ParquetFile(...).metadata.num_rows
+# — no column materialization), but that still needs pyarrow importable.
+# Kept as its own extra so json_count_field/csv_row_count-only consumers of
+# check_completeness don't pull it.
+artifact-completeness-parquet = ["pyarrow>=14.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "moto>=5.0",
+    "pyarrow>=14.0",
 ]
 # Stub-only package for pyright's benefit — gives pipeline_status/read.py's
 # `if TYPE_CHECKING: from mypy_boto3_stepfunctions.client import SFNClient`

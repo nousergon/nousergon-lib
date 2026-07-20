@@ -140,6 +140,22 @@ _EOD_SF_ANCHOR_UTC: Final[int] = 21
 
 CheckState = Literal["fresh", "stale", "missing", "probe_failed", "grace_period"]
 
+# ── Completeness predicates (config#3086) ────────────────────────────────────
+# Freshness (above) answers "does a recent instance exist?" — it says nothing
+# about whether that instance's CONTENT is complete. config-I3053 (weekly SF
+# green while research_free_backfill went unrefreshed) is the trigger: a
+# producer can write a well-formed, freshly-timestamped artifact that is
+# nonetheless a partial/empty write (a truncated backfill, a universe pass
+# that silently dropped tickers). Completeness is a SEPARATE, OPT-IN check —
+# most rows have no sensible cheap content predicate and stay freshness-only.
+CompletenessKind = Literal["json_count_field", "csv_row_count", "parquet_row_count"]
+
+COMPLETENESS_KINDS: Final[frozenset[str]] = frozenset(
+    {"json_count_field", "csv_row_count", "parquet_row_count"}
+)
+
+CompletenessState = Literal["complete", "incomplete", "probe_failed"]
+
 
 # ── Run-calendar symbols ─────────────────────────────────────────────────────
 # The producer's actual run calendar — the single source of truth for a
@@ -171,6 +187,64 @@ RUN_CALENDAR_SYMBOLS: Final[frozenset[str]] = frozenset(
 
 
 # ── Spec ────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CompletenessCheck:
+    """Optional per-row content predicate, evaluated only when
+    ``check_freshness`` already returned ``state="fresh"`` (a stale/missing
+    artifact is not also probed for completeness — that would just be a
+    confusing second symptom of the same root cause).
+
+    Attributes:
+        kind: Predicate shape — one of :data:`COMPLETENESS_KINDS`.
+            ``json_count_field``: the object is JSON; ``field`` names a
+            top-level key holding an int (e.g. an artifact's own
+            self-reported ``n_predictions``) OR a list — either an int
+            value or ``len()`` of a list value satisfies the check.
+            ``csv_row_count``: the object is CSV; count of data rows
+            (header excluded).
+            ``parquet_row_count``: the object is Parquet; row count via
+            the file's own metadata (no full materialization needed).
+        field: Required for ``json_count_field`` — the top-level key to
+            read. ``None`` for the other kinds (row count is intrinsic).
+        min_count: Inclusive floor. ``observed_count < min_count`` ⇒
+            ``state="incomplete"``.
+    """
+
+    kind: CompletenessKind
+    min_count: int
+    field: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in COMPLETENESS_KINDS:
+            raise ValueError(
+                f"CompletenessCheck.kind={self.kind!r} not in "
+                f"{sorted(COMPLETENESS_KINDS)}"
+            )
+        if self.kind == "json_count_field" and not self.field:
+            raise ValueError("json_count_field requires a non-empty `field`")
+        if self.min_count < 0:
+            raise ValueError(f"min_count must be >= 0, got {self.min_count}")
+
+
+@dataclass(frozen=True)
+class CompletenessResult:
+    """One ``check_completeness`` outcome.
+
+    Attributes:
+        state: ``complete`` (observed >= min_count), ``incomplete``
+            (observed < min_count — the row is fresh but the write was
+            partial), or ``probe_failed`` (GET/parse error — the check
+            itself is blind, distinct from a genuine incompleteness).
+        observed_count: Parsed count, or ``None`` on ``probe_failed``.
+        reason: Human-readable diagnostic; routed into the alert body
+            alongside the freshness reason.
+    """
+
+    state: CompletenessState
+    observed_count: int | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -254,6 +328,10 @@ class ArtifactSpec:
             enforces that the target exists and is NOT itself
             ``event_driven`` (liveness cannot chain into another
             never-paging row). ``None`` for every non-event-driven cadence.
+        completeness: Optional content predicate (config#3086), evaluated
+            only on a ``state="fresh"`` freshness result — a cheap defense
+            against a well-timestamped but partial/empty write. ``None``
+            (the default) means freshness-only, matching every existing row.
     """
 
     artifact_id: str
@@ -273,6 +351,7 @@ class ArtifactSpec:
     produces: tuple[str, ...] = ()
     depends_on: tuple[str, ...] = ()
     liveness_via: str | None = None
+    completeness: CompletenessCheck | None = None
 
     def __post_init__(self) -> None:
         if self.cadence not in CADENCE_SYMBOLS:
@@ -1189,6 +1268,103 @@ def check_freshness(
         ),
         canonical_key=expected_key,
     )
+
+
+def check_completeness(
+    s3_client: Any, spec: ArtifactSpec, canonical_key: str
+) -> CompletenessResult:
+    """Evaluate ``spec.completeness`` against the object at ``canonical_key``.
+
+    Callers GET the object exactly once here — this is deliberately a
+    SECOND, heavier probe layered on top of ``check_freshness``'s HEAD/LIST,
+    so it is only ever invoked when the caller has already established
+    ``state="fresh"`` (checking completeness of a stale/missing artifact is
+    a symptom of the same root cause, not new information) AND
+    ``spec.completeness is not None`` (most rows have no cheap content
+    predicate and stay freshness-only). ``canonical_key`` is the freshness
+    result's own resolved key (``CheckResult.canonical_key``), so the two
+    probes never race against different objects.
+
+    Pure w.r.t. side effects beyond the injected ``s3_client.get_object``
+    call — no logging, no alerting; the caller routes ``CompletenessResult``
+    the same way it routes ``CheckResult``.
+    """
+    if spec.completeness is None:
+        raise ValueError(
+            "check_completeness called on a spec with no completeness predicate"
+        )
+    check = spec.completeness
+    try:
+        body = s3_client.get_object(Bucket=spec.s3_bucket, Key=canonical_key)[
+            "Body"
+        ].read()
+    except Exception as err:  # noqa: BLE001 — duck-typed boto error classification
+        return CompletenessResult(
+            state="probe_failed",
+            reason=f"GET {canonical_key} failed: {err!r}",
+        )
+
+    try:
+        observed = _observed_count(check, body)
+    except Exception as err:  # noqa: BLE001 — malformed content is a probe failure,
+        # not "incomplete": incomplete means "parsed fine, count too low".
+        return CompletenessResult(
+            state="probe_failed",
+            reason=(
+                f"could not evaluate {check.kind} predicate on "
+                f"{canonical_key}: {type(err).__name__}: {err}"
+            ),
+        )
+
+    if observed < check.min_count:
+        return CompletenessResult(
+            state="incomplete",
+            observed_count=observed,
+            reason=(
+                f"{canonical_key}: {check.kind} observed={observed} "
+                f"< min_count={check.min_count}"
+            ),
+        )
+    return CompletenessResult(
+        state="complete",
+        observed_count=observed,
+        reason=f"{canonical_key}: {check.kind} observed={observed} >= "
+        f"min_count={check.min_count}",
+    )
+
+
+def _observed_count(check: CompletenessCheck, body: bytes) -> int:
+    """Parse ``body`` per ``check.kind`` and return the observed count.
+
+    Raises on malformed content (JSON/CSV/Parquet parse errors, a missing
+    ``json_count_field`` key, or a field whose value is neither an int nor
+    a list) — the caller classifies any raise as ``probe_failed``.
+    """
+    if check.kind == "json_count_field":
+        import json as _json
+
+        data = _json.loads(body)
+        value = data[check.field]  # KeyError -> probe_failed, by design
+        if isinstance(value, list):
+            return len(value)
+        return int(value)
+
+    if check.kind == "csv_row_count":
+        import csv as _csv
+        import io as _io
+
+        reader = _csv.reader(_io.StringIO(body.decode("utf-8")))
+        rows = list(reader)
+        return max(0, len(rows) - 1)  # exclude header
+
+    if check.kind == "parquet_row_count":
+        import io as _io
+
+        import pyarrow.parquet as _pq
+
+        return _pq.ParquetFile(_io.BytesIO(body)).metadata.num_rows
+
+    raise ValueError(f"unhandled CompletenessCheck.kind={check.kind!r}")
 
 
 # ── Internals ───────────────────────────────────────────────────────────────
