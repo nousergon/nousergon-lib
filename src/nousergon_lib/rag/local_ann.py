@@ -106,7 +106,10 @@ def load_corpus_dataframe(
         "section_label", "embedding",
     ]
     if not keys:
-        return pd.DataFrame(columns=columns)
+        # pd.Index(...), not the bare list: pandas' inline stubs type `columns`
+        # as Axes, and a bare list[str] fails structural matching against the
+        # SequenceNotStr protocol on `.index()`'s parameter type (pyright).
+        return pd.DataFrame(columns=pd.Index(columns))
 
     import boto3
 
