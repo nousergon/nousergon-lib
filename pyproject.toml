@@ -79,6 +79,26 @@ rag = [
 rerank = [
     "sentence-transformers>=3.0",
 ]
+# S3 parquet mirror write path (nousergon_lib.rag.parquet_mirror,
+# config#2958) — ``ingest_document``'s best-effort batch-tier mirror.
+# Kept separate from [rag] itself so the live-retrieval-only consumer
+# (alpha-engine-research's qual analyst tools) doesn't pull
+# pandas+pyarrow just to call ``retrieve()``.
+rag-parquet = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+]
+# Local (in-process) ANN index over the parquet batch tier
+# (nousergon_lib.rag.local_ann, config#2958) — batch consumers
+# (filing_change_detection, evals, backtests) that need nearest-neighbor
+# search rather than a groupby/aggregate. hnswlib needs a C++ toolchain
+# at install time (present on ubuntu-latest CI runners and this repo's
+# EC2 boxes; not guaranteed everywhere, hence its own extra).
+rag-local-ann = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "hnswlib>=0.8",
+]
 # Parquet row-count completeness predicate (nousergon_lib.artifact_freshness
 # .check_completeness, config#3086, CompletenessCheck.kind="parquet_row_count").
 # Only the Parquet footer metadata is read (ParquetFile(...).metadata.num_rows

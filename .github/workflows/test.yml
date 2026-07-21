@@ -56,12 +56,15 @@ jobs:
         #     (moto only pulls jsonschema under its own all/quicksight extras,
         #     not the base install) — added 2026-07-01 with the config#1483
         #     outcome_record contract so these tests actually gate.
+        #   - tests/test_rag_parquet_mirror.py imports pandas + pyarrow
+        #     ([rag-parquet] extra); tests/test_rag_local_ann.py additionally
+        #     imports hnswlib ([rag-local-ann] extra) — config#2958.
         # sentence-transformers ([rerank] extra) and flow-doctor
         # ([flow_doctor] extra) are NOT needed — both deferred until first
         # call inside the relevant module / tests mock the model load.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,github_app]" pytest-cov
+          pip install -e ".[dev,rag,rag-parquet,rag-local-ann,arcticdb,quant,quant-xs,quant-stats,contracts,github_app]" pytest-cov
 
       - name: Run pytest
         run: python -m pytest -q --cov --cov-report=term-missing
@@ -96,7 +99,7 @@ jobs:
         # them — see rag/rerank.py).
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,github_app,type-check]"
+          pip install -e ".[dev,rag,rag-parquet,rag-local-ann,arcticdb,quant,quant-xs,quant-stats,contracts,github_app,type-check]"
           pip install pyright
 
       - name: Run pyright

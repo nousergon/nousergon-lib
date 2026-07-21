@@ -446,6 +446,7 @@ def ingest_document(
     url: str | None,
     chunks: list[dict],
     external_id: str | None = None,
+    mirror_to_parquet: bool = True,
 ) -> str | None:
     """Ingest a document and its embedded chunks into the RAG store.
 
@@ -461,6 +462,15 @@ def ingest_document(
         external_id: Stable per-article identity, REQUIRED for reliable
             dedup when doc_type='news' (config#2957) — omit for every
             other doc_type.
+        mirror_to_parquet: also write the document + chunks to the S3
+            parquet batch tier (config#2958) after the Neon insert
+            commits. Best-effort — a mirror failure is logged, not
+            raised (Neon already has the durable copy by that point);
+            see ``parquet_mirror.py``'s module docstring. Set False for
+            callers that intentionally don't want the [rag-parquet]
+            extra's pandas/pyarrow dependency pulled at import time
+            (mirroring is a plain top-level ``import pandas`` inside the
+            helper, so this only matters if that import would fail).
 
     Returns:
         Document UUID on success, None on failure.
@@ -504,4 +514,32 @@ def ingest_document(
             )
 
     logger.info("Ingested %s %s %s: %d chunks", ticker, doc_type, filed_date, len(chunks))
+
+    if mirror_to_parquet:
+        # mirror_document_to_parquet already catches and logs everything
+        # internally (see its module docstring); this call-site guard is
+        # defense-in-depth so ingest_document's own "never raises for the
+        # mirror" contract holds even against a bug in that internal
+        # handling, not just its currently-intended behavior.
+        try:
+            from .parquet_mirror import mirror_document_to_parquet
+
+            mirror_document_to_parquet(
+                document_id=str(doc_id),
+                ticker=ticker,
+                sector=sector,
+                doc_type=doc_type,
+                source=source,
+                filed_date=filed_date,
+                title=title,
+                url=url,
+                chunks=chunks,
+            )
+        except Exception:
+            logger.error(
+                "Parquet mirror call site raised for document %s — Neon "
+                "insert already committed, ingest is unaffected",
+                doc_id, exc_info=True,
+            )
+
     return str(doc_id)
