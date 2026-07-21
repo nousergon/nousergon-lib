@@ -8,6 +8,7 @@ from nousergon_lib.groom_eligibility import (
     BUNDLED_FILTERS,
     CI_EXPECTED_RED_LABEL,
     GATE_SOFT_EXCLUDE_LABELS,
+    RULING_PENDING_LABEL,
     TIER_MODELS,
     VALID_ISSUE_FILTERS,
     decide_slot,
@@ -16,7 +17,6 @@ from nousergon_lib.groom_eligibility import (
     filter_tiers,
     is_actionable,
     is_gate_excluded,
-    RULING_PENDING_LABEL,
     tier_of,
 )
 
