@@ -68,6 +68,20 @@ GATE_SOFT_EXCLUDE_LABELS = frozenset({
 })
 GATE_DUE_LABEL = "gate-due"
 
+#: config#3199 (2026-07-21): applied by the console Decision Queue
+#: (crucible-dashboard ``decision_queue_loader.post_ruling``) when an operator
+#: ruling leaves follow-on work behind (any ``gate:*`` label still on the item
+#: after de-gating). It marks "a binding ruling is awaiting EXECUTION" — the
+#: opposite of blocked — so it overrides the SOFT gate exclusion: the item
+#: must enter the groom queue even though a gate label remains (executing the
+#: ruling is exactly what resolves that gate). Root cause it closes: ~20
+#: Option-A rulings on 2026-07-20 were recorded, nothing executed them
+#: (gate-labeled items are excluded at enumeration; PRs are skipped entirely),
+#: and gate_sf_run_sweep re-escalated every one back into the Decision Queue.
+#: Hard excludes still win — a re-escalated item (``gate:decision``) is owned
+#: by a human again, marker or not.
+RULING_PENDING_LABEL = "ruling:pending-exec"
+
 #: Non-blocking informational label for expected-CI-red PRs (config#TBD).
 #: Applied by the Haiku end-of-SF sweep when every failing CI check
 #: is a known expected-failure (drift check, pre-existing broken test).
@@ -160,10 +174,13 @@ def tier_of(labels: Iterable[str]) -> str | None:
 
 
 def is_gate_excluded(labels: Iterable[str]) -> bool:
-    """config#1805 gate exclusion: hard gates always; soft unless gate-due."""
+    """config#1805 gate exclusion: hard gates always; soft unless gate-due
+    or a pending operator ruling (config#3199 — see RULING_PENDING_LABEL)."""
     label_set = set(labels)
     if label_set & GATE_HARD_EXCLUDE_LABELS:
         return True
+    if RULING_PENDING_LABEL in label_set:
+        return False
     return bool(label_set & GATE_SOFT_EXCLUDE_LABELS) and GATE_DUE_LABEL not in label_set
 
 

@@ -16,6 +16,7 @@ from nousergon_lib.groom_eligibility import (
     filter_tiers,
     is_actionable,
     is_gate_excluded,
+    RULING_PENDING_LABEL,
     tier_of,
 )
 
@@ -69,6 +70,19 @@ class TestGateExclusion:
         assert is_actionable(["complexity:low"]) == "low"
         assert is_actionable(["complexity:low", "gate:operator"]) is None
         assert is_actionable(["complexity:ultra"]) is None
+
+    def test_ruling_pending_lifts_soft_exclusion_not_hard(self):
+        # config#3199: an operator ruling awaiting execution overrides the
+        # SOFT gate exclusion — executing the ruling is what resolves the
+        # remaining gate label — but never a HARD exclude (a re-escalated
+        # gate:decision item is human-owned again, marker or not).
+        assert RULING_PENDING_LABEL == "ruling:pending-exec"
+        assert not is_gate_excluded(["gate:weekly-sf", RULING_PENDING_LABEL])
+        assert not is_gate_excluded(["gate:date", RULING_PENDING_LABEL])
+        assert is_gate_excluded(["gate:decision", RULING_PENDING_LABEL])
+        assert is_gate_excluded(["gate:operator", RULING_PENDING_LABEL])
+        assert is_actionable(["complexity:low", "gate:weekly-sf",
+                              RULING_PENDING_LABEL]) == "low"
 
     def test_milestone_gate_is_soft_excluded_unless_due(self):
         # config#2519: event-driven gate — never gets gate-due in practice
