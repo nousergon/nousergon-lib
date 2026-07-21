@@ -86,6 +86,14 @@ rerank = [
 # Kept as its own extra so json_count_field/csv_row_count-only consumers of
 # check_completeness don't pull it.
 artifact-completeness-parquet = ["pyarrow>=14.0"]
+# S3 parquet mirror + local ANN reader for batch RAG consumers
+# (nousergon_lib.rag.batch_tier, config#2958). pyarrow is required;
+# hnswlib is an OPTIONAL accelerator batch_tier attempts to import at
+# runtime and falls back from (exact numpy brute-force) if the C
+# extension isn't installed/buildable on the host — not listed as a hard
+# dependency here so this extra stays installable on hosts without a
+# C++11 toolchain.
+rag-batch-tier = ["pyarrow>=14.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

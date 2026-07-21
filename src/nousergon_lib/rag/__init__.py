@@ -27,6 +27,12 @@ try:
 except ImportError:
     pass  # python-dotenv not installed (e.g. Lambda) — env vars set externally
 
+from .batch_tier import (
+    BatchRetrievalResult,
+    LocalCorpusIndex,
+    load_local_corpus,
+    mirror_chunks_to_parquet,
+)
 from .db import coerce_embedding, get_connection, is_available
 from .embeddings import embed_texts
 from .retrieval import (
@@ -43,4 +49,8 @@ __all__ = [
     "retrieve",
     "ingest_document",
     "document_exists",
+    "mirror_chunks_to_parquet",
+    "load_local_corpus",
+    "LocalCorpusIndex",
+    "BatchRetrievalResult",
 ]

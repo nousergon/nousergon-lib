@@ -32,6 +32,7 @@ pip install "nousergon-lib[arcticdb] @ git+https://github.com/nousergon/nousergo
 | `[arcticdb]` | `arcticdb`, `pandas` | Anything that calls `check_arcticdb_fresh` or the ArcticDB read/write helpers |
 | `[flow_doctor]` | `flow-doctor` | Logging integration that escalates ERROR-level events to flow-doctor |
 | `[rag]` | `psycopg2-binary`, `pgvector`, `numpy` | The `rag` submodule — Neon pgvector RAG retrieval/ingestion |
+| `[rag-batch-tier]` | `pyarrow` | `rag.batch_tier` — S3 parquet mirror + local ANN for batch/analytical RAG consumers, zero Neon egress (config#2958) |
 | `[dev]` | `pytest`, lint tooling | Local development |
 
 ## Modules
@@ -204,6 +205,21 @@ results = retrieve(
 ```
 
 Requires the `[rag]` extra. Embeddings are Voyage `voyage-3-lite` (512d); the database backend is Neon Postgres with pgvector + HNSW indexes.
+
+`ingest_document()` also mirrors every ingested document's chunks to an S3 parquet tier (best-effort, controlled by `RAG_PARQUET_BUCKET`/`RAG_PARQUET_PREFIX`) — see `rag.batch_tier` below.
+
+### `rag.batch_tier` — S3 parquet tier + local ANN for batch RAG consumers (zero Neon egress)
+
+Neon's free-tier data-transfer quota is the binding constraint for the whole RAG corpus (config-I2780/I2781: a single unbounded `SELECT c.embedding` exhausted it and locked out every consumer). `rag.batch_tier.mirror_chunks_to_parquet` — wired into `ingest_document()` — writes each document's chunks + embeddings to a partitioned (`doc_type=.../date=...`), append-only parquet file on S3 as a side effect of every ingest, so a batch/analytical consumer (evals, backtests, ad-hoc corpus analysis — anything outside the live low-latency `retrieve()` path) never has to touch Neon at all:
+
+```python
+from nousergon_lib.rag import load_local_corpus
+
+index = load_local_corpus(doc_types=["10-K", "10-Q"], tickers=["AAPL"])
+results = index.query(query_embedding, top_k=10)
+```
+
+`load_local_corpus` builds an in-memory nearest-neighbor index over the requested slice — `hnswlib`-accelerated if installed (optional; not always buildable, e.g. no C++11 toolchain), exact numpy brute-force cosine otherwise. Requires the `[rag-batch-tier]` extra; `RAG_PARQUET_BUCKET` unset means the tier is inert (`mirror_chunks_to_parquet` no-ops, `load_local_corpus` raises) rather than a hard dependency for every RAG consumer.
 
 ### `ssm_dispatcher` — SSM send-command + poll chokepoint
 

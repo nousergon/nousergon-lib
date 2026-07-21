@@ -40,7 +40,7 @@ def test_top_level_imports_resolve():
 
 def test_submodules_importable():
     """Each submodule of nousergon_lib.rag should import cleanly."""
-    for sub in ("db", "embeddings", "retrieval"):
+    for sub in ("db", "embeddings", "retrieval", "batch_tier"):
         mod = importlib.import_module(f"nousergon_lib.rag.{sub}")
         assert mod is not None
 

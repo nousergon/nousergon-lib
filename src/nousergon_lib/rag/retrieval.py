@@ -504,4 +504,16 @@ def ingest_document(
             )
 
     logger.info("Ingested %s %s %s: %d chunks", ticker, doc_type, filed_date, len(chunks))
+
+    # S3 parquet mirror for batch/analytical consumers (config#2958) — a
+    # single write-path hook here covers every ingestion pipeline
+    # (filings, news, transcripts, 13F, theses) without duplicating the
+    # mirror call site-by-site. Best-effort: never raises, and only runs
+    # once the Neon insert above has already committed, so a mirror
+    # failure can't turn a successful ingest into a failed one.
+    from .batch_tier import mirror_chunks_to_parquet
+    mirror_chunks_to_parquet(
+        str(doc_id), ticker, sector, doc_type, source, filed_date, title, url, chunks,
+    )
+
     return str(doc_id)
