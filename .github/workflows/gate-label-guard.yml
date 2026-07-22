@@ -1,0 +1,49 @@
+name: Gate Label Guard
+
+# Reusable (workflow_call) fleet primitive: fail while ANY gate:* label is
+# attached to a PR, pass otherwise. Structural enforcement of the gate:*
+# draft-PR discipline (config#2002) — makes a gated PR unable to merge even
+# if it gets flipped to "ready for review" by mistake or by an automated
+# actor (this is exactly what happened on nousergon-data-PR643: a DRAFT PR
+# carrying gate:live-run was flipped ready by ne-groomer[bot] and merged
+# with the label still attached, 2026-07-05 — config#1446 / EPIC config#1464).
+#
+# Consolidated here from a single-repo implementation (config-I3491,
+# 2026-07-22) — was previously only in nousergon-data, uncalled for as a
+# required check, so the exact PR643 failure mode remained structurally
+# possible fleet-wide.
+#
+# Consumers: call from a `pull_request`-triggered workflow (types: opened,
+# reopened, labeled, unlabeled, ready_for_review, synchronize) with a
+# top-level job id of `gate-label-guard`, and add the resulting check
+# context ("gate-label-guard / gate-label-guard") to the repo's required
+# status checks.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: gate-label-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any gate:* label is present
+        env:
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          echo "$LABELS_JSON" | jq -r '.[].name' > /tmp/pr_labels.txt || true
+
+          echo "PR labels:"
+          cat /tmp/pr_labels.txt || echo "(none)"
+
+          if grep -q '^gate:' /tmp/pr_labels.txt; then
+            echo ""
+            echo "::error::This PR carries a gate:* label ($(grep '^gate:' /tmp/pr_labels.txt | paste -sd, -)) — the gate:* taxonomy means this PR is NOT verified ready to merge. Remove the gate:* label only after verifying the blocker is actually resolved."
+            exit 1
+          fi
+
+          echo "No gate:* label present — check passes."
