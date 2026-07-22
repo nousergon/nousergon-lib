@@ -113,6 +113,45 @@ TIER_MODELS = {
     "high": "claude-sonnet-5",
 }
 
+
+@dataclass(frozen=True)
+class FallbackModelConfig:
+    """One tier's DeepSeek-direct fallback config, used when Brian's Claude
+    Max subscription usage runs out mid-groom-run and the groomer falls
+    back to calling DeepSeek's own API directly (native API, not
+    OpenRouter — DeepSeek's own prompt-caching discount is not reliably
+    preserved through OpenRouter for this high-repetition workload).
+
+    A dataclass rather than a bare ``{"model": ..., "thinking": ...}`` dict
+    (unlike ``TIER_MODELS``, which is str -> str) because this carries
+    extra per-tier fields beyond the model id — named attribute access
+    beats string-keyed lookups once there's more than one field per tier.
+
+    ``effort`` is DeepSeek's reasoning-effort request parameter. Verified:
+    DeepSeek only implements two real levels server-side — "low"/"medium"
+    both collapse to "high", and "xhigh" maps to "max" — so there is no
+    meaningful "low effort" setting to ask for. The low complexity tier
+    therefore runs with thinking disabled entirely (``thinking=False``,
+    ``effort=None``) rather than requesting a low/medium effort value that
+    would be silently upgraded server-side to "high".
+    """
+
+    model: str
+    thinking: bool
+    effort: str | None = None
+
+
+#: Tier -> DeepSeek fallback config. Parallel to TIER_MODELS above (same
+#: three tier keys, same "high tier never runs a lesser model than mid"
+#: shape) but for the DeepSeek-direct fallback path, not Claude. See
+#: FallbackModelConfig for the per-field rationale, including why the low
+#: tier has no effort level.
+FALLBACK_TIER_MODELS: dict[str, FallbackModelConfig] = {
+    "low": FallbackModelConfig(model="deepseek-v4-flash", thinking=False),
+    "mid": FallbackModelConfig(model="deepseek-v4-flash", thinking=True, effort="high"),
+    "high": FallbackModelConfig(model="deepseek-v4-pro", thinking=True, effort="max"),
+}
+
 #: Every issue_filter value the driver accepts. Single-tier forms keep the
 #: legacy names; bundled forms are "+"-joined highest-first (config#1933).
 SINGLE_TIER_FILTERS = {"low": "low-only", "mid": "mid-only", "high": "high-only"}
