@@ -47,11 +47,17 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Literal
 
 logger = logging.getLogger(__name__)
+
+#: Grace window subtracted from the verification cutoff (``now -
+#: duration_seconds``) to absorb clock skew between the writer and S3, and
+#: the gap between an artifact's own write and this module's write_health()
+#: call at the end of the same run. See :func:`verify_fresh_s3`.
+_ARTIFACT_FRESHNESS_BUFFER_SECONDS: Final[int] = 60
 
 # ── Canonical constants ──────────────────────────────────────────────────────
 
@@ -146,12 +152,23 @@ class Deliverable:
     ``"ok"`` (see :func:`derive_status`). ``detail`` is a free-form human note
     surfaced on the dashboard's System Health page (e.g. row counts, the S3
     key written, or *why* it is absent).
+
+    ``artifact_key`` is an OPTIONAL S3 key backing a ``produced=True`` claim.
+    When set, :func:`write_health` re-derives ``produced`` via
+    :func:`verify_fresh_s3` before deriving status — turning "trust the
+    boolean" into "verify the S3 object" (config#3153: every instance of a
+    stage self-reporting ``produced=True`` while its artifact silently went
+    stale was caught by a human, never by CI). Leave unset (the default) to
+    keep the pre-existing self-reported behavior — verification is opt-in
+    per deliverable, since not every deliverable has a single natural S3
+    artifact to check (e.g. "sent notification email").
     """
 
     name: str
     required: bool = True
     produced: bool = False
     detail: str = ""
+    artifact_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise for the ``deliverables`` array in the health payload."""
@@ -160,7 +177,109 @@ class Deliverable:
             "required": self.required,
             "produced": self.produced,
             "detail": self.detail,
+            "artifact_key": self.artifact_key,
         }
+
+
+def verify_fresh_s3(
+    deliverable: Deliverable,
+    *,
+    bucket: str = DEFAULT_HEALTH_BUCKET,
+    s3_client: Any = None,
+    since: datetime | None = None,
+) -> Deliverable:
+    """Re-derive ``produced`` by checking ``artifact_key`` against live S3.
+
+    No-op (returns ``deliverable`` unchanged) when ``artifact_key`` is
+    ``None`` or ``produced`` is already ``False`` — there is nothing to
+    verify or disprove.
+
+    Otherwise ``head_object``\\s the key (metadata only — never downloads the
+    artifact just to confirm it exists):
+
+    - Confirmed absent (404 / NoSuchKey / NotFound) → returns a copy with
+      ``produced=False`` and a ``detail`` note. This is a real, definitive
+      signal: the run claimed to have produced the artifact and it isn't
+      there.
+    - Present but ``LastModified`` predates ``since`` (minus a small clock-
+      skew/timing buffer) → same downgrade, with a stale-artifact note. This
+      is what catches the config-I3053 failure mode: an artifact that
+      exists but wasn't actually touched by *this* run, so ``produced=True``
+      would otherwise be believed on a stale file.
+    - Present and fresh (or ``since`` not given) → returns a copy with
+      ``produced=True`` confirmed.
+    - Any other S3 error (permission, network, throttling) → the claim is
+      left AS DECLARED and a warning is logged. Mirrors
+      ``crucible-backtester``'s ``PhaseRegistry._first_missing_artifact``
+      (L4524): don't silently flip a trust decision on incomplete
+      information — only a *confirmed* absence or staleness downgrades the
+      claim.
+    """
+    if deliverable.artifact_key is None or not deliverable.produced:
+        return deliverable
+
+    if s3_client is None:
+        import boto3
+
+        s3_client = boto3.client("s3")
+
+    try:
+        head = s3_client.head_object(Bucket=bucket, Key=deliverable.artifact_key)
+    except Exception as exc:
+        code = ""
+        response = getattr(exc, "response", None)
+        if isinstance(response, dict):
+            code = response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NoSuchBucket", "NotFound"):
+            logger.warning(
+                "verify_fresh_s3: deliverable %r claims produced=True but "
+                "s3://%s/%s is absent — downgrading to produced=False "
+                "(config#3153 artifact-verified marker).",
+                deliverable.name, bucket, deliverable.artifact_key,
+            )
+            return replace(
+                deliverable,
+                produced=False,
+                detail=(
+                    f"{deliverable.detail} "
+                    f"[S3-verified: s3://{bucket}/{deliverable.artifact_key} absent]"
+                ).strip(),
+            )
+        # Transient / permission error: fail open on the claim, don't guess.
+        logger.warning(
+            "verify_fresh_s3: could not verify s3://%s/%s for deliverable %r "
+            "(%s) — leaving produced=%s as declared.",
+            bucket, deliverable.artifact_key, deliverable.name, exc, deliverable.produced,
+        )
+        return deliverable
+
+    if since is not None:
+        last_modified = head.get("LastModified")
+        cutoff = since - timedelta(seconds=_ARTIFACT_FRESHNESS_BUFFER_SECONDS)
+        if last_modified is not None and last_modified < cutoff:
+            logger.warning(
+                "verify_fresh_s3: deliverable %r claims produced=True but "
+                "s3://%s/%s was last modified %s (before this run's %s cutoff) "
+                "— downgrading to produced=False (config#3153).",
+                deliverable.name, bucket, deliverable.artifact_key, last_modified, cutoff,
+            )
+            return replace(
+                deliverable,
+                produced=False,
+                detail=(
+                    f"{deliverable.detail} "
+                    f"[S3-verified: s3://{bucket}/{deliverable.artifact_key} "
+                    f"stale — last modified {last_modified}, expected >= {cutoff}]"
+                ).strip(),
+            )
+
+    return replace(
+        deliverable,
+        detail=(
+            f"{deliverable.detail} "
+            f"[S3-verified: s3://{bucket}/{deliverable.artifact_key}]"
+        ).strip(),
+    )
 
 
 # ── Status derivation ────────────────────────────────────────────────────────
@@ -281,10 +400,39 @@ def write_health(
     Write failures are logged and swallowed (never raised): health is
     enrichment, so a health-write outage must never take down the run it is
     describing (behaviour preserved from the legacy writers).
+
+    Any deliverable declaring ``artifact_key`` is re-verified against S3 via
+    :func:`verify_fresh_s3` before status is derived — a ``produced=True``
+    claim only survives if the artifact actually exists and was touched
+    within this run's window (``now - duration_seconds``, config#3153).
+    Deliverables without ``artifact_key`` are untouched, so callers that
+    don't opt in see no behavior change and pay no extra S3 round-trip.
     """
+    run_started_at = datetime.now(timezone.utc) - timedelta(seconds=duration_seconds)
+    verified_deliverables = deliverables
+    if any(d.artifact_key is not None and d.produced for d in deliverables):
+        try:
+            verify_client = s3_client
+            if verify_client is None:
+                import boto3
+
+                verify_client = boto3.client("s3")
+            verified_deliverables = [
+                verify_fresh_s3(
+                    d, bucket=bucket, s3_client=verify_client, since=run_started_at,
+                )
+                for d in deliverables
+            ]
+            if s3_client is None:
+                s3_client = verify_client  # reuse for the put_object below
+        except Exception as exc:  # pragma: no cover - defensive; enrichment only
+            logger.warning(
+                "Failed to verify deliverable artifacts for %s: %s", module_name, exc,
+            )
+
     payload = build_health_payload(
         module_name=module_name,
-        deliverables=deliverables,
+        deliverables=verified_deliverables,
         run_date=run_date,
         duration_seconds=duration_seconds,
         summary=summary,
