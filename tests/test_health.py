@@ -18,7 +18,7 @@ Two contracts are pinned:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -33,6 +33,7 @@ from nousergon_lib.health import (
     health_key,
     missing_required,
     read_health,
+    verify_fresh_s3,
     write_health,
 )
 
@@ -51,6 +52,7 @@ class _FakeS3:
     def __init__(self) -> None:
         self.store: dict[tuple[str, str], bytes] = {}
         self.put_calls: list[dict] = []
+        self.last_modified: dict[tuple[str, str], datetime] = {}
 
     def put_object(self, *, Bucket, Key, Body, ContentType=None):
         self.put_calls.append(
@@ -64,6 +66,19 @@ class _FakeS3:
         except KeyError as exc:
             raise KeyError(f"no such key s3://{Bucket}/{Key}") from exc
         return {"Body": _Body(body)}
+
+    def head_object(self, *, Bucket, Key):
+        if (Bucket, Key) not in self.store:
+            raise _NotFoundError(Bucket, Key)
+        return {"LastModified": self.last_modified.get((Bucket, Key))}
+
+
+class _NotFoundError(Exception):
+    """Minimal ClientError-shaped double: a `.response["Error"]["Code"]`."""
+
+    def __init__(self, bucket: str, key: str) -> None:
+        super().__init__(f"no such key s3://{bucket}/{key}")
+        self.response = {"Error": {"Code": "404"}}
 
 
 class _Body:
@@ -168,7 +183,7 @@ def test_payload_has_legacy_keys_plus_deliverables():
     assert set(payload.keys()) == _LEGACY_KEYS | {"deliverables"}
     assert payload["duration_seconds"] == 12.3  # rounded to 1dp like the copies
     assert payload["deliverables"] == [
-        {"name": "req", "required": True, "produced": True, "detail": ""}
+        {"name": "req", "required": True, "produced": True, "detail": "", "artifact_key": None}
     ]
 
 
@@ -348,3 +363,114 @@ def test_check_upstream_health_flags_old_stamp_as_stale():
     assert result["data"]["status"] == "ok"
     assert result["data"]["stale"] is True  # years old
     assert result["data"]["age_hours"] > 48
+
+
+# ── verify_fresh_s3 (config#3153) ────────────────────────────────────────────
+
+
+def test_verify_fresh_s3_noop_when_no_artifact_key():
+    d = Deliverable(name="req", required=True, produced=True)
+    s3 = _FakeS3()
+    assert verify_fresh_s3(d, s3_client=s3) is d
+
+
+def test_verify_fresh_s3_noop_when_not_produced():
+    d = Deliverable(name="req", required=True, produced=False, artifact_key="k.json")
+    s3 = _FakeS3()
+    assert verify_fresh_s3(d, s3_client=s3) is d
+
+
+def test_verify_fresh_s3_downgrades_on_confirmed_absence():
+    d = Deliverable(name="req", required=True, produced=True, artifact_key="predictor/predictions/2026-07-20.json")
+    s3 = _FakeS3()  # key never written
+    result = verify_fresh_s3(d, s3_client=s3)
+    assert result.produced is False
+    assert "absent" in result.detail
+
+
+def test_verify_fresh_s3_downgrades_on_stale_artifact():
+    key = "predictor/predictions/2026-07-20.json"
+    d = Deliverable(name="req", required=True, produced=True, artifact_key=key)
+    s3 = _FakeS3()
+    s3.store[(DEFAULT_HEALTH_BUCKET, key)] = b"{}"
+    old = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    s3.last_modified[(DEFAULT_HEALTH_BUCKET, key)] = old
+    since = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+    result = verify_fresh_s3(d, s3_client=s3, since=since)
+    assert result.produced is False
+    assert "stale" in result.detail
+
+
+def test_verify_fresh_s3_confirms_when_fresh():
+    key = "predictor/predictions/2026-07-20.json"
+    d = Deliverable(name="req", required=True, produced=True, artifact_key=key)
+    s3 = _FakeS3()
+    s3.store[(DEFAULT_HEALTH_BUCKET, key)] = b"{}"
+    since = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    s3.last_modified[(DEFAULT_HEALTH_BUCKET, key)] = since + timedelta(minutes=5)
+
+    result = verify_fresh_s3(d, s3_client=s3, since=since)
+    assert result.produced is True
+    assert "S3-verified" in result.detail
+
+
+def test_verify_fresh_s3_leaves_claim_on_transient_error():
+    class _Flaky:
+        def head_object(self, **_):
+            raise RuntimeError("throttled")
+
+    d = Deliverable(name="req", required=True, produced=True, artifact_key="k.json")
+    result = verify_fresh_s3(d, s3_client=_Flaky())
+    assert result is d  # unchanged: don't guess on incomplete information
+
+
+# ── write_health artifact verification integration (config#3153) ───────────
+
+
+def test_write_health_downgrades_false_produced_claim():
+    key = "predictor/predictions/2026-07-20.json"
+    s3 = _FakeS3()  # artifact never actually written
+    written = write_health(
+        module_name="predictor",
+        deliverables=[
+            Deliverable(name="predictions", required=True, produced=True, artifact_key=key),
+        ],
+        run_date="2026-07-20",
+        duration_seconds=60.0,
+        s3_client=s3,
+    )
+    assert written["status"] == "failed"
+    assert written["deliverables"][0]["produced"] is False
+
+
+def test_write_health_confirms_true_produced_claim_when_artifact_fresh():
+    key = "predictor/predictions/2026-07-20.json"
+    s3 = _FakeS3()
+    s3.store[(DEFAULT_HEALTH_BUCKET, key)] = b"{}"
+    s3.last_modified[(DEFAULT_HEALTH_BUCKET, key)] = datetime.now(timezone.utc)
+    written = write_health(
+        module_name="predictor",
+        deliverables=[
+            Deliverable(name="predictions", required=True, produced=True, artifact_key=key),
+        ],
+        run_date="2026-07-20",
+        duration_seconds=60.0,
+        s3_client=s3,
+    )
+    assert written["status"] == "ok"
+    assert written["deliverables"][0]["produced"] is True
+
+
+def test_write_health_untouched_for_deliverables_without_artifact_key():
+    """Legacy call sites (no artifact_key) see zero behavior change."""
+    s3 = _FakeS3()
+    written = write_health(
+        module_name="predictor",
+        deliverables=[_req(True)],
+        run_date="2026-07-20",
+        duration_seconds=1.0,
+        s3_client=s3,
+    )
+    assert written["status"] == "ok"
+    assert written["deliverables"][0]["produced"] is True
