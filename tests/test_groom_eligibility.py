@@ -7,10 +7,13 @@ import pytest
 from nousergon_lib.groom_eligibility import (
     BUNDLED_FILTERS,
     CI_EXPECTED_RED_LABEL,
+    FALLBACK_TIER_MODELS,
     GATE_SOFT_EXCLUDE_LABELS,
     RULING_PENDING_LABEL,
     TIER_MODELS,
+    TIERS,
     VALID_ISSUE_FILTERS,
+    FallbackModelConfig,
     decide_slot,
     expected_red_labels_for_checks,
     filter_for_tiers,
@@ -117,6 +120,47 @@ class TestFilterGrammar:
     def test_valid_set_contents(self):
         assert "gated-reverify" in VALID_ISSUE_FILTERS  # the PR683 drift lesson
         assert "high+mid+low" in VALID_ISSUE_FILTERS
+
+
+class TestFallbackTierModels:
+    """FALLBACK_TIER_MODELS contract: the DeepSeek-direct fallback dict
+    mirrors TIER_MODELS' tier-key shape but carries per-tier thinking/effort
+    config (config#TBD — DeepSeek fallback for the groomer when Brian's
+    Claude Max usage runs out mid-run)."""
+
+    def test_keys_match_tier_models_keys(self):
+        assert set(FALLBACK_TIER_MODELS) == set(TIER_MODELS) == set(TIERS)
+
+    def test_values_are_fallback_model_config(self):
+        for tier, cfg in FALLBACK_TIER_MODELS.items():
+            assert isinstance(cfg, FallbackModelConfig), tier
+
+    def test_model_ids_are_deepseek(self):
+        for tier, cfg in FALLBACK_TIER_MODELS.items():
+            assert cfg.model.startswith("deepseek-"), f"{tier}: {cfg.model!r}"
+
+    def test_low_tier_has_no_effort_level(self):
+        # Verified: DeepSeek's effort parameter collapses low/medium to
+        # "high" server-side, so there's no real "low effort" to request.
+        # The low tier runs with thinking off entirely instead.
+        low = FALLBACK_TIER_MODELS["low"]
+        assert low.thinking is False
+        assert low.effort is None
+
+    def test_mid_and_high_tiers_think_with_a_valid_effort_level(self):
+        valid_efforts = {"high", "max"}  # the only two real DeepSeek levels
+        for tier in ("mid", "high"):
+            cfg = FALLBACK_TIER_MODELS[tier]
+            assert cfg.thinking is True
+            assert cfg.effort in valid_efforts
+
+    def test_high_tier_never_a_lesser_model_than_mid(self):
+        # Mirrors the TIER_MODELS "high never rides below its own model"
+        # invariant enforced elsewhere in this module (decide_slot /
+        # decide_trigger) — high's fallback model must be at least as
+        # capable as mid's, never a downgrade.
+        assert FALLBACK_TIER_MODELS["mid"].model == "deepseek-v4-flash"
+        assert FALLBACK_TIER_MODELS["high"].model == "deepseek-v4-pro"
 
 
 class TestDecideSlot:
