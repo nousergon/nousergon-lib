@@ -14,6 +14,7 @@ from nousergon_lib.groom_eligibility import (
     TIERS,
     VALID_ISSUE_FILTERS,
     FallbackModelConfig,
+    comment_only_strikes_exceeded,
     decide_slot,
     expected_red_labels_for_checks,
     filter_for_tiers,
@@ -310,47 +311,78 @@ class TestDecideTrigger:
         assert [d.issue_filter for d in decisions] == ["high-only", "mid-only", "low-only"]
 
 
-class TestFreshSkip:
-    def test_recent_engagement_no_activity_skips(self):
-        from nousergon_lib.groom_eligibility import fresh_skip_active
-        now = 1_000_000.0
-        assert fresh_skip_active(now - 3600, now - 3600, now)
+class TestFreshSkipRetired:
+    """config#2146 (Brian ruling 2026-07-10): the 72h fresh_skip_active
+    time-window cooldown is retired — eligibility is disposition-structural
+    now (BASE_EXCLUDE_LABELS / is_gate_excluded), never a wall-clock skip."""
 
-    def test_new_activity_readmits(self):
-        from nousergon_lib.groom_eligibility import fresh_skip_active
-        now = 1_000_000.0
-        assert not fresh_skip_active(now - 3600, now - 60, now)
+    def test_fresh_skip_active_no_longer_exported(self):
+        import nousergon_lib.groom_eligibility as ge
+        assert not hasattr(ge, "fresh_skip_active")
 
-    def test_old_engagement_expires(self):
-        from nousergon_lib.groom_eligibility import fresh_skip_active
-        now = 1_000_000.0
-        assert not fresh_skip_active(now - 80 * 3600, now - 80 * 3600, now)
+    def test_fresh_skip_hours_no_longer_exported(self):
+        import nousergon_lib.groom_eligibility as ge
+        assert not hasattr(ge, "FRESH_SKIP_HOURS")
+
+
+class TestCommentOnlyStrikes:
+    """config#2146 deliverable 2: 2 CONSECUTIVE comment-only engagements with
+    no intervening state change routes an issue to the human Decision Queue
+    (groom:stalled + triage:session) instead of a time-based cooldown."""
+
+    def test_no_history_is_zero_strikes(self):
+        assert not comment_only_strikes_exceeded([])
+
+    def test_single_comment_only_is_not_a_strike_out(self):
+        assert not comment_only_strikes_exceeded(["commented"])
+
+    def test_two_consecutive_comment_only_exceeds(self):
+        assert comment_only_strikes_exceeded(["commented", "commented"])
+
+    def test_state_change_resets_the_streak(self):
+        # Most-recent-first: labeled (a real state change) intervened between
+        # the two comment-only passes, so this is NOT 2 consecutive strikes.
+        assert not comment_only_strikes_exceeded(["commented", "labeled", "commented"])
+
+    def test_closed_or_pr_opened_also_resets(self):
+        assert not comment_only_strikes_exceeded(["commented", "pr_opened"])
+        assert not comment_only_strikes_exceeded(["commented", "closed"])
+
+    def test_three_consecutive_still_exceeds(self):
+        assert comment_only_strikes_exceeded(["commented", "commented", "commented"])
+
+    def test_limit_is_configurable(self):
+        assert not comment_only_strikes_exceeded(["commented", "commented"], limit=3)
+        assert comment_only_strikes_exceeded(
+            ["commented", "commented", "commented"], limit=3)
 
 
 class TestFreshSkipConstantsContract:
-    """config#2038: these three constants are the SSoT both groom consumers
+    """config#2038: these constants are the SSoT both groom consumers
     (groom_driver.py on-box, contract-tested against this module; the
     scheduled-groom-dispatcher Lambda, imported directly) must use — pins the
     values so a future edit here can't silently re-drift one consumer from
     the other the way FRESH_SKIP_SLACK_SEC (900 vs the driver's 1800) and the
-    3-vs-4-day lookback did."""
+    3-vs-4-day lookback did. Retained post-config#2146: these now back the
+    comment-only-strike scan instead of the retired fresh-skip cooldown."""
 
     def test_slack_matches_driver_value(self):
         from nousergon_lib.groom_eligibility import FRESH_SKIP_SLACK_SEC
         assert FRESH_SKIP_SLACK_SEC == 1800.0
 
-    def test_lookback_days_covers_the_72h_window(self):
-        from nousergon_lib.groom_eligibility import (
-            ENGAGEMENT_LOOKBACK_DAYS,
-            FRESH_SKIP_HOURS,
-        )
-        # A run starting just before UTC midnight (FRESH_SKIP_HOURS/24) days
-        # ago must still fall inside the scanned date-bucket range.
-        assert ENGAGEMENT_LOOKBACK_DAYS >= (FRESH_SKIP_HOURS / 24.0) + 1
-
     def test_engaged_dispositions_matches_driver_value(self):
         from nousergon_lib.groom_eligibility import ENGAGED_DISPOSITIONS
         assert ENGAGED_DISPOSITIONS == ("closed", "pr_opened", "commented", "labeled")
+
+    def test_strike_lookback_covers_the_strike_limit_generously(self):
+        from nousergon_lib.groom_eligibility import (
+            COMMENT_ONLY_STRIKE_LOOKBACK_DAYS,
+            ENGAGEMENT_LOOKBACK_DAYS,
+        )
+        # The strike scan's own window must be at least as wide as the
+        # general engagement lookback (a P2/P3 issue isn't re-groomed daily,
+        # so 2 strikes can legitimately span more calendar time).
+        assert COMMENT_ONLY_STRIKE_LOOKBACK_DAYS >= ENGAGEMENT_LOOKBACK_DAYS
 
 
 class TestCiExpectedRed:
