@@ -7,9 +7,14 @@ import pytest
 from nousergon_lib.groom_eligibility import (
     BUNDLED_FILTERS,
     CI_EXPECTED_RED_LABEL,
+    FALLBACK_TIER_MODELS,
     GATE_SOFT_EXCLUDE_LABELS,
+    RULING_PENDING_LABEL,
     TIER_MODELS,
+    TIERS,
     VALID_ISSUE_FILTERS,
+    FallbackModelConfig,
+    comment_only_strikes_exceeded,
     decide_slot,
     expected_red_labels_for_checks,
     filter_for_tiers,
@@ -70,6 +75,19 @@ class TestGateExclusion:
         assert is_actionable(["complexity:low", "gate:operator"]) is None
         assert is_actionable(["complexity:ultra"]) is None
 
+    def test_ruling_pending_lifts_soft_exclusion_not_hard(self):
+        # config#3199: an operator ruling awaiting execution overrides the
+        # SOFT gate exclusion — executing the ruling is what resolves the
+        # remaining gate label — but never a HARD exclude (a re-escalated
+        # gate:decision item is human-owned again, marker or not).
+        assert RULING_PENDING_LABEL == "ruling:pending-exec"
+        assert not is_gate_excluded(["gate:weekly-sf", RULING_PENDING_LABEL])
+        assert not is_gate_excluded(["gate:date", RULING_PENDING_LABEL])
+        assert is_gate_excluded(["gate:decision", RULING_PENDING_LABEL])
+        assert is_gate_excluded(["gate:operator", RULING_PENDING_LABEL])
+        assert is_actionable(["complexity:low", "gate:weekly-sf",
+                              RULING_PENDING_LABEL]) == "low"
+
     def test_milestone_gate_is_soft_excluded_unless_due(self):
         # config#2519: event-driven gate — never gets gate-due in practice
         # (gate_milestone_sweep.py auto-clears directly), but the SOFT
@@ -103,6 +121,47 @@ class TestFilterGrammar:
     def test_valid_set_contents(self):
         assert "gated-reverify" in VALID_ISSUE_FILTERS  # the PR683 drift lesson
         assert "high+mid+low" in VALID_ISSUE_FILTERS
+
+
+class TestFallbackTierModels:
+    """FALLBACK_TIER_MODELS contract: the DeepSeek-direct fallback dict
+    mirrors TIER_MODELS' tier-key shape but carries per-tier thinking/effort
+    config (config#TBD — DeepSeek fallback for the groomer when Brian's
+    Claude Max usage runs out mid-run)."""
+
+    def test_keys_match_tier_models_keys(self):
+        assert set(FALLBACK_TIER_MODELS) == set(TIER_MODELS) == set(TIERS)
+
+    def test_values_are_fallback_model_config(self):
+        for tier, cfg in FALLBACK_TIER_MODELS.items():
+            assert isinstance(cfg, FallbackModelConfig), tier
+
+    def test_model_ids_are_deepseek(self):
+        for tier, cfg in FALLBACK_TIER_MODELS.items():
+            assert cfg.model.startswith("deepseek-"), f"{tier}: {cfg.model!r}"
+
+    def test_low_tier_has_no_effort_level(self):
+        # Verified: DeepSeek's effort parameter collapses low/medium to
+        # "high" server-side, so there's no real "low effort" to request.
+        # The low tier runs with thinking off entirely instead.
+        low = FALLBACK_TIER_MODELS["low"]
+        assert low.thinking is False
+        assert low.effort is None
+
+    def test_mid_and_high_tiers_think_with_a_valid_effort_level(self):
+        valid_efforts = {"high", "max"}  # the only two real DeepSeek levels
+        for tier in ("mid", "high"):
+            cfg = FALLBACK_TIER_MODELS[tier]
+            assert cfg.thinking is True
+            assert cfg.effort in valid_efforts
+
+    def test_high_tier_never_a_lesser_model_than_mid(self):
+        # Mirrors the TIER_MODELS "high never rides below its own model"
+        # invariant enforced elsewhere in this module (decide_slot /
+        # decide_trigger) — high's fallback model must be at least as
+        # capable as mid's, never a downgrade.
+        assert FALLBACK_TIER_MODELS["mid"].model == "deepseek-v4-flash"
+        assert FALLBACK_TIER_MODELS["high"].model == "deepseek-v4-pro"
 
 
 class TestDecideSlot:
@@ -186,113 +245,130 @@ class TestDecideTrigger:
         decisions = [d for d in self._launches({"low": 8, "mid": 9, "high": 10}) if d.launch]
         assert [(d.issue_filter, d.model) for d in sorted(decisions, key=lambda x: x.issue_filter)] == [
             ("high-only", "claude-sonnet-5"),
-            ("low-only", "claude-haiku-4-5"),
-            ("mid-only", "claude-sonnet-5"),
+            ("low-only", "deepseek-v4-flash"),
+            ("mid-only", "deepseek-v4-flash"),
         ]
 
-    def test_thin_low_attaches_to_nearest_standalone_above(self):
+    def test_thin_tier_launches_independently_instead_of_attaching(self):
         decisions = [d for d in self._launches({"low": 6, "mid": 9, "high": 10}) if d.launch]
         filters = {d.issue_filter for d in decisions}
-        assert filters == {"mid+low", "high-only"}  # low rides mid, not high
+        assert filters == {"low-only", "mid-only", "high-only"}
 
-    def test_leftover_thin_pool_launches_at_highest_model_when_over_floor(self):
+    def test_all_tiers_launch_independently(self):
         decisions = [d for d in self._launches({"low": 4, "mid": 5, "high": 2}) if d.launch]
-        assert len(decisions) == 1
-        assert decisions[0].issue_filter == "high+mid+low"
-        assert decisions[0].model == TIER_MODELS["high"]  # high present in pool
+        assert len(decisions) == 3
+        assert {d.issue_filter for d in decisions} == {"low-only", "mid-only", "high-only"}
 
-    def test_thin_pool_under_floor_skips_with_reason(self):
+    def test_no_skip_for_thin_tiers(self):
         decisions = self._launches({"low": 1, "mid": 2, "high": 1})
-        assert len(decisions) == 1 and not decisions[0].launch
-        assert "deferred" in decisions[0].reason
+        assert all(d.launch for d in decisions)
+        assert len(decisions) == 3
+        assert {d.issue_filter for d in decisions} == {"low-only", "mid-only", "high-only"}
 
-    def test_thin_pool_p0_valve(self):
-        decisions = [d for d in self._launches({"low": 1, "mid": 2, "high": 0}, p0_tiers=["mid"]) if d.launch]
-        assert len(decisions) == 1 and decisions[0].model == "claude-sonnet-5"  # no high -> Sonnet
+    def test_each_tier_gets_own_model(self):
+        decisions = [d for d in self._launches({"low": 1, "mid": 2, "high": 0}) if d.launch]
+        by_filter = {d.issue_filter: d for d in decisions}
+        assert by_filter["low-only"].model == "deepseek-v4-flash"
+        assert by_filter["mid-only"].model == "deepseek-v4-flash"
 
-    def test_thin_pool_age_valve(self):
-        decisions = [d for d in self._launches({"low": 3, "mid": 0, "high": 0},
-                                        oldest_wait_hours={"low": 96.0}) if d.launch]
-        assert len(decisions) == 1 and decisions[0].model == "claude-haiku-4-5"
-
-    def test_high_never_rides_below_its_own_model(self):
-        # standalone low, thin high: high must NOT attach downward, and any
-        # launch containing high uses high's own model (Sonnet, same as mid,
-        # as of config#2409 — the guardrail is about tier isolation, not a
-        # distinct model anymore).
+    def test_high_launches_independently_its_own_model(self):
         decisions = [d for d in self._launches({"low": 9, "mid": 0, "high": 2}) if d.launch]
         by_filter = {d.issue_filter: d for d in decisions}
         assert "low-only" in by_filter
-        assert all("high" not in f or d.model == TIER_MODELS["high"] for f, d in by_filter.items())
+        assert "high-only" in by_filter
+        assert by_filter["high-only"].model == "claude-sonnet-5"
 
     def test_empty_backlog_no_launches(self):
         assert all(not d.launch for d in self._launches({"low": 0, "mid": 0, "high": 0}))
 
-    def test_solo_launch_when_only_high_clears_floor(self):
-        # Only high clears the floor -> a single launch.
+    def test_solo_high_launches_when_count_positive(self):
         decisions = [d for d in self._launches({"low": 0, "mid": 0, "high": 10}) if d.launch]
         assert len(decisions) == 1
         assert decisions[0].issue_filter == "high-only"
 
-    def test_skip_decisions_emitted_alongside_a_launch(self):
-        # One standalone launch (low) plus a thin `high` with no standalone
-        # tier above it (high is the top tier) that falls to the leftover
-        # pool and doesn't clear the floor there either -> skip. Both a
-        # launching and a skipped decision are returned.
+    def test_skip_zero_count_tiers(self):
+        # Only tiers with count > 0 launch; zero-count tiers are absent.
         decisions = self._launches({"low": 10, "mid": 0, "high": 3})
-        launching = [d for d in decisions if d.launch]
-        skipped = [d for d in decisions if not d.launch]
-        assert len(launching) == 1 and len(skipped) == 1
-        assert launching[0].issue_filter == "low-only"
+        assert len(decisions) == 2
+        assert {d.issue_filter for d in decisions if d.launch} == {"low-only", "high-only"}
 
     def test_launch_emit_order_is_high_first(self):
-        # decide_trigger's own pool ordering sorts high-first; assert the
-        # emitted launch order doesn't silently reshuffle.
         decisions = [d for d in self._launches({"low": 8, "mid": 9, "high": 10}) if d.launch]
         assert [d.issue_filter for d in decisions] == ["high-only", "mid-only", "low-only"]
 
 
-class TestFreshSkip:
-    def test_recent_engagement_no_activity_skips(self):
-        from nousergon_lib.groom_eligibility import fresh_skip_active
-        now = 1_000_000.0
-        assert fresh_skip_active(now - 3600, now - 3600, now)
+class TestFreshSkipRetired:
+    """config#2146 (Brian ruling 2026-07-10): the 72h fresh_skip_active
+    time-window cooldown is retired — eligibility is disposition-structural
+    now (BASE_EXCLUDE_LABELS / is_gate_excluded), never a wall-clock skip."""
 
-    def test_new_activity_readmits(self):
-        from nousergon_lib.groom_eligibility import fresh_skip_active
-        now = 1_000_000.0
-        assert not fresh_skip_active(now - 3600, now - 60, now)
+    def test_fresh_skip_active_no_longer_exported(self):
+        import nousergon_lib.groom_eligibility as ge
+        assert not hasattr(ge, "fresh_skip_active")
 
-    def test_old_engagement_expires(self):
-        from nousergon_lib.groom_eligibility import fresh_skip_active
-        now = 1_000_000.0
-        assert not fresh_skip_active(now - 80 * 3600, now - 80 * 3600, now)
+    def test_fresh_skip_hours_no_longer_exported(self):
+        import nousergon_lib.groom_eligibility as ge
+        assert not hasattr(ge, "FRESH_SKIP_HOURS")
+
+
+class TestCommentOnlyStrikes:
+    """config#2146 deliverable 2: 2 CONSECUTIVE comment-only engagements with
+    no intervening state change routes an issue to the human Decision Queue
+    (groom:stalled + triage:session) instead of a time-based cooldown."""
+
+    def test_no_history_is_zero_strikes(self):
+        assert not comment_only_strikes_exceeded([])
+
+    def test_single_comment_only_is_not_a_strike_out(self):
+        assert not comment_only_strikes_exceeded(["commented"])
+
+    def test_two_consecutive_comment_only_exceeds(self):
+        assert comment_only_strikes_exceeded(["commented", "commented"])
+
+    def test_state_change_resets_the_streak(self):
+        # Most-recent-first: labeled (a real state change) intervened between
+        # the two comment-only passes, so this is NOT 2 consecutive strikes.
+        assert not comment_only_strikes_exceeded(["commented", "labeled", "commented"])
+
+    def test_closed_or_pr_opened_also_resets(self):
+        assert not comment_only_strikes_exceeded(["commented", "pr_opened"])
+        assert not comment_only_strikes_exceeded(["commented", "closed"])
+
+    def test_three_consecutive_still_exceeds(self):
+        assert comment_only_strikes_exceeded(["commented", "commented", "commented"])
+
+    def test_limit_is_configurable(self):
+        assert not comment_only_strikes_exceeded(["commented", "commented"], limit=3)
+        assert comment_only_strikes_exceeded(
+            ["commented", "commented", "commented"], limit=3)
 
 
 class TestFreshSkipConstantsContract:
-    """config#2038: these three constants are the SSoT both groom consumers
+    """config#2038: these constants are the SSoT both groom consumers
     (groom_driver.py on-box, contract-tested against this module; the
     scheduled-groom-dispatcher Lambda, imported directly) must use — pins the
     values so a future edit here can't silently re-drift one consumer from
     the other the way FRESH_SKIP_SLACK_SEC (900 vs the driver's 1800) and the
-    3-vs-4-day lookback did."""
+    3-vs-4-day lookback did. Retained post-config#2146: these now back the
+    comment-only-strike scan instead of the retired fresh-skip cooldown."""
 
     def test_slack_matches_driver_value(self):
         from nousergon_lib.groom_eligibility import FRESH_SKIP_SLACK_SEC
         assert FRESH_SKIP_SLACK_SEC == 1800.0
 
-    def test_lookback_days_covers_the_72h_window(self):
-        from nousergon_lib.groom_eligibility import (
-            ENGAGEMENT_LOOKBACK_DAYS,
-            FRESH_SKIP_HOURS,
-        )
-        # A run starting just before UTC midnight (FRESH_SKIP_HOURS/24) days
-        # ago must still fall inside the scanned date-bucket range.
-        assert ENGAGEMENT_LOOKBACK_DAYS >= (FRESH_SKIP_HOURS / 24.0) + 1
-
     def test_engaged_dispositions_matches_driver_value(self):
         from nousergon_lib.groom_eligibility import ENGAGED_DISPOSITIONS
         assert ENGAGED_DISPOSITIONS == ("closed", "pr_opened", "commented", "labeled")
+
+    def test_strike_lookback_covers_the_strike_limit_generously(self):
+        from nousergon_lib.groom_eligibility import (
+            COMMENT_ONLY_STRIKE_LOOKBACK_DAYS,
+            ENGAGEMENT_LOOKBACK_DAYS,
+        )
+        # The strike scan's own window must be at least as wide as the
+        # general engagement lookback (a P2/P3 issue isn't re-groomed daily,
+        # so 2 strikes can legitimately span more calendar time).
+        assert COMMENT_ONLY_STRIKE_LOOKBACK_DAYS >= ENGAGEMENT_LOOKBACK_DAYS
 
 
 class TestCiExpectedRed:
