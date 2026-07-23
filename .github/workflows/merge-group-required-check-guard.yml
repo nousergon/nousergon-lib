@@ -1,0 +1,49 @@
+name: Merge-group required-check guard
+
+# Structural invariant: every required status check declared in branch
+# protection rulesets MUST be produced by a workflow whose on: block
+# includes merge_group: {types: [checks_requested]}. Without this, the
+# merge queue is permanently deadlocked — the required context never
+# reports on merge_group events (this happened twice on 2026-07-23:
+# config-I3682 for gate-label-guard, and a second deadlock when
+# test.yml + version-bump-check.yml were listed as required but neither
+# declared merge_group).
+#
+# This guard is deliberately NOT a required check itself — a required
+# check that validates required checks creates a self-referential loop.
+# It runs as an advisory on every PR to main and on every push (so the
+# check is visible in CI), but it does not block merge.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: merge-group required-check guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (PyYAML only — gh CLI is pre-installed on ubuntu-latest)
+        run: pip install pyyaml
+
+      - name: Validate merge_group coverage of required checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/validate_merge_group_required_checks.py
