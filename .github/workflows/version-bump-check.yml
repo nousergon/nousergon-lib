@@ -33,6 +33,8 @@ on:
     # labeled/unlabeled included so applying release:manual re-evaluates
     # the check without needing a new push.
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+    types: [checks_requested]
 
 jobs:
   version-policy:
