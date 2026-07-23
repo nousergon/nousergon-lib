@@ -41,12 +41,21 @@ jobs:
     name: version untouched by PRs (merge-time autobump)
     runs-on: ubuntu-latest
     steps:
+      - name: Skip in merge_group (version already validated on pull_request)
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "SKIP: version-bump check already passed on the pull_request event."
+          echo "No version files are evaluated in merge_group — the merge commit"
+          echo "is created by GitHub's merge machinery, not by the PR author."
+
       - uses: actions/checkout@v7
+        if: github.event_name != 'merge_group'
         with:
           fetch-depth: 0
 
       - name: Read versions (merge-base vs PR, both files)
         id: versions
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           git fetch --no-tags origin "${GITHUB_BASE_REF}"
@@ -70,7 +79,7 @@ jobs:
           echo "base ${base_py} → PR pyproject ${pr_py} / __init__ ${pr_init}"
 
       - name: Forbid version edits (unless release:manual)
-        if: steps.versions.outputs.base_py != steps.versions.outputs.pr_py && !contains(github.event.pull_request.labels.*.name, 'release:manual')
+        if: github.event_name == 'pull_request' && steps.versions.outputs.base_py != steps.versions.outputs.pr_py && !contains(github.event.pull_request.labels.*.name, 'release:manual')
         env:
           BASE_VERSION: ${{ steps.versions.outputs.base_py }}
           PR_VERSION: ${{ steps.versions.outputs.pr_py }}
@@ -90,14 +99,14 @@ jobs:
           exit 1
 
       - name: Forbid lone __init__ version edit (unless release:manual)
-        if: steps.versions.outputs.base_py == steps.versions.outputs.pr_py && steps.versions.outputs.pr_init != steps.versions.outputs.pr_py && !contains(github.event.pull_request.labels.*.name, 'release:manual')
+        if: github.event_name == 'pull_request' && steps.versions.outputs.base_py == steps.versions.outputs.pr_py && steps.versions.outputs.pr_init != steps.versions.outputs.pr_py && !contains(github.event.pull_request.labels.*.name, 'release:manual')
         run: |
           set -euo pipefail
           echo "ERROR: __init__.__version__ differs from pyproject.toml::version — PRs must leave BOTH untouched (autobump owns them)." >&2
           exit 1
 
       - name: Validate manual release (release:manual only)
-        if: contains(github.event.pull_request.labels.*.name, 'release:manual')
+        if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'release:manual')
         env:
           BASE_VERSION: ${{ steps.versions.outputs.base_py }}
           PR_VERSION: ${{ steps.versions.outputs.pr_py }}
@@ -125,6 +134,6 @@ jobs:
           echo "OK: manual release ${BASE_VERSION} → ${PR_VERSION} (lockstep, untagged, monotonic)."
 
       - name: Version untouched — OK
-        if: steps.versions.outputs.base_py == steps.versions.outputs.pr_py && steps.versions.outputs.pr_init == steps.versions.outputs.pr_py
+        if: github.event_name == 'pull_request' && steps.versions.outputs.base_py == steps.versions.outputs.pr_py && steps.versions.outputs.pr_init == steps.versions.outputs.pr_py
         run: |
           echo "OK: version untouched — auto-version-bump.yml releases on merge."
