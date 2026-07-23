@@ -14,6 +14,14 @@ The 2026-07-07 nousergon-data-PR683 incident (dispatcher silently downgraded
 the driver's) is the bug class this module closes: one constant set, two
 consumers, contract tests on both sides.
 
+config#2146 (Brian ruling 2026-07-10): eligibility is DISPOSITION-STRUCTURAL,
+not time-window. The 72h ``fresh_skip_active`` cooldown this module used to
+export is retired — an issue is eligible unless closed / ``in-progress`` /
+gated / PR-covered, all already enforced by ``BASE_EXCLUDE_LABELS`` +
+``is_gate_excluded`` below. The one real anti-thrash gap that cooldown
+covered (repeated comment-only, no-progress engagement) is now its own
+disposition-structural rule: ``comment_only_strikes_exceeded``.
+
 Everything here is PURE — no I/O, no GitHub calls. Consumers fetch issues
 their own way (gh CLI on-box, urllib in the Lambda) and pass plain label
 lists / counts in.
@@ -324,48 +332,90 @@ def decide_slot(
 # launches a run per tier that clears the floor. decide_slot() above remains
 # for single-tier manual dispatches; scheduled triggers use decide_trigger().
 
-FRESH_SKIP_HOURS = 72.0
-# config#2038: was 900.0, silently drifted from groom_driver.py's
-# _FRESH_SKIP_SLACK_SEC=1800 (the box does not install nousergon-lib at
-# runtime, so nothing caught the two constants diverging). Harmonized to the
-# driver's value — 1800s better absorbs the real gap between a chunk's
-# nominal end (elapsed_min) and its groom comment actually landing. The drift
-# made the pre-boot Lambda's fresh-skip-aware enumeration systematically
-# UNDER-skip relative to the on-box driver's, so a dispatcher decision like
-# "19 actionable, launch" could deflate to "8 actually actionable" once the
-# box's own (correct) fresh-skip ran three minutes later — a spot box boots
-# for a queue that was never really that big.
+# config#2146 (Brian ruling 2026-07-10): the 72h fresh-skip TIME-WINDOW
+# cooldown (``fresh_skip_active``, retired below) is gone. It was a
+# compensating patch for incomplete dispositions, not a real eligibility
+# rule: every legitimate "don't re-touch" state is ALREADY structurally
+# excluded elsewhere in this module (``BASE_EXCLUDE_LABELS`` — closed issues
+# don't enumerate at all; ``in-progress`` — PR-covered; ``is_gate_excluded``
+# — gated). The two dispositions the cooldown actually suppressed were
+# ``commented`` (a comment-only engagement is a DEFECT under the
+# complete-or-gate contract, config#2135 — rate-limiting churn to ~1/72h
+# instead of fixing it was the wrong layer) and ``labeled`` (a tier
+# downgrade SHOULD make an issue immediately eligible in its new tier —
+# that handoff is the point of the downgrade, and the cooldown blocked it
+# for up to 72h). Measured 2026-07-04→07-10: 76% of queued-issue
+# dispositions were `commented`; the cooldown merely rate-limited that
+# churn rather than preventing it. See ``COMMENT_ONLY_STRIKE_LIMIT`` below
+# for the disposition-structural replacement: 2 no-progress comment-only
+# engagements route the issue to the human Decision Queue instead of a
+# machine cooldown.
+# config#2038: harmonized to groom_driver.py's own value (was 900.0) — the
+# real gap between a chunk's nominal end (elapsed_min) and its groom comment
+# actually landing. Retained post-config#2146: still used to compute each
+# S3 run artifact's "horizon" epoch for the comment-only-strike scan below
+# (a groom's own comment bumping ``updated_at`` must not itself look like
+# new activity that resets the strike count).
 FRESH_SKIP_SLACK_SEC = 1800.0
 
-# config#2038: every disposition that counts as ENGAGED for fresh-skip
-# purposes — SSoT for groom_driver.py's ENGAGED_DISPOSITIONS (contract-tested,
-# the box doesn't import this module at runtime) and the scheduled-groom-
-# dispatcher Lambda's engagement scan (which DOES import this module and must
-# use this constant directly, never a local hardcoded tuple — that hardcode is
-# exactly how this and FRESH_SKIP_SLACK_SEC drifted in the first place).
+# config#2038: every disposition that counts as an ENGAGEMENT for the
+# comment-only-strike scan — SSoT for groom_driver.py's ENGAGED_DISPOSITIONS
+# (contract-tested, the box doesn't import this module at runtime) and the
+# scheduled-groom-dispatcher Lambda's engagement scan (which DOES import this
+# module and must use this constant directly, never a local hardcoded tuple
+# — that hardcode is exactly how this and FRESH_SKIP_SLACK_SEC drifted in
+# the first place).
 ENGAGED_DISPOSITIONS = ("closed", "pr_opened", "commented", "labeled")
 
-# config#2038: how many trailing daily S3 prefixes (``groom/{date}/``) to scan
-# when building the engagement map that feeds fresh-skip. Must be >= 4 to
-# safely cover a 72h (FRESH_SKIP_HOURS) rolling window against calendar-day
-# buckets: a run that started just before UTC midnight 3 calendar days ago is
-# still inside the 72h window, but a 3-day lookback (today/yesterday/day-
-# before) can miss its bucket entirely. The dispatcher Lambda hardcoded
-# ``range(3)`` — under-covering the window and, combined with the slack drift
-# above, undercounting fresh-skips relative to the driver's own (correct)
-# 4-day lookback.
+# config#2038/#2146: how many trailing daily S3 prefixes (``groom/{date}/``)
+# to scan when building the engagement map the comment-only-strike scan
+# (and, historically, fresh-skip) reads. Kept at 4 post-retirement of the
+# 72h fresh-skip window: it remains a safe cover for the strike scan's own
+# short lookback (``COMMENT_ONLY_STRIKE_LOOKBACK_DAYS`` below) against
+# calendar-day bucket boundaries.
 ENGAGEMENT_LOOKBACK_DAYS = 4
 
+# config#2146 (deliverable 2 — the anti-thrash replacement for the retired
+# 72h cooldown): after this many CONSECUTIVE comment-only (``commented``)
+# engagements on an issue with NO intervening state change (closed /
+# pr_opened / labeled reset the count), the issue is a groom DEFECT that
+# machine grooming cannot resolve — route it to the human Decision Queue
+# (``GROOM_STALLED_LABEL`` + ``TRIAGE_SESSION_LABEL``) instead of a third
+# bare comment. 2, not 3: a single comment-only pass is normal (e.g. an
+# exempt priority-drift/tier-reservation/metadata note, or the first
+# config#2135 defect-flag); a SECOND comment-only pass with nothing having
+# changed is the thrash pattern (171 issues comment-groomed >=3x with zero
+# completions, measured 2026-07-04->07-10) — never let it reach a third.
+COMMENT_ONLY_STRIKE_LIMIT = 2
 
-def fresh_skip_active(engaged_epoch: float, updated_epoch: float,
-                      now_epoch: float, *, skip_hours: float = FRESH_SKIP_HOURS,
-                      slack_sec: float = FRESH_SKIP_SLACK_SEC) -> bool:
-    """config#1893 semantics, pure: an issue engaged by a groom < skip_hours
-    ago with no NEW activity since (updated_at within the engagement window +
-    slack) is skipped. Any later activity re-admits it immediately."""
-    if now_epoch - engaged_epoch >= skip_hours * 3600.0:
-        return False
-    return updated_epoch <= engaged_epoch + slack_sec
+# config#2146: trailing days of S3 run artifacts scanned for the strike
+# count. Wider than ENGAGEMENT_LOOKBACK_DAYS (4) because 2 strikes can
+# legitimately span more than 3 tier-run cycles for a P2/P3 issue that
+# isn't re-groomed every day — this must cover the realistic gap between
+# two comment-only passes on a lower-priority issue, not just a 72h window.
+COMMENT_ONLY_STRIKE_LOOKBACK_DAYS = 21
+
+
+def comment_only_strikes_exceeded(dispositions_desc: Iterable[str], *,
+                                  limit: int = COMMENT_ONLY_STRIKE_LIMIT) -> bool:
+    """config#2146 pure predicate: given an issue's disposition history in
+    REVERSE chronological order (most recent run first, restricted to runs
+    that actually engaged it — i.e. already filtered to
+    ``ENGAGED_DISPOSITIONS``), does it have >= ``limit`` CONSECUTIVE
+    ``"commented"`` entries counting back from the most recent?
+
+    Any ``"closed"``/``"pr_opened"``/``"labeled"`` entry is a real state
+    change and stops the count (it resets the thrash streak — a downgrade,
+    a PR, or a close means the machine made progress, even if a later pass
+    goes comment-only again). An empty history is 0 strikes."""
+    streak = 0
+    for disposition in dispositions_desc:
+        if disposition != "commented":
+            break
+        streak += 1
+        if streak >= limit:
+            return True
+    return False
 
 
 def decide_trigger(
