@@ -54,52 +54,47 @@ jobs:
     name: gate-label-guard
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve PR labels (pull_request event)
-        if: github.event_name == 'pull_request'
-        run: |
-          set -euo pipefail
-          printf '%s\n' '${{ toJson(github.event.pull_request.labels) }}' > /tmp/pr_labels.json
-          echo "Resolved labels from the pull_request event payload (PR #${{ github.event.pull_request.number }})."
-
-      - name: Resolve PR labels (merge_group event)
-        if: github.event_name == 'merge_group'
+      - name: Resolve PR labels
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_JSON: ${{ toJson(github.event) }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          HEAD_REF='${{ github.event.merge_group.head_ref }}'
-          echo "merge_group.head_ref: $HEAD_REF"
 
-          # GitHub merge-queue integration branches are named:
-          #   refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>
-          # Each merge_group entry maps 1:1 to exactly one PR (verified via
-          # the GraphQL MergeQueueEntry type: headCommit + pullRequest are
-          # per-entry fields) — grouping/batching does not multiplex PR
-          # numbers into a single head_ref. Anchored match, fail closed on
-          # any deviation from the documented format.
-          PR_NUMBER=$(printf '%s' "$HEAD_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            printf '%s' "$EVENT_JSON" | jq '.pull_request.labels' > /tmp/pr_labels.json
+            PR_NUM=$(printf '%s' "$EVENT_JSON" | jq -r '.pull_request.number')
+            echo "Resolved labels from the pull_request event payload (PR #$PR_NUM)."
 
-          if [ -z "$PR_NUMBER" ]; then
-            echo "::error::Could not extract a PR number from merge_group.head_ref ('$HEAD_REF') — expected the documented refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha> format. Failing closed: cannot verify gate:* labels are absent, so this check cannot pass."
-            exit 1
-          fi
+          elif [ "$EVENT_NAME" = 'merge_group' ]; then
+            HEAD_REF=$(printf '%s' "$EVENT_JSON" | jq -r '.merge_group.head_ref')
+            echo "merge_group.head_ref: $HEAD_REF"
 
-          echo "Resolved merge_group entry to PR #$PR_NUMBER — fetching its current labels."
+            PR_NUM=$(printf '%s' "$HEAD_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
+            if [ -z "$PR_NUM" ]; then
+              echo "::error::Could not extract a PR number from merge_group.head_ref ('$HEAD_REF') — expected the documented refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha> format. Failing closed: cannot verify gate:* labels are absent, so this check cannot pass."
+              exit 1
+            fi
 
-          if ! gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels' > /tmp/pr_labels.json; then
-            echo "::error::Failed to fetch labels for PR #$PR_NUMBER via 'gh pr view' — failing closed."
+            echo "Resolved merge_group entry to PR #$PR_NUM — fetching its current labels."
+            if ! gh pr view "$PR_NUM" --repo "$REPO" --json labels --jq '.labels' > /tmp/pr_labels.json; then
+              echo "::error::Failed to fetch labels for PR #$PR_NUM via 'gh pr view' — failing closed."
+              exit 1
+            fi
+
+          else
+            echo "::error::Unsupported event_name='$EVENT_NAME' — gate-label-guard only handles pull_request and merge_group. Failing closed."
             exit 1
           fi
 
       - name: Fail if any gate:* label is present
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
           if [ ! -s /tmp/pr_labels.json ]; then
-            echo "::error::No labels were resolved for event_name='$EVENT_NAME' — gate-label-guard only supports pull_request and merge_group. Failing closed."
+            echo "::error::No labels resolved — the preceding step should have populated /tmp/pr_labels.json. Failing closed."
             exit 1
           fi
 
