@@ -115,9 +115,14 @@ TIERS = ("low", "mid", "high")
 #: dedicated-attention only, not a model-capability step up from mid. See
 #: the module docstring update and the groom prompt rewrites in
 #: alpha-engine-config for the full rationale.
+#: groom-primary-deepseek (2026-07-23): low/mid now use DeepSeek V4 Flash as
+#: PRIMARY backend (Brian ruling, superseding the 7/22 AMENDED note). High
+#: stays on Sonnet. Bundles containing high use the highest tier's model
+#: = Sonnet, so high is never served by DeepSeek. Thinking/effort params
+#: for DeepSeek are resolved on-box by groom_eligibility_fallback.py.
 TIER_MODELS = {
-    "low": "claude-haiku-4-5",
-    "mid": "claude-sonnet-5",
+    "low": "deepseek-v4-flash",
+    "mid": "deepseek-v4-flash",
     "high": "claude-sonnet-5",
 }
 
@@ -428,55 +433,25 @@ def decide_trigger(
 ) -> list[SlotDecision]:
     """Full-backlog trigger decision: 0..3 launches.
 
-    - Every tier with count >= floor gets its OWN run (its tier's model).
-    - Each thin tier (0 < count < floor) attaches to the NEAREST standalone
-      tier ABOVE it (upward only — high never rides below its own model,
-      Sonnet as of config#2409).
-    - Thin tiers with no standalone tier above pool together; the pool
-      launches at the highest-present tier's model iff its combined count
-      >= floor OR the escape valve fires for the pool (an actionable P0 in
-      a pooled tier, or a pooled tier's oldest waited >= max_wait_hours).
+    groom-primary-deepseek (2026-07-23): EVERY tier with actionable issues
+    launches its own dedicated box — no floor check, no thin-tier bundling.
+    Each tier runs independently at its own model. A tier with zero
+    actionable issues is skipped. The ``floor`` and ``max_wait_hours`` params
+    are accepted for signature compatibility but unused (no tier is ever
+    deferred or bundled). ``p0_tiers`` is likewise unused (every tier launches
+    regardless of P0 presence).
+
+    The ``oldest_wait_hours`` param is accepted for signature compatibility
+    but unused. Returns decisions in highest-first order (high, mid, low)
+    for consistent SF Map iteration ordering.
     """
-    oldest_wait_hours = oldest_wait_hours or {}
-    p0 = set(p0_tiers)
-    standalone = [t for t in TIERS if counts.get(t, 0) >= floor]
-    thin = [t for t in TIERS if 0 < counts.get(t, 0) < floor]
-    pools: dict[str, list[str]] = {t: [t] for t in standalone}
-    leftover: list[str] = []
-    for t in thin:
-        above = [st for st in standalone if TIERS.index(st) > TIERS.index(t)]
-        if above:
-            pools[min(above, key=TIERS.index)].append(t)
-        else:
-            leftover.append(t)
     launches: list[SlotDecision] = []
-    for anchor in sorted(pools, key=TIERS.index, reverse=True):
-        tiers = sorted(pools[anchor], key=TIERS.index)
-        total = sum(counts.get(t, 0) for t in tiers)
+    for tier in reversed(TIERS):
+        count = counts.get(tier, 0)
+        if count <= 0:
+            continue
+        reason = f"{count} actionable — unconditional launch (no floor gate)"
         launches.append(SlotDecision(
-            True, tuple(tiers), filter_for_tiers(tiers), TIER_MODELS[tiers[-1]],
-            f"{total} actionable across {'+'.join(tiers)} (anchor {anchor} >= floor {floor})",
-        ))
-    if leftover:
-        tiers = sorted(leftover, key=TIERS.index)
-        total = sum(counts.get(t, 0) for t in tiers)
-        overdue = [t for t in tiers if oldest_wait_hours.get(t, 0.0) >= max_wait_hours]
-        pool_p0 = sorted(p0 & set(tiers), key=TIERS.index)
-        if total >= floor:
-            reason = f"{total} actionable pooled across {'+'.join(tiers)} >= floor {floor}"
-        elif pool_p0:
-            reason = f"escape valve: actionable P0 in {'+'.join(pool_p0)} (pool {total} < floor {floor})"
-        elif overdue:
-            reason = (f"escape valve: {'+'.join(overdue)} oldest waited >= "
-                      f"{max_wait_hours:g}h (pool {total} < floor {floor})")
-        else:
-            launches.append(SlotDecision(
-                False, tuple(tiers), "", "",
-                f"thin pool {'+'.join(tiers)} ({total}) < floor {floor}, no P0, "
-                f"none waited {max_wait_hours:g}h — deferred to a later trigger",
-            ))
-            return launches
-        launches.append(SlotDecision(
-            True, tuple(tiers), filter_for_tiers(tiers), TIER_MODELS[tiers[-1]], reason,
+            True, (tier,), SINGLE_TIER_FILTERS[tier], TIER_MODELS[tier], reason,
         ))
     return launches
