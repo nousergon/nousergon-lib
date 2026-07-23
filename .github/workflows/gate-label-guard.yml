@@ -56,22 +56,19 @@ jobs:
     steps:
       - name: Resolve PR labels (pull_request event)
         if: github.event_name == 'pull_request'
-        env:
-          LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          echo "$LABELS_JSON" > /tmp/pr_labels.json
-          echo "Resolved labels from the pull_request event payload (PR #$PR_NUMBER)."
+          printf '%s\n' '${{ toJson(github.event.pull_request.labels) }}' > /tmp/pr_labels.json
+          echo "Resolved labels from the pull_request event payload (PR #${{ github.event.pull_request.number }})."
 
       - name: Resolve PR labels (merge_group event)
         if: github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.event.merge_group.head_ref }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          HEAD_REF='${{ github.event.merge_group.head_ref }}'
           echo "merge_group.head_ref: $HEAD_REF"
 
           # GitHub merge-queue integration branches are named:
