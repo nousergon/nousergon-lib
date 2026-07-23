@@ -1,10 +1,26 @@
-"""Validate that every required status check in branch-protection rulesets
-has a workflow that triggers on merge_group events.
+"""Validate that every required status check (from branch-protection rulesets
+AND classic branch protection) has a workflow that triggers on merge_group
+events.
 
-Prevents the class of bug that deadlocked the merge queue twice today
-(2026-07-23): a required check whose workflow only fires on pull_request
+Prevents the class of bug that deadlocked the merge queue three times on
+2026-07-23: a required check whose workflow only fires on pull_request
 but the merge queue fires merge_group — the context never reports, the
 queue waits 60 minutes, the PR auto-dequeues unmerged.
+
+Sources consulted:
+  a) Active rulesets of type required_status_checks (rulesets-only repos like
+     nousergon-lib).
+  b) Classic branch protection required_status_checks.contexts (repos still on
+     legacy protection, like nousergon-data, crucible-dashboard).
+  c) The merge_queue ruleset itself — checks required by the queue are the
+     same set as branch protection, but we check the queue ruleset's
+     parameters.required_status_checks if present (nousergon-lib does NOT
+     require status checks at the queue-ruleset level; they are gated in the
+     main-protection ruleset instead).
+
+One required check CAN be served by multiple workflows — it's enough that
+AT LEAST ONE has merge_group coverage. The guard reports the first producer
+found that lacks it, but the error is a single line per check regardless.
 
 Run locally:  python3 scripts/validate_merge_group_required_checks.py
 In CI:        called from merge-group-required-check-guard.yml
@@ -35,27 +51,40 @@ def gh_api(path: str) -> dict | list:
     return json.loads(result.stdout)
 
 
-def get_required_checks() -> list[str]:
-    """Collect every required status check context from all active rulesets.
+def get_required_checks(repo: str) -> list[str]:
+    """Collect every required status check context from rulesets AND classic
+    branch protection.
 
-    The rulesets LIST endpoint does NOT include the rules array — each
-    ruleset must be fetched individually to retrieve its rules.
+    Sources (all consulted, deduplicated):
+      1. Active rulesets with required_status_checks rules.
+      2. Classic branch protection on main.
+      3. merge_queue rulesets that list required_status_checks in their params.
     """
-    repo = os.environ["GITHUB_REPOSITORY"]
-    rulesets = gh_api(f"/repos/{repo}/rulesets")
     contexts: list[str] = []
+
+    # Source 1 + 3: rulesets API.
+    rulesets = gh_api(f"/repos/{repo}/rulesets")
     for rs in rulesets:
         if rs.get("enforcement") != "active":
             continue
-        rs_id = rs["id"]
-        full = gh_api(f"/repos/{repo}/rulesets/{rs_id}")
+        full = gh_api(f"/repos/{repo}/rulesets/{rs['id']}")
         for rule in full.get("rules", []):
-            if rule.get("type") != "required_status_checks":
-                continue
-            for check in rule.get("parameters", {}).get("required_status_checks", []):
-                ctx: str = check["context"]
-                if ctx not in contexts:
-                    contexts.append(ctx)
+            if rule["type"] == "required_status_checks":
+                for check in rule["parameters"].get("required_status_checks", []):
+                    ctx: str = check["context"]
+                    if ctx not in contexts:
+                        contexts.append(ctx)
+
+    # Source 2: classic branch protection (used by nousergon-data,
+    # crucible-dashboard alongside the merge_queue-only ruleset).
+    try:
+        prot = gh_api(f"/repos/{repo}/branches/main/protection")
+        for ctx in prot.get("required_status_checks", {}).get("contexts", []):
+            if ctx not in contexts:
+                contexts.append(ctx)
+    except (SystemExit, KeyError, json.JSONDecodeError):
+        pass  # 404 = no classic protection; rulesets-only repos are common.
+
     return contexts
 
 
@@ -118,10 +147,21 @@ def job_name_matches(job_pattern: str, check_context: str) -> bool:
 
 
 def main() -> int:
-    repo = os.environ["GITHUB_REPOSITORY"]
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if not repo:
+        # Allow local runs with --repo flag
+        for i, arg in enumerate(sys.argv[1:], 1):
+            if arg == "--repo" and i < len(sys.argv):
+                repo = sys.argv[i + 1]
+            elif arg.startswith("--repo="):
+                repo = arg.split("=", 1)[1]
+    if not repo:
+        print("::error::GITHUB_REPOSITORY not set and no --repo flag provided")
+        return 1
+
     print(f"Auditing required checks for merge_group triggers in {repo}")
 
-    required = get_required_checks()
+    required = get_required_checks(repo)
     if not required:
         print("No required status checks found — nothing to validate.")
         return 0
