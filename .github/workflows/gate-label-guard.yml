@@ -57,19 +57,24 @@ jobs:
       - name: Resolve PR labels
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_JSON: ${{ toJson(github.event) }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
+          # Read the event payload from GITHUB_EVENT_PATH — the runner
+          # always writes the full event to this file. No need to pass
+          # toJson(github.event) via env:, which fails for pull_request
+          # events whose full payload exceeds expression-eval limits
+          # (startup_failure with zero log output; 2026-07-23 incident).
+
           if [ "$EVENT_NAME" = 'pull_request' ]; then
-            printf '%s' "$EVENT_JSON" | jq '.pull_request.labels' > /tmp/pr_labels.json
-            PR_NUM=$(printf '%s' "$EVENT_JSON" | jq -r '.pull_request.number')
+            jq '.pull_request.labels' "$GITHUB_EVENT_PATH" > /tmp/pr_labels.json
+            PR_NUM=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
             echo "Resolved labels from the pull_request event payload (PR #$PR_NUM)."
 
           elif [ "$EVENT_NAME" = 'merge_group' ]; then
-            HEAD_REF=$(printf '%s' "$EVENT_JSON" | jq -r '.merge_group.head_ref')
+            HEAD_REF=$(jq -r '.merge_group.head_ref' "$GITHUB_EVENT_PATH")
             echo "merge_group.head_ref: $HEAD_REF"
 
             PR_NUM=$(printf '%s' "$HEAD_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
