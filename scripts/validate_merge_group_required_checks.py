@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,8 +24,9 @@ import yaml
 
 def gh_api(path: str) -> dict | list:
     """Call gh api and return parsed JSON."""
+    gh = shutil.which("gh") or "gh"
     result = subprocess.run(
-        ["gh", "api", path],
+        [gh, "api", path],
         capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
