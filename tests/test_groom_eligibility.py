@@ -245,68 +245,54 @@ class TestDecideTrigger:
         decisions = [d for d in self._launches({"low": 8, "mid": 9, "high": 10}) if d.launch]
         assert [(d.issue_filter, d.model) for d in sorted(decisions, key=lambda x: x.issue_filter)] == [
             ("high-only", "claude-sonnet-5"),
-            ("low-only", "claude-haiku-4-5"),
-            ("mid-only", "claude-sonnet-5"),
+            ("low-only", "deepseek-v4-flash"),
+            ("mid-only", "deepseek-v4-flash"),
         ]
 
-    def test_thin_low_attaches_to_nearest_standalone_above(self):
+    def test_thin_tier_launches_independently_instead_of_attaching(self):
         decisions = [d for d in self._launches({"low": 6, "mid": 9, "high": 10}) if d.launch]
         filters = {d.issue_filter for d in decisions}
-        assert filters == {"mid+low", "high-only"}  # low rides mid, not high
+        assert filters == {"low-only", "mid-only", "high-only"}
 
-    def test_leftover_thin_pool_launches_at_highest_model_when_over_floor(self):
+    def test_all_tiers_launch_independently(self):
         decisions = [d for d in self._launches({"low": 4, "mid": 5, "high": 2}) if d.launch]
-        assert len(decisions) == 1
-        assert decisions[0].issue_filter == "high+mid+low"
-        assert decisions[0].model == TIER_MODELS["high"]  # high present in pool
+        assert len(decisions) == 3
+        assert {d.issue_filter for d in decisions} == {"low-only", "mid-only", "high-only"}
 
-    def test_thin_pool_under_floor_skips_with_reason(self):
+    def test_no_skip_for_thin_tiers(self):
         decisions = self._launches({"low": 1, "mid": 2, "high": 1})
-        assert len(decisions) == 1 and not decisions[0].launch
-        assert "deferred" in decisions[0].reason
+        assert all(d.launch for d in decisions)
+        assert len(decisions) == 3
+        assert {d.issue_filter for d in decisions} == {"low-only", "mid-only", "high-only"}
 
-    def test_thin_pool_p0_valve(self):
-        decisions = [d for d in self._launches({"low": 1, "mid": 2, "high": 0}, p0_tiers=["mid"]) if d.launch]
-        assert len(decisions) == 1 and decisions[0].model == "claude-sonnet-5"  # no high -> Sonnet
+    def test_each_tier_gets_own_model(self):
+        decisions = [d for d in self._launches({"low": 1, "mid": 2, "high": 0}) if d.launch]
+        by_filter = {d.issue_filter: d for d in decisions}
+        assert by_filter["low-only"].model == "deepseek-v4-flash"
+        assert by_filter["mid-only"].model == "deepseek-v4-flash"
 
-    def test_thin_pool_age_valve(self):
-        decisions = [d for d in self._launches({"low": 3, "mid": 0, "high": 0},
-                                        oldest_wait_hours={"low": 96.0}) if d.launch]
-        assert len(decisions) == 1 and decisions[0].model == "claude-haiku-4-5"
-
-    def test_high_never_rides_below_its_own_model(self):
-        # standalone low, thin high: high must NOT attach downward, and any
-        # launch containing high uses high's own model (Sonnet, same as mid,
-        # as of config#2409 — the guardrail is about tier isolation, not a
-        # distinct model anymore).
+    def test_high_launches_independently_its_own_model(self):
         decisions = [d for d in self._launches({"low": 9, "mid": 0, "high": 2}) if d.launch]
         by_filter = {d.issue_filter: d for d in decisions}
         assert "low-only" in by_filter
-        assert all("high" not in f or d.model == TIER_MODELS["high"] for f, d in by_filter.items())
+        assert "high-only" in by_filter
+        assert by_filter["high-only"].model == "claude-sonnet-5"
 
     def test_empty_backlog_no_launches(self):
         assert all(not d.launch for d in self._launches({"low": 0, "mid": 0, "high": 0}))
 
-    def test_solo_launch_when_only_high_clears_floor(self):
-        # Only high clears the floor -> a single launch.
+    def test_solo_high_launches_when_count_positive(self):
         decisions = [d for d in self._launches({"low": 0, "mid": 0, "high": 10}) if d.launch]
         assert len(decisions) == 1
         assert decisions[0].issue_filter == "high-only"
 
-    def test_skip_decisions_emitted_alongside_a_launch(self):
-        # One standalone launch (low) plus a thin `high` with no standalone
-        # tier above it (high is the top tier) that falls to the leftover
-        # pool and doesn't clear the floor there either -> skip. Both a
-        # launching and a skipped decision are returned.
+    def test_skip_zero_count_tiers(self):
+        # Only tiers with count > 0 launch; zero-count tiers are absent.
         decisions = self._launches({"low": 10, "mid": 0, "high": 3})
-        launching = [d for d in decisions if d.launch]
-        skipped = [d for d in decisions if not d.launch]
-        assert len(launching) == 1 and len(skipped) == 1
-        assert launching[0].issue_filter == "low-only"
+        assert len(decisions) == 2
+        assert {d.issue_filter for d in decisions if d.launch} == {"low-only", "high-only"}
 
     def test_launch_emit_order_is_high_first(self):
-        # decide_trigger's own pool ordering sorts high-first; assert the
-        # emitted launch order doesn't silently reshuffle.
         decisions = [d for d in self._launches({"low": 8, "mid": 9, "high": 10}) if d.launch]
         assert [d.issue_filter for d in decisions] == ["high-only", "mid-only", "low-only"]
 
