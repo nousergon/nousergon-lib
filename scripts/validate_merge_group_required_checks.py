@@ -175,13 +175,14 @@ def main() -> int:
             if wf:
                 print(f"  Required check:  {ctx}")
                 print(f"  Produced by:     {wf}")
-                print(f"  Missing:         merge_group: {{types: [checks_requested]}}\n")
+                print("  Missing:         merge_group: {types: [checks_requested]}\n")
             else:
                 print(f"  Required check:  {ctx}")
-                print(f"  Produced by:     UNKNOWN (no matching workflow job found)")
-                print(f"  Action needed:   identify the producing workflow and add merge_group trigger\n")
+                print("  Produced by:     UNKNOWN (no matching workflow job found)")
+                print("  Action needed:   identify the producing workflow and add merge_group trigger\n")
 
-        print(f"::error::{len(gaps)} required check(s) lack merge_group: {{types: [checks_requested]}} triggers.")
+        msg = f"{len(gaps)} required check(s) lack merge_group: {{types: [checks_requested]}} triggers."
+        print(f"::error::{msg}")
         print("Add merge_group: {types: [checks_requested]} to the on: block of each listed workflow.")
         return 1
 
