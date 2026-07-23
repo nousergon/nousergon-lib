@@ -65,4 +65,6 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
 
       - name: Auto-apply drifted roles and re-check
-        run: python3 "${{ inputs.check-script-path }}" --post-merge
+        env:
+          CHECK_SCRIPT: ${{ inputs.check-script-path }}
+        run: python3 "$CHECK_SCRIPT" --post-merge
