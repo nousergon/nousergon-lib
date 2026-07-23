@@ -1,22 +1,33 @@
 name: Merge-group required-check guard
 
-# Structural invariant: every required status check declared in branch
-# protection rulesets MUST be produced by a workflow whose on: block
-# includes merge_group: {types: [checks_requested]}. Without this, the
-# merge queue is permanently deadlocked — the required context never
-# reports on merge_group events (this happened twice on 2026-07-23:
-# config-I3682 for gate-label-guard, and a second deadlock when
-# test.yml + version-bump-check.yml were listed as required but neither
-# declared merge_group).
+# Reusable (workflow_call) fleet primitive: validates that every required
+# status check declared in the repo's branch-protection rulesets (or classic
+# branch protection) is produced by a workflow whose on: block includes
+# merge_group: {types: [checks_requested]}.
+#
+# Without this, the merge queue is permanently deadlocked — the required
+# context never reports on merge_group events (happened three times on
+# 2026-07-23: config-I3682 for gate-label-guard, then test.yml +
+# version-bump-check.yml, then crucible-dashboard gate-label-guard).
 #
 # This guard is deliberately NOT a required check itself — a required
 # check that validates required checks creates a self-referential loop.
-# It runs as an advisory on every PR to main and on every push (so the
-# check is visible in CI), but it does not block merge.
+# It runs as an advisory on every PR to main and on every push touching
+# .github/workflows/. It does not block merge.
 #
-# Consumers (repos with merge queues that want the same guard):
-#   uses: nousergon/nousergon-lib/.github/workflows/merge-group-required-check-guard.yml@main
-# from a workflow triggered by pull_request + push on .github/workflows/**.
+# Consumers: add one workflow file:
+#
+#   name: Merge-group required-check guard
+#   on:
+#     pull_request:
+#       branches: [main]
+#       paths: [".github/workflows/**"]
+#     push:
+#       branches: [main]
+#       paths: [".github/workflows/**"]
+#   jobs:
+#     guard:
+#       uses: nousergon/nousergon-lib/.github/workflows/merge-group-required-check-guard.yml@main
 
 on:
   pull_request:
@@ -39,6 +50,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # When called via workflow_call from a consumer repo, the default
+      # checkout above gets the CALLER's repo (github.repository inherits
+      # from the caller). The validation script lives in nousergon-lib —
+      # fetch it separately into a subdirectory so we can run it while
+      # keeping CWD at the caller's repo (where .github/workflows/ lives).
+      - uses: actions/checkout@v7
+        with:
+          repository: nousergon/nousergon-lib
+          path: _nousergon-lib-script
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -51,4 +72,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python3 scripts/validate_merge_group_required_checks.py
+        run: python3 _nousergon-lib-script/scripts/validate_merge_group_required_checks.py
