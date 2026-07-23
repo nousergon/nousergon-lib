@@ -50,6 +50,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # When called via workflow_call from a consumer repo, the default
+      # checkout above gets the CALLER's repo (github.repository inherits
+      # from the caller). The validation script lives in nousergon-lib —
+      # fetch it separately into a subdirectory so we can run it while
+      # keeping CWD at the caller's repo (where .github/workflows/ lives).
+      - uses: actions/checkout@v7
+        with:
+          repository: nousergon/nousergon-lib
+          path: _nousergon-lib-script
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -62,4 +72,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python3 scripts/validate_merge_group_required_checks.py
+        run: python3 _nousergon-lib-script/scripts/validate_merge_group_required_checks.py
