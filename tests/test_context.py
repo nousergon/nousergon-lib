@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-import tempfile
 import time
 
 import pytest
 
-from nousergon_lib.context import load_repo_context, _clear_cache
+from nousergon_lib.context import _clear_cache, load_repo_context
 
 
 @pytest.fixture(autouse=True)
@@ -72,13 +71,13 @@ def test_nearest_file_wins(tmp_path):
 
 
 def test_stops_at_filesystem_root():
-    result = load_repo_context("/tmp")
+    result = load_repo_context("/tmp")  # noqa: S108
     # Should not crash — just returns None when no context file exists
     assert result is None
 
 
 def test_caches_when_mtime_unchanged(tmp_path):
-    path = _write(str(tmp_path), "AGENTS.md", "# cached rules")
+    _write(str(tmp_path), "AGENTS.md", "# cached rules")
     first = load_repo_context(str(tmp_path))
     assert first is not None
     second = load_repo_context(str(tmp_path))
@@ -86,7 +85,7 @@ def test_caches_when_mtime_unchanged(tmp_path):
 
 
 def test_refreshes_when_mtime_changes(tmp_path):
-    path = _write(str(tmp_path), "AGENTS.md", "# version 1")
+    _write(str(tmp_path), "AGENTS.md", "# version 1")
     first = load_repo_context(str(tmp_path))
     assert "version 1" in (first or "")
 

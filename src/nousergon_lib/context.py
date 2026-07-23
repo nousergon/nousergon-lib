@@ -26,7 +26,6 @@ Caveats:
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 _MAX_WALK_DEPTH = 8
 _CANDIDATES = ("AGENTS.md", "CLAUDE.md")
@@ -34,7 +33,7 @@ _CANDIDATES = ("AGENTS.md", "CLAUDE.md")
 _cache: dict[str, tuple[float, str]] = {}  # path -> (mtime, content)
 
 
-def load_repo_context(cwd: str) -> Optional[str]:
+def load_repo_context(cwd: str) -> str | None:
     """Return the nearest ``AGENTS.md`` / ``CLAUDE.md`` content, or *None*.
 
     Walks up from *cwd* (an absolute path) looking for ``AGENTS.md`` first,
@@ -60,7 +59,7 @@ def load_repo_context(cwd: str) -> Optional[str]:
                 return cached[1]
 
             try:
-                with open(candidate, "r", encoding="utf-8") as fh:
+                with open(candidate, encoding="utf-8") as fh:
                     content = fh.read()
             except OSError:
                 continue
