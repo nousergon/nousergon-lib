@@ -58,10 +58,11 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           echo "$LABELS_JSON" > /tmp/pr_labels.json
-          echo "Resolved labels from the pull_request event payload (PR #${{ github.event.pull_request.number }})."
+          echo "Resolved labels from the pull_request event payload (PR #$PR_NUMBER)."
 
       - name: Resolve PR labels (merge_group event)
         if: github.event_name == 'merge_group'
@@ -95,11 +96,13 @@ jobs:
           fi
 
       - name: Fail if any gate:* label is present
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
           if [ ! -s /tmp/pr_labels.json ]; then
-            echo "::error::No labels were resolved for event_name='${{ github.event_name }}' — gate-label-guard only supports pull_request and merge_group. Failing closed."
+            echo "::error::No labels were resolved for event_name='$EVENT_NAME' — gate-label-guard only supports pull_request and merge_group. Failing closed."
             exit 1
           fi
 
