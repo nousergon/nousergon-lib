@@ -13,31 +13,102 @@ name: Gate Label Guard
 # required check, so the exact PR643 failure mode remained structurally
 # possible fleet-wide.
 #
-# Consumers: call from a `pull_request`-triggered workflow (types: opened,
-# reopened, labeled, unlabeled, ready_for_review, synchronize) with a
-# top-level job id of `gate-label-guard`, and add the resulting check
+# merge_group support (config-I3682, 2026-07-23): the original pull_request-
+# only implementation left every repo enforcing this as a merge-queue
+# REQUIRED status check permanently deadlocked — a merge_group entry never
+# gets a pull_request event, so the required context never posted and every
+# queue entry auto-dequeued unmerged after the 60-minute AWAITING_CHECKS
+# timeout (crucible-dashboard#529, nousergon-data #1001/#1012/#1013/#1014/
+# #1023, live 2026-07-23). A merge_group event payload carries NO
+# `pull_request` object — labels must be resolved out-of-band. GitHub's
+# merge queue names each entry's temporary integration branch
+# `refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>` (one entry per PR,
+# confirmed via the GraphQL MergeQueueEntry.headCommit / .pullRequest 1:1
+# mapping — batching via grouping_strategy/max_entries_to_build correlates
+# CI results across entries but does not fold multiple PRs into one
+# head_ref), so the PR number is parsed from `head_ref` and that PR's LIVE
+# labels are re-fetched via `gh pr view` — never trusted from the payload,
+# since merge_group carries none. Extraction failure fails CLOSED (the
+# check errors rather than silently passing) per the fleet's no-silent-
+# fails default.
+#
+# Consumers: call from a workflow triggered by both
+#   pull_request: {types: [opened, reopened, labeled, unlabeled,
+#                           ready_for_review, synchronize]}
+# and, for any repo enforcing merges through a GitHub merge queue,
+#   merge_group: {types: [checks_requested]}
+# with a top-level job id of `gate-label-guard`, and add the resulting check
 # context ("gate-label-guard / gate-label-guard") to the repo's required
-# status checks.
+# status checks (classic branch protection AND, if present, the merge_queue
+# ruleset's required status checks — both must list it).
 
 on:
   workflow_call: {}
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   guard:
     name: gate-label-guard
     runs-on: ubuntu-latest
     steps:
-      - name: Fail if any gate:* label is present
+      - name: Resolve PR labels (pull_request event)
+        if: github.event_name == 'pull_request'
         env:
           LABELS_JSON: ${{ toJson(github.event.pull_request.labels) }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          echo "$LABELS_JSON" | jq -r '.[].name' > /tmp/pr_labels.txt || true
+          echo "$LABELS_JSON" > /tmp/pr_labels.json
+          echo "Resolved labels from the pull_request event payload (PR #$PR_NUMBER)."
 
-          echo "PR labels:"
+      - name: Resolve PR labels (merge_group event)
+        if: github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          echo "merge_group.head_ref: $HEAD_REF"
+
+          # GitHub merge-queue integration branches are named:
+          #   refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>
+          # Each merge_group entry maps 1:1 to exactly one PR (verified via
+          # the GraphQL MergeQueueEntry type: headCommit + pullRequest are
+          # per-entry fields) — grouping/batching does not multiplex PR
+          # numbers into a single head_ref. Anchored match, fail closed on
+          # any deviation from the documented format.
+          PR_NUMBER=$(printf '%s' "$HEAD_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::Could not extract a PR number from merge_group.head_ref ('$HEAD_REF') — expected the documented refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha> format. Failing closed: cannot verify gate:* labels are absent, so this check cannot pass."
+            exit 1
+          fi
+
+          echo "Resolved merge_group entry to PR #$PR_NUMBER — fetching its current labels."
+
+          if ! gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels' > /tmp/pr_labels.json; then
+            echo "::error::Failed to fetch labels for PR #$PR_NUMBER via 'gh pr view' — failing closed."
+            exit 1
+          fi
+
+      - name: Fail if any gate:* label is present
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -s /tmp/pr_labels.json ]; then
+            echo "::error::No labels were resolved for event_name='$EVENT_NAME' — gate-label-guard only supports pull_request and merge_group. Failing closed."
+            exit 1
+          fi
+
+          jq -r '.[].name' /tmp/pr_labels.json > /tmp/pr_labels.txt || true
+
+          echo "Labels under check:"
           cat /tmp/pr_labels.txt || echo "(none)"
 
           if grep -q '^gate:' /tmp/pr_labels.txt; then
