@@ -120,7 +120,7 @@ jobs:
       # too, so an unknown dispatch state fails safe toward alerting.
       - name: Set up Python
         if: ${{ always() && steps.dispatch.outputs.dispatched != 'true' }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
