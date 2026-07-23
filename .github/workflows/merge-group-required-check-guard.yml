@@ -13,6 +13,10 @@ name: Merge-group required-check guard
 # check that validates required checks creates a self-referential loop.
 # It runs as an advisory on every PR to main and on every push (so the
 # check is visible in CI), but it does not block merge.
+#
+# Consumers (repos with merge queues that want the same guard):
+#   uses: nousergon/nousergon-lib/.github/workflows/merge-group-required-check-guard.yml@main
+# from a workflow triggered by pull_request + push on .github/workflows/**.
 
 on:
   pull_request:
@@ -23,6 +27,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/**"
+  workflow_call: {}
 
 permissions:
   contents: read
