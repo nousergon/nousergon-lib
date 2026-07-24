@@ -244,7 +244,7 @@ class TestDecideTrigger:
     def test_brians_8_9_10_all_three_spin_up_same_trigger(self):
         decisions = [d for d in self._launches({"low": 8, "mid": 9, "high": 10}) if d.launch]
         assert [(d.issue_filter, d.model) for d in sorted(decisions, key=lambda x: x.issue_filter)] == [
-            ("high-only", "claude-sonnet-5"),
+            ("high-only", "deepseek-v4-pro"),
             ("low-only", "deepseek-v4-flash"),
             ("mid-only", "deepseek-v4-flash"),
         ]
@@ -276,7 +276,7 @@ class TestDecideTrigger:
         by_filter = {d.issue_filter: d for d in decisions}
         assert "low-only" in by_filter
         assert "high-only" in by_filter
-        assert by_filter["high-only"].model == "claude-sonnet-5"
+        assert by_filter["high-only"].model == "deepseek-v4-pro"
 
     def test_empty_backlog_no_launches(self):
         assert all(not d.launch for d in self._launches({"low": 0, "mid": 0, "high": 0}))
