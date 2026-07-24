@@ -1,117 +1,31 @@
 name: Gate Label Guard
 
-# Reusable (workflow_call) fleet primitive: fail while ANY gate:* label is
-# attached to a PR, pass otherwise. Structural enforcement of the gate:*
-# draft-PR discipline (config#2002) — makes a gated PR unable to merge even
-# if it gets flipped to "ready for review" by mistake or by an automated
-# actor (this is exactly what happened on nousergon-data-PR643: a DRAFT PR
-# carrying gate:live-run was flipped ready by ne-groomer[bot] and merged
-# with the label still attached, 2026-07-05 — config#1446 / EPIC config#1464).
+# DEPRECATED 2026-07-24. This reusable workflow has been replaced by inline
+# workflows in each consumer repo. The reusable pattern introduced failure
+# modes the inline check does not have: workflow_call startup_failure,
+# @main caching, toJson() expression-eval size limits, per-consumer pinning
+# choreography, merge_group trigger gaps.
 #
-# Consolidated here from a single-repo implementation (config-I3491,
-# 2026-07-22) — was previously only in nousergon-data, uncalled for as a
-# required check, so the exact PR643 failure mode remained structurally
-# possible fleet-wide.
+# Each consumer repo now owns its own copy (~55 lines, self-contained).
+# This file is retained as a tombstone to prevent new consumers from
+# adopting the reusable pattern. Delete after all consumers have migrated.
 #
-# merge_group support (config-I3682, 2026-07-23): the original pull_request-
-# only implementation left every repo enforcing this as a merge-queue
-# REQUIRED status check permanently deadlocked — a merge_group entry never
-# gets a pull_request event, so the required context never posted and every
-# queue entry auto-dequeued unmerged after the 60-minute AWAITING_CHECKS
-# timeout (crucible-dashboard#529, nousergon-data #1001/#1012/#1013/#1014/
-# #1023, live 2026-07-23). A merge_group event payload carries NO
-# `pull_request` object — labels must be resolved out-of-band. GitHub's
-# merge queue names each entry's temporary integration branch
-# `refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>` (one entry per PR,
-# confirmed via the GraphQL MergeQueueEntry.headCommit / .pullRequest 1:1
-# mapping — batching via grouping_strategy/max_entries_to_build correlates
-# CI results across entries but does not fold multiple PRs into one
-# head_ref), so the PR number is parsed from `head_ref` and that PR's LIVE
-# labels are re-fetched via `gh pr view` — never trusted from the payload,
-# since merge_group carries none. Extraction failure fails CLOSED (the
-# check errors rather than silently passing) per the fleet's no-silent-
-# fails default.
-#
-# Consumers: call from a workflow triggered by both
-#   pull_request: {types: [opened, reopened, labeled, unlabeled,
-#                           ready_for_review, synchronize]}
-# and, for any repo enforcing merges through a GitHub merge queue,
-#   merge_group: {types: [checks_requested]}
-# with a top-level job id of `gate-label-guard`, and add the resulting check
-# context ("gate-label-guard / gate-label-guard") to the repo's required
-# status checks (classic branch protection AND, if present, the merge_queue
-# ruleset's required status checks — both must list it).
+# Migration PRs (2026-07-24): alpha-engine-config, nousergon-data,
+# crucible-backtester, crucible-dashboard — each fix/inline-gate-label-guard.
 
 on:
   workflow_call: {}
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   guard:
-    name: gate-label-guard
+    name: gate-label-guard (DEPRECATED)
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve PR labels
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+      - name: DEPRECATED — use inline workflow
         run: |
-          set -euo pipefail
-
-          # Read the event payload from GITHUB_EVENT_PATH — the runner
-          # always writes the full event to this file. No need to pass
-          # toJson(github.event) via env:, which fails for pull_request
-          # events whose full payload exceeds expression-eval limits
-          # (startup_failure with zero log output; 2026-07-23 incident).
-
-          if [ "$EVENT_NAME" = 'pull_request' ]; then
-            jq '.pull_request.labels' "$GITHUB_EVENT_PATH" > /tmp/pr_labels.json
-            PR_NUM=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
-            echo "Resolved labels from the pull_request event payload (PR #$PR_NUM)."
-
-          elif [ "$EVENT_NAME" = 'merge_group' ]; then
-            HEAD_REF=$(jq -r '.merge_group.head_ref' "$GITHUB_EVENT_PATH")
-            echo "merge_group.head_ref: $HEAD_REF"
-
-            PR_NUM=$(printf '%s' "$HEAD_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
-            if [ -z "$PR_NUM" ]; then
-              echo "::error::Could not extract a PR number from merge_group.head_ref ('$HEAD_REF') — expected the documented refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha> format. Failing closed: cannot verify gate:* labels are absent, so this check cannot pass."
-              exit 1
-            fi
-
-            echo "Resolved merge_group entry to PR #$PR_NUM — fetching its current labels."
-            if ! gh pr view "$PR_NUM" --repo "$REPO" --json labels --jq '.labels' > /tmp/pr_labels.json; then
-              echo "::error::Failed to fetch labels for PR #$PR_NUM via 'gh pr view' — failing closed."
-              exit 1
-            fi
-
-          else
-            echo "::error::Unsupported event_name='$EVENT_NAME' — gate-label-guard only handles pull_request and merge_group. Failing closed."
-            exit 1
-          fi
-
-      - name: Fail if any gate:* label is present
-        run: |
-          set -euo pipefail
-
-          if [ ! -s /tmp/pr_labels.json ]; then
-            echo "::error::No labels resolved — the preceding step should have populated /tmp/pr_labels.json. Failing closed."
-            exit 1
-          fi
-
-          jq -r '.[].name' /tmp/pr_labels.json > /tmp/pr_labels.txt || true
-
-          echo "Labels under check:"
-          cat /tmp/pr_labels.txt || echo "(none)"
-
-          if grep -q '^gate:' /tmp/pr_labels.txt; then
-            echo ""
-            echo "::error::This PR carries a gate:* label ($(grep '^gate:' /tmp/pr_labels.txt | paste -sd, -)) — the gate:* taxonomy means this PR is NOT verified ready to merge. Remove the gate:* label only after verifying the blocker is actually resolved."
-            exit 1
-          fi
-
-          echo "No gate:* label present — check passes."
+          echo "::warning::The reusable gate-label-guard is DEPRECATED. Each repo now owns its own inline copy at .github/workflows/gate-label-guard.yml. Update your consumer to use an inline workflow instead of calling this one."
+          echo "Migration PRs: fix/inline-gate-label-guard on alpha-engine-config, nousergon-data, crucible-backtester, crucible-dashboard."
+          # Pass — don't break existing consumers during migration window.
