@@ -116,14 +116,14 @@ TIERS = ("low", "mid", "high")
 #: the module docstring update and the groom prompt rewrites in
 #: alpha-engine-config for the full rationale.
 #: groom-primary-deepseek (2026-07-23): low/mid now use DeepSeek V4 Flash as
-#: PRIMARY backend (Brian ruling, superseding the 7/22 AMENDED note). High
-#: stays on Sonnet. Bundles containing high use the highest tier's model
-#: = Sonnet, so high is never served by DeepSeek. Thinking/effort params
-#: for DeepSeek are resolved on-box by groom_eligibility_fallback.py.
+#: PRIMARY backend (Brian ruling, superseding the 7/22 AMENDED note).
+#: (2026-07-24): high moved to DeepSeek V4 Pro, completing the DeepSeek-
+#: primary rollout across all three tiers. Thinking/effort params for
+#: DeepSeek are resolved on-box by groom_eligibility_fallback.py.
 TIER_MODELS = {
     "low": "deepseek-v4-flash",
     "mid": "deepseek-v4-flash",
-    "high": "claude-sonnet-5",
+    "high": "deepseek-v4-pro",
 }
 
 
