@@ -9,6 +9,7 @@ a moto-mocked S3 bucket — no live Neon or live S3 involved.
 
 from __future__ import annotations
 
+import sys
 from datetime import date
 
 import boto3
@@ -18,6 +19,11 @@ from moto import mock_aws
 from nousergon_lib.rag.parquet_mirror import mirror_document_to_parquet
 
 BUCKET = "alpha-engine-research"
+
+skip_py39_no_hnswlib = pytest.mark.skipif(
+    sys.version_info < (3, 10),
+    reason="hnswlib native extension crashes with SIGILL on py3.9 GitHub Actions runner (wheel compiled with incompatible CPU instructions)",
+)
 
 
 @pytest.fixture
@@ -88,6 +94,7 @@ def test_load_corpus_dataframe_empty_keys_returns_empty_frame():
     assert "embedding" in df.columns
 
 
+@skip_py39_no_hnswlib
 def test_build_local_ann_index_and_query(corpus):
     from nousergon_lib.rag.local_ann import (
         build_local_ann_index,
@@ -105,9 +112,12 @@ def test_build_local_ann_index_and_query(corpus):
     assert results[0]["cosine_similarity"] > 0.99
 
 
+@skip_py39_no_hnswlib
 def test_build_local_ann_index_handles_empty_corpus():
     from nousergon_lib.rag.local_ann import build_local_ann_index, load_corpus_dataframe
 
     df = load_corpus_dataframe([])
     index = build_local_ann_index(df)
     assert index.rows.empty
+
+
