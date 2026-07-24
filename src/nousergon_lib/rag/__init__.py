@@ -35,6 +35,12 @@ from .retrieval import (
     retrieve,
 )
 
+# parquet_mirror / local_ann are NOT re-exported at top level (unlike the
+# rest of this list) — they pull pandas/pyarrow/hnswlib ([rag-parquet] /
+# [rag-local-ann] extras) which most `from nousergon_lib.rag import ...`
+# callers (the live-retrieval path) don't need. Import the submodules
+# directly: `from nousergon_lib.rag import parquet_mirror, local_ann`.
+
 __all__ = [
     "coerce_embedding",
     "get_connection",

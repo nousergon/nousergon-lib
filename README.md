@@ -32,6 +32,8 @@ pip install "nousergon-lib[arcticdb] @ git+https://github.com/nousergon/nousergo
 | `[arcticdb]` | `arcticdb`, `pandas` | Anything that calls `check_arcticdb_fresh` or the ArcticDB read/write helpers |
 | `[flow_doctor]` | `flow-doctor` | Logging integration that escalates ERROR-level events to flow-doctor |
 | `[rag]` | `psycopg2-binary`, `pgvector`, `numpy` | The `rag` submodule — Neon pgvector RAG retrieval/ingestion |
+| `[rag-parquet]` | `pandas`, `pyarrow` | `rag.parquet_mirror` — S3 parquet batch-tier mirror written at ingest time |
+| `[rag-local-ann]` | `pandas`, `pyarrow`, `hnswlib` | `rag.local_ann` — in-process HNSW index over the parquet tier for batch consumers (no Neon egress) |
 | `[dev]` | `pytest`, lint tooling | Local development |
 
 ## Modules
@@ -204,6 +206,21 @@ results = retrieve(
 ```
 
 Requires the `[rag]` extra. Embeddings are Voyage `voyage-3-lite` (512d); the database backend is Neon Postgres with pgvector + HNSW indexes.
+
+#### S3 parquet batch tier + local ANN (config#2958)
+
+`ingest_document` mirrors every document + its chunks to `s3://alpha-engine-research/rag/parquet/doc_type=.../filed_date=.../<doc_id>.parquet` (Hive-partitioned, append-only, best-effort relative to the Neon insert — see `parquet_mirror.py`'s module docstring). Batch consumers (`filing_change_detection`, evals, backtests) read this partition set instead of querying Neon, so a full-corpus batch scan costs **zero Neon egress**:
+
+```python
+from nousergon_lib.rag.local_ann import list_parquet_keys, load_corpus_dataframe, build_local_ann_index
+
+keys = list_parquet_keys(doc_type="10-K")
+corpus = load_corpus_dataframe(keys)          # plain DataFrame — groupby/aggregate consumers stop here
+index = build_local_ann_index(corpus)         # HNSW cosine index — nearest-neighbor consumers use this
+matches = index.query(query_embedding, k=8)
+```
+
+Requires `[rag-parquet]` (mirror write path) and/or `[rag-local-ann]` (batch read + ANN path) in addition to `[rag]`. Neon remains the sole live low-latency retrieval path (pgvector HNSW + tsvector hybrid) — this tier is additive, not a replacement.
 
 ### `ssm_dispatcher` — SSM send-command + poll chokepoint
 
