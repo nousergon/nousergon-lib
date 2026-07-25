@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import ast
 import re
-import textwrap
 from pathlib import Path
 
 
@@ -180,7 +179,7 @@ def test_no_unbounded_embedding_selects_in_rag():
         for lineno, text in all_offending[rel]:
             lines.append(f"    L{lineno}: {text[:120]}")
     msg = (
-        "Unbounded embedding-column references found in RAG SQL.\n"
+        "Unbounded embedding-column references found in RAG SQL.\n"  # noqa: S608
         "Each line references ``table.embedding`` inside a SQL fragment "
         "without wrapping it in AVG(), VAR_SAMP(), the ``<=>`` operator, "
         "or ``IS [NOT] NULL`` — the three patterns proven not to ship raw "
