@@ -90,7 +90,7 @@ def test_ssm_log_capture_shim_executes_inner_command(tmp_path):
             "--log",
             str(log),
             "--correlation-id",
-            "shim-delegation-test",
+            "shim-delegation-test-1646",
             "--",
             sys.executable,
             "-c",
