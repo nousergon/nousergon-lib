@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.18"
+version = "0.124.19"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -33,6 +33,9 @@ dependencies = [
     # syntax natively, so the dep is conditional on 3.9.
     "eval_type_backport>=0.2.0; python_version < '3.10'",
 ]
+
+[project.scripts]
+llm-egress-proxy = "nousergon_lib.egress.proxy:main"
 
 [project.optional-dependencies]
 arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
@@ -79,26 +82,6 @@ rag = [
 rerank = [
     "sentence-transformers>=3.0",
 ]
-# S3 parquet mirror write path (nousergon_lib.rag.parquet_mirror,
-# config#2958) — ``ingest_document``'s best-effort batch-tier mirror.
-# Kept separate from [rag] itself so the live-retrieval-only consumer
-# (alpha-engine-research's qual analyst tools) doesn't pull
-# pandas+pyarrow just to call ``retrieve()``.
-rag-parquet = [
-    "pandas>=2.0",
-    "pyarrow>=14.0",
-]
-# Local (in-process) ANN index over the parquet batch tier
-# (nousergon_lib.rag.local_ann, config#2958) — batch consumers
-# (filing_change_detection, evals, backtests) that need nearest-neighbor
-# search rather than a groupby/aggregate. hnswlib needs a C++ toolchain
-# at install time (present on ubuntu-latest CI runners and this repo's
-# EC2 boxes; not guaranteed everywhere, hence its own extra).
-rag-local-ann = [
-    "pandas>=2.0",
-    "pyarrow>=14.0",
-    "hnswlib>=0.8",
-]
 # Parquet row-count completeness predicate (nousergon_lib.artifact_freshness
 # .check_completeness, config#3086, CompletenessCheck.kind="parquet_row_count").
 # Only the Parquet footer metadata is read (ParquetFile(...).metadata.num_rows
@@ -127,6 +110,7 @@ where = ["src"]
 "nousergon_lib" = ["transparency_inventory.yaml", "py.typed"]
 "nousergon_lib.contracts" = ["*.schema.json"]
 "nousergon_lib.rag" = ["schema.sql", "migrations/*.sql"]
+"nousergon_lib.egress" = ["gitleaks-egress.toml", "gitleaks-custom.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

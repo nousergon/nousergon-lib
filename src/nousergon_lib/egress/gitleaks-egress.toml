@@ -1,0 +1,36 @@
+# Canonical copy — nousergon-lib/src/nousergon_lib/egress/gitleaks-egress.toml
+# (consolidated from alpha-engine-config vendored copy + laptop source,
+# config-I3482).  Both gitleaks-egress.toml and gitleaks-custom.toml are
+# co-located in the package directory; the proxy runs gitleaks with
+# cwd=ROUTING_DIR, so ./gitleaks-custom.toml resolves relative to the
+# directory containing THIS file.
+
+title = "LLM egress session content-scan config (DeepSeek, xAI, ...)"
+
+# Chain-extends gitleaks-custom.toml (config-I3011: fleet-specific secret
+# shapes).  The proxy sets cwd=ROUTING_DIR when invoking gitleaks, so a
+# relative path here resolves against the directory containing both configs.
+[extend]
+path = "./gitleaks-custom.toml"
+
+# Exclude vendored/build/cache trees from scanning.
+[allowlist]
+paths = [
+  '''(^|/)\.venv/''',
+  '''(^|/)venv/''',
+  '''(^|/)trading-env/''',
+  '''(^|/)[^/]*-env/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)\.git/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.claude/''',
+  '''(^|/)site-packages/''',
+  '''(^|/)\.eggs/''',
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+  '''(^|/)\.next/''',
+  '''\.(parquet|pkl|joblib|npz|npy|h5|hdf5|feather|arrow)$''',
+  '''\.(pt|pth|safetensors|onnx|pb|ckpt)$''',
+  '''\.(whl|so|dylib|dll|a|o)$''',
+  '''\.(png|jpg|jpeg|gif|ico|pdf|zip|tar|gz|bz2)$''',
+]
