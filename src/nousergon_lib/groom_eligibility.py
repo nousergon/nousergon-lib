@@ -161,7 +161,7 @@ class FallbackModelConfig:
 #: tier has no effort level.
 FALLBACK_TIER_MODELS: dict[str, FallbackModelConfig] = {
     "low": FallbackModelConfig(model="deepseek-v4-flash", thinking=False),
-    "mid": FallbackModelConfig(model="deepseek-v4-flash", thinking=True, effort="high"),
+    "mid": FallbackModelConfig(model="deepseek-v4-flash", thinking=True, effort="max"),
     "high": FallbackModelConfig(model="deepseek-v4-pro", thinking=True, effort="max"),
 }
 
