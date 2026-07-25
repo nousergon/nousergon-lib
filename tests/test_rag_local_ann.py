@@ -9,6 +9,7 @@ a moto-mocked S3 bucket — no live Neon or live S3 involved.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from datetime import date
 
@@ -20,9 +21,26 @@ from nousergon_lib.rag.parquet_mirror import mirror_document_to_parquet
 
 BUCKET = "alpha-engine-research"
 
-skip_py39_no_hnswlib = pytest.mark.skipif(
-    sys.version_info < (3, 10),
-    reason="hnswlib native extension crashes with SIGILL on py3.9 GitHub Actions runner (wheel compiled with incompatible CPU instructions)",
+_hnswlib_available = (
+    subprocess.run(
+        [sys.executable, "-c", "import hnswlib"],
+        capture_output=True,
+        timeout=30,
+    ).returncode == 0
+)
+# Runtime detection: hnswlib's pre-compiled wheel uses CPU instructions (AVX-512
+# or similar) not available on all ubuntu-latest GitHub Actions runners. Importing
+# it can crash the entire pytest process with SIGILL (exit code 132), not just raise
+# a Python ImportError. We test import via subprocess so a SIGILL kills only the
+# probe, not the test runner.
+#
+# The existing per-version skip (py3.9) was the first-known cohort; now py3.11,
+# py3.13, and others have shown the same symptom depending on the specific runner
+# instance assigned.
+
+skip_no_hnswlib = pytest.mark.skipif(
+    not _hnswlib_available,
+    reason="hnswlib native extension unavailable on this runner (wheel uses CPU instructions not supported by this CPU)",
 )
 
 
@@ -94,7 +112,7 @@ def test_load_corpus_dataframe_empty_keys_returns_empty_frame():
     assert "embedding" in df.columns
 
 
-@skip_py39_no_hnswlib
+@skip_no_hnswlib
 def test_build_local_ann_index_and_query(corpus):
     from nousergon_lib.rag.local_ann import (
         build_local_ann_index,
@@ -112,7 +130,7 @@ def test_build_local_ann_index_and_query(corpus):
     assert results[0]["cosine_similarity"] > 0.99
 
 
-@skip_py39_no_hnswlib
+@skip_no_hnswlib
 def test_build_local_ann_index_handles_empty_corpus():
     from nousergon_lib.rag.local_ann import build_local_ann_index, load_corpus_dataframe
 
