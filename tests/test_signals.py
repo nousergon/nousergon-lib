@@ -23,7 +23,6 @@ from nousergon_lib.signals import (
     try_read_s3_json,
 )
 
-
 # ── fallback_research_date_keys ──────────────────────────────────────
 
 
@@ -102,7 +101,6 @@ class TestTryReadS3Json:
         """
         # We can't easily make moto return 403, so verify the code-path
         # by checking the Python exception handling logic.
-        import botocore
 
         class MockClient:
             def get_object(self, Bucket, Key):

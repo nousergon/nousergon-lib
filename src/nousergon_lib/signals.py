@@ -26,8 +26,9 @@ Usage::
 from __future__ import annotations
 
 import json
-from datetime import date as _date, timedelta as _td
-from typing import Any, Optional
+from datetime import date as _date
+from datetime import timedelta as _td
+from typing import Any
 
 
 def fallback_research_date_keys(
@@ -80,7 +81,7 @@ def try_read_s3_json(
     s3_client: Any,
     bucket: str,
     key: str,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Read a single S3 JSON object, returning ``None`` on a resolvable miss.
 
     This is deliberately forgiving on transient errors (permission,
@@ -129,7 +130,7 @@ def load_json_with_fallback(
     s3_client: Any,
     bucket: str,
     keys: list[str],
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Walk a priority-ordered list of S3 keys, returning the first payload found.
 
     Parameters
