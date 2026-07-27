@@ -60,7 +60,19 @@ def test_walks_up_from_subdirectory(tmp_path):
     assert "top-level rules" in result
 
 
-def test_nearest_file_wins(tmp_path):
+def test_all_levels_are_concatenated_not_replaced(tmp_path):
+    """A repo-level file SUPPLEMENTS the fleet-level one; it does not hide it.
+
+    The previous implementation returned the first file found and stopped, so
+    adding a small repo AGENTS.md silently shrank an agent's context from the
+    full fleet conventions to whatever that file said. Claude Code
+    concatenates every level, so the same repo produced different context per
+    consumer.
+
+    The old test asserted only that the nearest file was PRESENT, which is
+    true under both semantics — so the behaviour it was named for was never
+    actually pinned. This asserts both files survive.
+    """
     _write(str(tmp_path), "AGENTS.md", "# root")
     sub = str(tmp_path / "project")
     os.makedirs(sub, exist_ok=True)
@@ -68,6 +80,46 @@ def test_nearest_file_wins(tmp_path):
     result = load_repo_context(sub)
     assert result is not None
     assert "project-specific" in result
+    assert "# root" in result, "the fleet-level file must not be hidden"
+
+
+def test_root_comes_first_so_specific_instructions_win(tmp_path):
+    """Ordering matches Claude Code: broadest scope first, most specific last,
+    so a repo rule appears after — and therefore overrides — a fleet rule."""
+    _write(str(tmp_path), "AGENTS.md", "# root")
+    sub = str(tmp_path / "project")
+    os.makedirs(sub, exist_ok=True)
+    _write(sub, "AGENTS.md", "# project-specific")
+    result = load_repo_context(sub)
+    assert result.index("# root") < result.index("# project-specific")
+
+
+def test_each_section_names_its_source(tmp_path):
+    """An agent reading concatenated instructions has to know which repo a
+    rule came from."""
+    _write(str(tmp_path), "AGENTS.md", "# root")
+    sub = str(tmp_path / "project")
+    os.makedirs(sub, exist_ok=True)
+    _write(sub, "AGENTS.md", "# project-specific")
+    result = load_repo_context(sub)
+    assert "Repository context:" in result
+    assert os.path.join(sub, "AGENTS.md") in result
+
+
+def test_single_file_is_returned_bare(tmp_path):
+    """One file, no headers — the common case stays byte-identical to before,
+    so nothing that already worked changes shape."""
+    _write(str(tmp_path), "AGENTS.md", "# only")
+    assert load_repo_context(str(tmp_path)) == "# only"
+
+
+def test_one_file_per_directory_even_when_both_names_exist(tmp_path):
+    """CLAUDE.md is conventionally a symlink to AGENTS.md; reading both would
+    duplicate the content in the model's context."""
+    _write(str(tmp_path), "AGENTS.md", "# canonical")
+    _write(str(tmp_path), "CLAUDE.md", "# canonical")
+    result = load_repo_context(str(tmp_path))
+    assert result.count("# canonical") == 1
 
 
 def test_stops_at_filesystem_root():
