@@ -76,6 +76,9 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
+    # Per-execution ephemeral dispatch box (nousergon-data#975) — retires the
+    # always-on dashboard-box SPOF that every weekly SSM stage dispatched from.
+    "WaitForWeeklyFreshnessSpotBootstrap": "DispatchWeeklyFreshnessSpot",
     # Pre-open Trading SF
     "WaitForMorningPlanner": "RunMorningPlanner",
     "WaitForDailyNews": "RunDailyNews",  # secondary daily news pull (fail-soft)
@@ -187,6 +190,12 @@ RegistryEntry = Annotated[
 # artifact-archive pages (dashboard #86: pages 16-22).
 STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     # ── Weekly Freshness SF (27 substantive Task steps) ──────────────────────────
+    "DispatchWeeklyFreshnessSpot": ArtifactReason(
+        reason="Launches the per-execution ephemeral spot box that every "
+        "downstream weekly SSM stage dispatches from, then bootstraps repos "
+        "+ venv on it; writes no run artifact — its output is the "
+        "instance id threaded into $.ec2_instance_id."
+    ),
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
         "no per-run rendered artifact — substrate for downstream stages."
