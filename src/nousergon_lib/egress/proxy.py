@@ -165,7 +165,11 @@ class UpstreamError(Exception):
 
 
 def log(message):
-    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {message}\n"
+    # Mask credential-length tokens so secrets never reach the log file or
+    # stderr in clear text — same self-masking used for forensic excerpts.
+    # Timestamp is added AFTER masking so it is never itself masked.
+    sanitized = mask_secrets(message)
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {sanitized}\n"
     try:
         with open(ProxyHandler.log_path, "a") as f:
             f.write(line)
@@ -175,7 +179,9 @@ def log(message):
 
 
 def die(message):
-    sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} FATAL: {message}\n")
+    sanitized = mask_secrets(message)
+    sys.stderr.write(
+        f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} FATAL: {sanitized}\n")
     sys.exit(1)
 
 
@@ -554,6 +560,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
         headers["Authorization"] = f"Bearer {self.api_key}"
         headers["x-api-key"] = self.api_key
         headers["Content-Length"] = str(len(body))
+
+        # Reject CRLF injection, null bytes, and path traversal in the
+        # client-supplied path before it reaches conn.request().
+        if "\r" in self.path or "\n" in self.path or "\0" in self.path:
+            raise UpstreamError(
+                f"rejected request path with control characters: "
+                f"{self.path!r}")
+        if "/../" in self.path or self.path.endswith("/..") or \
+                self.path.startswith("../") or "\\" in self.path:
+            raise UpstreamError(
+                f"rejected request path with traversal: {self.path!r}")
 
         upstream_path = self.upstream_prefix + self.path
         last_exc = None
