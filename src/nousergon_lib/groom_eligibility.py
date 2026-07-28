@@ -54,10 +54,32 @@ ULTRA_LABEL = "complexity:ultra"
 GROOM_STALLED_LABEL = "groom:stalled"
 TRIAGE_SESSION_LABEL = "triage:session"
 
+#: An incident record is a RECORD, not a work item. It answers "what happened
+#: and what did we learn", closes on verify-and-classify under sev1-sev4, and is
+#: write-once — none of grooming's machinery applies to it. Remediation an
+#: incident implies is filed separately as an ordinary backlog issue in whichever
+#: repo owns the fix (nous-ergon-ops-I127 / alpha-engine-config-I5222 is the
+#: worked example).
+#:
+#: incident-management-policy §4 already routes records to `nous-ergon-ops`,
+#: which is not in BACKLOG_REPOS, so by the documented path they never reach a
+#: groom queue at all. This exclusion is the ENFORCEMENT for that convention,
+#: and that is exactly why it exists: a rule with nothing checking it is
+#: `convention-stated-but-never-enforced`, a failure class carrying four recorded
+#: instances in this fleet's own registry. The realistic breach is an agent
+#: filing from memory rather than from the policy — which nearly happened on
+#: 2026-07-28, when the /incident skill still carried a superseded instruction
+#: (nous-ergon-ops-I132).
+#:
+#: Note this wins over an explicit complexity label: an unlabelled issue defaults
+#: to "mid" (see tier_for_labels), so an incident record filed without thought is
+#: otherwise an eligible mid-tier work item.
+INCIDENT_LABEL = "incident"
+
 #: Issues carrying any of these never enter ANY groom queue.
 BASE_EXCLUDE_LABELS = frozenset({
     "groom-digest", "in-progress", "do-not-groom", ULTRA_LABEL,
-    GROOM_STALLED_LABEL, TRIAGE_SESSION_LABEL,
+    GROOM_STALLED_LABEL, TRIAGE_SESSION_LABEL, INCIDENT_LABEL,
 })
 
 #: config#1805 gate exclusion: HARD — no automated re-entry path exists.
