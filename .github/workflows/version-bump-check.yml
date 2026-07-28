@@ -48,7 +48,7 @@ jobs:
           echo "No version files are evaluated in merge_group — the merge commit"
           echo "is created by GitHub's merge machinery, not by the PR author."
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         if: github.event_name != 'merge_group'
         with:
           fetch-depth: 0
