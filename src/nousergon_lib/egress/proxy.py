@@ -212,16 +212,16 @@ def _collect_strings(value, out: list) -> None:
 
 def _mask_token(match):
     tok = match.group(0)
-    return f"{tok[:4]}…{tok[-2:]}[len={len(tok)}]"
+    return f"***[len={len(tok)}]"
 
 
 def mask_secrets(text: str) -> str:
-    """Self-mask any credential-length token so forensics never store a secret.
+    """Redact every credential-length token so no secret content reaches output.
 
-    Every run of 8+ non-space chars keeps only its first 4 / last 2 chars.
-    Aggressive over-masking is fine here - these excerpts exist purely so a
-    human can tell a false positive ("that's a code snippet") from a real
-    leak ("that's my key"), not to reconstruct the content.
+    Every run of 8+ non-space chars is replaced with an opaque placeholder
+    that preserves only the length (for forensic sizing), never the token
+    content.  Over-redaction is fine here — these channels exist purely for
+    operational forensics, not to reconstruct original inputs.
     """
     return re.sub(r"\S{8,}", _mask_token, text)
 
