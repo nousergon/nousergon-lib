@@ -34,6 +34,16 @@ name: Gitleaks scan (reusable)
 
 on:
   workflow_call:
+    inputs:
+      force_sarif_upload:
+        description: >-
+          Upload SARIF to Code Scanning even on a private repo. Default false:
+          Code Scanning on a private repo requires the paid Code Security
+          add-on, which this org does not buy (scm-platform-policy §9). Set
+          true for a private repo that does have it.
+        type: boolean
+        default: false
+        required: false
 
 env:
   GITLEAKS_VERSION: "8.30.1"
@@ -74,9 +84,67 @@ jobs:
             --report-format sarif --report-path gitleaks-results.sarif \
             --redact
 
-      - name: Upload SARIF to Code Scanning
+      # The findings signal is the `detect` step's exit status, NOT this upload.
+      # gitleaks exits non-zero on a finding, so a real leak reddens the job
+      # whether or not a Code Scanning sink exists. Everything below is about
+      # where the DETAIL lands, and must never be able to mask that signal.
+      - name: Upload SARIF as artifact (always — sink-independent)
         if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gitleaks-sarif
+          path: gitleaks-results.sarif
+          retention-days: 30
+          if-no-files-found: warn
+
+      # Code Scanning on a PRIVATE repo requires the paid Code Security add-on
+      # (declined — scm-platform-policy §9), so the upload 403s there and
+      # reddened the job on every run regardless of findings. Measured
+      # 2026-07-29: nousergon-security failed 3/3 this way while its scan step
+      # passed every time — a permanently-red check that said nothing about
+      # whether a secret existed.
+      - name: Upload SARIF to Code Scanning
+        id: sarif_upload
+        if: always() && (inputs.force_sarif_upload || github.event.repository.private == false)
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
         with:
           sarif_file: gitleaks-results.sarif
           category: gitleaks
+
+      # Transparency: the run must say which surface carries the findings, so
+      # "no Code Scanning alert" is never mistaken for "no findings".
+      - name: Report where findings landed
+        if: always()
+        env:
+          UPLOAD_OUTCOME: ${{ steps.sarif_upload.outcome }}
+          DETECT_OUTCOME: ${{ steps.detect.outcome }}
+          IS_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### gitleaks"
+            echo ""
+            echo "- scan: \`${DETECT_OUTCOME}\` (non-success means gitleaks found something)"
+            case "${UPLOAD_OUTCOME}" in
+              success)  echo "- findings detail: **Code Scanning** (category \`gitleaks\`) + run artifact" ;;
+              skipped)  echo "- findings detail: **run artifact only** — Code Scanning needs the paid Code Security add-on on a private repo, which this org declines. This is expected, not a fault." ;;
+              *)        echo "- findings detail: **run artifact only** — the Code Scanning upload FAILED (\`${UPLOAD_OUTCOME}\`) on a repo that should have the sink. Investigate." ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Two faults must not pass quietly, and neither is "gitleaks found
+          # something" — that is the detect step's job.
+          #   1. The upload FAILED where the sink should exist.
+          #   2. The upload was SKIPPED on a public repo, where the sink is
+          #      free and always present. That means the private/public
+          #      detection misread, and findings silently stopped reaching
+          #      Code Scanning — the exact shape of failure this step exists
+          #      to make impossible.
+          if [ "${UPLOAD_OUTCOME}" != "success" ] && [ "${UPLOAD_OUTCOME}" != "skipped" ]; then
+            echo "::error::Code Scanning upload failed on a repo expected to have the sink"
+            exit 1
+          fi
+          if [ "${UPLOAD_OUTCOME}" = "skipped" ] && [ "${IS_PRIVATE}" != "true" ]; then
+            echo "::error::Code Scanning upload was skipped on a non-private repo — sink detection misread"
+            exit 1
+          fi
