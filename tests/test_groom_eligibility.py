@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from nousergon_lib import groom_eligibility
 from nousergon_lib.groom_eligibility import (
     BUNDLED_FILTERS,
     CI_EXPECTED_RED_LABEL,
@@ -386,3 +387,33 @@ class TestCiExpectedRed:
 
     def test_label_outside_gate_namespace(self):
         assert not CI_EXPECTED_RED_LABEL.startswith("gate:")
+
+
+# -- incident records are never work items (nous-ergon-ops-I127 / config-I5222) --
+
+
+def test_incident_label_is_excluded_from_every_tier():
+    """An incident record is a record, not a work item."""
+    assert groom_eligibility.tier_of({"incident"}) is None
+
+
+def test_incident_beats_an_explicit_complexity_label():
+    """The realistic breach: a record filed WITH a complexity label, or without
+    one at all — unlabelled defaults to "mid", so silence is not protection."""
+    for extra in ("complexity:low", "complexity:mid", "complexity:high"):
+        assert groom_eligibility.tier_of({"incident", extra}) is None, extra
+
+
+def test_incident_beats_a_priority_label():
+    assert groom_eligibility.tier_of({"incident", "P0"}) is None
+    assert groom_eligibility.tier_of({"incident", "P1", "sev1"}) is None
+
+
+def test_a_severity_label_alone_does_not_exclude():
+    """Only `incident` excludes. A sev label on an ordinary issue is not a
+    reason to hide it from the groom — the record label is what carries meaning."""
+    assert groom_eligibility.tier_of({"sev3"}) == "mid"
+
+
+def test_incident_label_is_in_the_documented_exclusion_set():
+    assert groom_eligibility.INCIDENT_LABEL in groom_eligibility.BASE_EXCLUDE_LABELS
