@@ -684,6 +684,16 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "data) per the fail-open contract of the config#1687 spot migration. "
         "No persisted artifact (the email IS the surface).",
     ),
+    "WeeklyExerciseLaunchFailed": ArtifactReason(
+        reason="Fail-open SNS alert fired when postclose cannot start the "
+        "weekly pipeline's daily EXERCISE run (alpha-engine-config-I5489). "
+        "Postclose's own deliverable is already complete at this point, so "
+        "the alert routes onward to the normal terminal rather than failing "
+        "the execution. No persisted artifact (the alert IS the surface) — "
+        "the signal it carries is that the weekly pipeline went un-exercised "
+        "that day, which is otherwise indistinguishable from a day nobody "
+        "looked at.",
+    ),
     # ── Post-close Trading SF (6 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
         reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
