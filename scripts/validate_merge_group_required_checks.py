@@ -113,7 +113,7 @@ def parse_workflow_merge_group(path: Path) -> tuple[str | None, set[str]]:
     jobs = doc.get("jobs", {})
     job_names: set[str] = set()
     if isinstance(jobs, dict):
-        for _jid, job_def in jobs.items():
+        for jid, job_def in jobs.items():
             if isinstance(job_def, dict):
                 name = job_def.get("name")
                 # Matrix-expanded job names contain ${{ matrix.* }} — skip
@@ -123,6 +123,25 @@ def parse_workflow_merge_group(path: Path) -> tuple[str | None, set[str]]:
                 elif isinstance(name, str):
                     # Store the raw name for pattern matching later
                     job_names.add(name)
+                else:
+                    # No `name:` on the job — GitHub then uses the JOB ID as
+                    # the status-check context. Omitting this fallback made the
+                    # guard blind to the single most common workflow shape.
+                    #
+                    # Measured 2026-07-29: reported `Produced by: UNKNOWN` for
+                    # every one of 14 required checks across 7 repos, including
+                    # alpha-engine-config's `pytest` — produced by
+                    # `scripts-tests.yml`'s `jobs.pytest`, which carries no
+                    # `name:` key.
+                    #
+                    # Two failures, not one. The guard could not name the file to
+                    # edit, and — worse — it could not see a merge_group trigger
+                    # that DID cover such a job, so it would keep reporting a gap
+                    # after the gap was closed. A guard that cannot confirm its
+                    # own remediation cannot be promoted to blocking, which
+                    # scm-platform-policy §3 requires before merge-queue
+                    # re-adoption.
+                    job_names.add(str(jid))
 
     return has_mg, job_names
 

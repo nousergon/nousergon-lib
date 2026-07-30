@@ -50,14 +50,28 @@ from .registry import (
     ArchivePageRef,
     ArtifactReason,
 )
+from .roles import (
+    ADHOC_ROLES,
+    ALL_ROLES,
+    CADENCE_ROLES,
+    EXERCISE_ROLES,
+    RECOVERY_ROLES,
+    cadence_filter,
+    classify,
+)
 from .templates import format_failure_message, format_success_message
 
 __all__ = [
+    "ADHOC_ROLES",
+    "ALL_ROLES",
     "ArchivePageRef",
     "ArtifactReason",
+    "CADENCE_ROLES",
+    "EXERCISE_ROLES",
     "PIPELINE_LABELS",
     "PipelineExecutionSummary",
     "PipelineRun",
+    "RECOVERY_ROLES",
     "RunStatus",
     "SFNAccessDenied",
     "SFNNoExecutions",
@@ -67,6 +81,8 @@ __all__ = [
     "TaskRow",
     "TaskStatus",
     "WAIT_GROUPING",
+    "cadence_filter",
+    "classify",
     "format_failure_message",
     "format_success_message",
     "list_recent_pipeline_runs",
