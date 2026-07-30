@@ -85,19 +85,84 @@ class TestLaunchWithFallback:
 
         assert (instance_id, market) == ("i-tagged", "spot")
         _, kwargs = mock_ec2_spot.launch.call_args
+        # The caller's tags survive verbatim; launch provenance (I5727) is
+        # added alongside rather than replacing them.
         assert kwargs["extra_tags"] == {
             "ci-watch-repo": "nousergon/krepis",
             "ci-watch-sha": "abc123",
+            spot_dispatch.LAUNCH_MARKET_TAG: "spot",
+            spot_dispatch.LAUNCH_REASON_TAG: spot_dispatch.REASON_SPOT_OK,
         }
 
     @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
-    def test_no_extra_tags_passes_none_through(self, mock_ec2_spot):
+    def test_provenance_is_tagged_even_with_no_caller_tags(self, mock_ec2_spot):
+        """I5727: every launch carries provenance, not only the ones that
+        escalate. A tag written only on failure cannot distinguish "spot
+        succeeded" from "this box predates the tagging", and absence would
+        then read as health."""
         mock_ec2_spot.launch.return_value = "i-notags"
 
         spot_dispatch.launch_with_fallback(**_common_launch_kwargs())
 
         _, kwargs = mock_ec2_spot.launch.call_args
-        assert kwargs["extra_tags"] is None
+        assert kwargs["extra_tags"] == {
+            spot_dispatch.LAUNCH_MARKET_TAG: "spot",
+            spot_dispatch.LAUNCH_REASON_TAG: spot_dispatch.REASON_SPOT_OK,
+        }
+
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_capacity_fallback_is_tagged_capacity_exhausted(self, mock_ec2_spot):
+        mock_ec2_spot.SpotCapacityExhausted = spot_dispatch.SpotCapacityExhausted
+        mock_ec2_spot.launch.side_effect = [
+            spot_dispatch.SpotCapacityExhausted("no capacity"), "i-fellback"
+        ]
+
+        instance_id, market = spot_dispatch.launch_with_fallback(**_common_launch_kwargs())
+
+        assert (instance_id, market) == ("i-fellback", "on-demand")
+        _, kwargs = mock_ec2_spot.launch.call_args
+        assert kwargs["spot"] is False
+        assert kwargs["extra_tags"][spot_dispatch.LAUNCH_MARKET_TAG] == "on-demand"
+        assert (kwargs["extra_tags"][spot_dispatch.LAUNCH_REASON_TAG]
+                == spot_dispatch.REASON_CAPACITY)
+
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_forced_on_demand_is_tagged_distinctly_from_capacity(self, mock_ec2_spot):
+        """A deliberate force_on_demand and an involuntary capacity fallback
+        both cost the on-demand premium and have DIFFERENT fixes, so the two
+        must not collapse to one value."""
+        mock_ec2_spot.launch.return_value = "i-forced"
+
+        spot_dispatch.launch_with_fallback(**_common_launch_kwargs(force_on_demand=True))
+
+        _, kwargs = mock_ec2_spot.launch.call_args
+        assert (kwargs["extra_tags"][spot_dispatch.LAUNCH_REASON_TAG]
+                == spot_dispatch.REASON_FORCED)
+        assert spot_dispatch.REASON_FORCED != spot_dispatch.REASON_CAPACITY
+
+    @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
+    def test_library_provenance_wins_over_a_caller_supplied_collision(self, mock_ec2_spot):
+        """These are measured facts about the launch, not a caller preference —
+        a caller cannot mislabel its own box as spot."""
+        mock_ec2_spot.launch.return_value = "i-liar"
+
+        spot_dispatch.launch_with_fallback(
+            **_common_launch_kwargs(
+                force_on_demand=True,
+                extra_tags={spot_dispatch.LAUNCH_MARKET_TAG: "spot"},
+            )
+        )
+
+        _, kwargs = mock_ec2_spot.launch.call_args
+        assert kwargs["extra_tags"][spot_dispatch.LAUNCH_MARKET_TAG] == "on-demand"
+
+    def test_fallback_reasons_is_a_total_partition_of_launch_reasons(self):
+        """Consumers classify on these sets. A reason added to the module but
+        to neither set would be silently unclassifiable, so assert the
+        partition rather than trusting it."""
+        assert spot_dispatch.FALLBACK_REASONS < spot_dispatch.LAUNCH_REASONS
+        assert (spot_dispatch.LAUNCH_REASONS - spot_dispatch.FALLBACK_REASONS
+                == {spot_dispatch.REASON_SPOT_OK})
 
     @mock.patch("nousergon_lib.spot_dispatch.ec2_spot")
     def test_force_on_demand_skips_spot_attempt_entirely(self, mock_ec2_spot):

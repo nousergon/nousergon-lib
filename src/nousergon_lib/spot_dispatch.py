@@ -42,6 +42,38 @@ from nousergon_lib.ec2_spot import (
 
 logger = logging.getLogger(__name__)
 
+# ── Launch provenance (alpha-engine-config-I5727) ────────────────────────────
+# Which market a box launched on, and why, recorded ON the box itself.
+#
+# Before this, an escalation off spot appeared in exactly two places: a
+# logger.warning in one Lambda's log group, and an on-demand line on the AWS
+# bill weeks later attributable to no lane. cost-management-policy.md §2.1
+# requires on-demand to be reached only through a bounded automatic escalation
+# and §2.8 requires that escalation to be recorded where it can be counted;
+# neither was checkable, because nothing recorded the decision.
+#
+# These are the vocabulary. Consumers match on the tag VALUES, so treat them as
+# a contract: add a reason, never repurpose one.
+LAUNCH_MARKET_TAG = "LaunchMarket"      # "spot" | "on-demand"
+LAUNCH_REASON_TAG = "LaunchReason"
+REASON_SPOT_OK = "spot_ok"              # spot was available; no escalation
+REASON_CAPACITY = "capacity_exhausted"  # every type×subnet pool refused spot
+REASON_QUOTA = "quota_exceeded"         # account-wide spot quota ceiling
+REASON_FORCED = "force_on_demand"       # a caller chose on-demand deliberately
+
+#: Every reason this module can emit. Consumers importing this get a total
+#: classifier rather than a hand-copied list that silently misses a new member —
+#: an unrecognised value must be surfaced, never bucketed into "other".
+LAUNCH_REASONS = frozenset(
+    {REASON_SPOT_OK, REASON_CAPACITY, REASON_QUOTA, REASON_FORCED}
+)
+
+#: The reasons that mean an escalation off spot actually happened. Deliberate
+#: (REASON_FORCED) and involuntary (capacity, quota) are BOTH escalations and
+#: both cost the on-demand premium — but they have different fixes, so the
+#: discriminator is kept rather than collapsed to a boolean.
+FALLBACK_REASONS = frozenset({REASON_CAPACITY, REASON_QUOTA, REASON_FORCED})
+
 
 class SpotProbeError(Exception):
     """The pre-launch concurrency probe (``running_instance_ids``) could not
@@ -88,34 +120,66 @@ def launch_with_fallback(
     discriminator tags via a separate post-launch ``create_tags`` call (with
     its own bounded retry) should pass them here instead and delete that
     retry path entirely.
+
+    Every launch is tagged with its provenance — ``LaunchMarket`` and
+    ``LaunchReason`` (see the module constants) — on the same RunInstances
+    call, so an escalation off spot is countable from the instance itself
+    rather than only from a log line and the bill
+    (alpha-engine-config-I5727, cost-management-policy.md §2.1/§2.8). These
+    library-set keys take precedence over ``extra_tags`` on collision: they
+    are measured facts about the launch, not a caller preference.
     """
-    common = {
-        "image_id": image_id,
-        "key_name": key_name,
-        "security_group_ids": list(security_group_ids),
-        "iam_instance_profile": iam_instance_profile,
-        "volume_size_gb": volume_size_gb,
-        "shutdown_behavior": "terminate",
-        "tag_name": tag_name,
-        "extra_tags": extra_tags,
-        "region": region,
-    }
+    def common(market: str, reason: str) -> dict:
+        # Launch provenance rides the SAME RunInstances TagSpecifications entry
+        # as Name (krepis.ec2_spot merges extra_tags into it), so recording it
+        # costs no new IAM anywhere: every caller can already tag the box it is
+        # launching. That constraint is why this is tags rather than an S3
+        # write — the eight dispatcher Lambdas that call this function run under
+        # execution roles that are not yet codified in nous-ergon-ops'
+        # infrastructure/iam tree (alpha-engine-config-I4925), so granting each
+        # of them s3:PutObject would mean eight out-of-band IAM writes against
+        # the single-writer rule.
+        #
+        # Tagged on EVERY launch, not only on fallbacks. A tag written only when
+        # something goes wrong cannot distinguish "spot succeeded" from "this
+        # box predates the tagging" — absence would read as health, which is the
+        # failure this exists to close (cost-management-policy.md §2.8).
+        #
+        # Library keys win over a caller's extra_tags on collision: these are
+        # measured facts about the launch, not a caller preference.
+        tags = dict(extra_tags or {})
+        tags[LAUNCH_MARKET_TAG] = market
+        tags[LAUNCH_REASON_TAG] = reason
+        return {
+            "image_id": image_id,
+            "key_name": key_name,
+            "security_group_ids": list(security_group_ids),
+            "iam_instance_profile": iam_instance_profile,
+            "volume_size_gb": volume_size_gb,
+            "shutdown_behavior": "terminate",
+            "tag_name": tag_name,
+            "extra_tags": tags,
+            "region": region,
+        }
     # ec2_spot.launch(...) below: ec2_spot.py is a sys.modules rebind shim
     # to krepis.ec2_spot; pyright can't see through the dynamic rebind,
     # verified correct at runtime — see the ignore-reason on the import
     # above.
     if force_on_demand:
         logger.warning("force_on_demand set — launching ON-DEMAND directly")
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,  # pyright: ignore[reportAttributeAccessIssue]
+                              **common("on-demand", REASON_FORCED))
         return iid, "on-demand"
     try:
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=True, **common)  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=True,  # pyright: ignore[reportAttributeAccessIssue]
+                              **common("spot", REASON_SPOT_OK))
         return iid, "spot"
     except SpotCapacityExhausted:
         logger.warning(
             "spot capacity exhausted across all type×subnet pools — relaunching ON-DEMAND"
         )
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,  # pyright: ignore[reportAttributeAccessIssue]
+                              **common("on-demand", REASON_CAPACITY))
         return iid, "on-demand"
     except SpotQuotaExceededError as exc:
         # Account-wide (config#2698) — distinct from ordinary capacity
@@ -131,7 +195,8 @@ def launch_with_fallback(
             source="nousergon_lib.spot_dispatch.launch_with_fallback",
             dedup_key=f"spot-quota-exceeded-{region}",
         )
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False, **common)  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,  # pyright: ignore[reportAttributeAccessIssue]
+                              **common("on-demand", REASON_QUOTA))
         return iid, "on-demand"
 
 
