@@ -76,6 +76,12 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
+    # alpha-engine-config-I5758: ThinkTankCoverage moved off a direct
+    # lambda:invoke (TimeoutSeconds 900 — the AWS Lambda MAXIMUM, which the
+    # agent loop does not fit in) onto the spot dispatcher, so it gained the
+    # standard dispatch/poll companion. Without this row the wait renders as
+    # its own dashboard row instead of rolling up into its parent.
+    "WaitForThinkTank": "ThinkTankCoverage",
     # Per-execution ephemeral dispatch box (nousergon-data#975) — retires the
     # always-on dashboard-box SPOF that every weekly SSM stage dispatched from.
     "WaitForWeeklyFreshnessSpotBootstrap": "DispatchWeeklyFreshnessSpot",
