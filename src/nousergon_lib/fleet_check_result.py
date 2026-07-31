@@ -24,9 +24,9 @@ checks run on bare runners with no lib install, so making them import this
 would mean adding a network install to five scheduled workflows in the same
 change that ships a new check — staged deliberately rather than silently, per
 `principles.md` §2.4, and the interim duplication is held legitimate by a
-contract test in that repo asserting the copies still match byte-for-byte
-(`shared-code-policy.md` §5.1's fork-detection backstop). Migration is tracked
-in alpha-engine-config-I5864.
+contract test in that repo asserting the two modules still agree on the
+envelope they produce (`shared-code-policy.md` §5.1's fork-detection backstop).
+Migration is tracked in alpha-engine-config-I5865.
 
 THIS MODULE IS THE PRODUCER HALF OF A CROSS-REPO CONTRACT. The consumer is
 `crucible-dashboard/loaders/fleet_checks_loader.py`. Changing a field name here
