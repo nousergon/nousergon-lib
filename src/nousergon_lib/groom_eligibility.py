@@ -83,7 +83,11 @@ BASE_EXCLUDE_LABELS = frozenset({
 })
 
 #: config#1805 gate exclusion: HARD — no automated re-entry path exists.
-GATE_HARD_EXCLUDE_LABELS = frozenset({"gate:operator", "gate:decision", "gate:device"})
+# config#4824: gate:authoring is agent-applied on draft PRs being actively
+# authored — categorically not groom-actionable (only the agent that applied
+# it knows when to remove it). Registered as a PR-only gate family
+# (PR_GATE_FAMILIES in alpha-engine-config's gate_labels.py).
+GATE_HARD_EXCLUDE_LABELS = frozenset({"gate:operator", "gate:decision", "gate:device", "gate:authoring"})
 #: SOFT — excluded unless the issue also carries ``gate-due``. ``gate:live-run``
 #: retired 2026-07-09, split by named pipeline into the three gate:*-sf labels
 #: (config#2057) so gate_sf_run_sweep.py can deterministically re-admit them.
