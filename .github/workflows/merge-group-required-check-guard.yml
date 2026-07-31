@@ -68,8 +68,19 @@ jobs:
       - name: Install deps (PyYAML only — gh CLI is pre-installed on ubuntu-latest)
         run: pip install pyyaml
 
+      # PYTHONPATH rather than `pip install`: the script's logic now lives in
+      # `nousergon_lib.merge_queue` (lifted so the org-wide sweep in
+      # alpha-engine-config can share it instead of copying the parser), and the
+      # module imports nothing beyond stdlib + PyYAML. Installing the package
+      # here would pull its whole base dependency set into a job whose entire
+      # work is parsing YAML, and — worse — installing from PyPI would run a
+      # DIFFERENT revision than the script checked out above. Pointing at the
+      # checkout's own `src/` keeps script and module at one revision by
+      # construction, which is the property that matters for a check that is
+      # required on any repo running a merge queue.
       - name: Validate merge_group coverage of required checks
         env:
+          PYTHONPATH: ${{ github.workspace }}/_nousergon-lib-script/src
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python3 _nousergon-lib-script/scripts/validate_merge_group_required_checks.py

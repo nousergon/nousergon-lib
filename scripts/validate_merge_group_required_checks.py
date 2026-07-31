@@ -1,252 +1,167 @@
-"""Validate that every required status check (from branch-protection rulesets
-AND classic branch protection) has a workflow that triggers on merge_group
-events.
+"""Validate that every required status check on this repo has a workflow that
+triggers on `merge_group` events — and, if this repo actually runs a merge
+queue, that `merge-group-required-check-guard` is itself a required check.
 
-Prevents the class of bug that deadlocked the merge queue three times on
-2026-07-23: a required check whose workflow only fires on pull_request
-but the merge queue fires merge_group — the context never reports, the
-queue waits 60 minutes, the PR auto-dequeues unmerged.
+A required context whose workflow fires only on `pull_request` never reports for
+a queue entry: the entry sits in `AWAITING_CHECKS` until GitHub's response
+timeout, then **auto-dequeues unmerged** with nothing red and nothing logged.
+That deadlocked the fleet on 2026-07-24 and forced a same-day revert.
 
-Sources consulted:
-  a) Active rulesets of type required_status_checks (rulesets-only repos like
-     nousergon-lib).
-  b) Classic branch protection required_status_checks.contexts (repos still on
-     legacy protection, like nousergon-data, crucible-dashboard).
-  c) The merge_queue ruleset itself — checks required by the queue are the
-     same set as branch protection, but we check the queue ruleset's
-     parameters.required_status_checks if present (nousergon-lib does NOT
-     require status checks at the queue-ruleset level; they are gated in the
-     main-protection ruleset instead).
+**The logic lives in `nousergon_lib.merge_queue`, not here.** This file is the
+single-repo CLI over it. The org-wide sweep in `alpha-engine-config` answers the
+same questions about repos it has no checkout of, so the parser and the two API
+readers are shared rather than copied (`nous-ergon-ops-I349`,
+`shared-code-policy.md` second-adoption trigger).
 
-One required check CAN be served by multiple workflows — it's enough that
-AT LEAST ONE has merge_group coverage. The guard reports the first producer
-found that lacks it, but the error is a single line per check regardless.
-
-Run locally:  python3 scripts/validate_merge_group_required_checks.py
+Run locally:  python3 scripts/validate_merge_group_required_checks.py --repo owner/name
 In CI:        called from merge-group-required-check-guard.yml
 """
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
-
-def gh_api(path: str) -> dict | list:
-    """Call gh api and return parsed JSON."""
-    gh = shutil.which("gh") or "gh"
-    result = subprocess.run(
-        [gh, "api", path],
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode != 0:
-        print(f"::error::gh api {path} failed: {result.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(result.stdout)
-
-
-def get_required_checks(repo: str) -> list[str]:
-    """Collect every required status check context from rulesets AND classic
-    branch protection.
-
-    Sources (all consulted, deduplicated):
-      1. Active rulesets with required_status_checks rules.
-      2. Classic branch protection on main.
-      3. merge_queue rulesets that list required_status_checks in their params.
-    """
-    contexts: list[str] = []
-
-    # Source 1 + 3: rulesets API.
-    rulesets = gh_api(f"/repos/{repo}/rulesets")
-    for rs in rulesets:
-        if rs.get("enforcement") != "active":
-            continue
-        full = gh_api(f"/repos/{repo}/rulesets/{rs['id']}")
-        for rule in full.get("rules", []):
-            if rule["type"] == "required_status_checks":
-                for check in rule["parameters"].get("required_status_checks", []):
-                    ctx: str = check["context"]
-                    if ctx not in contexts:
-                        contexts.append(ctx)
-
-    # Source 2: classic branch protection (used by nousergon-data,
-    # crucible-dashboard alongside the merge_queue-only ruleset).
-    try:
-        prot = gh_api(f"/repos/{repo}/branches/main/protection")
-        for ctx in prot.get("required_status_checks", {}).get("contexts", []):
-            if ctx not in contexts:
-                contexts.append(ctx)
-    except (SystemExit, KeyError, json.JSONDecodeError):
-        pass  # 404 = no classic protection; rulesets-only repos are common.
-
-    return contexts
+from nousergon_lib.merge_queue import (  # noqa: F401 — job_name_matches re-exported for tests
+    active_merge_queue,
+    coverage_gaps,
+    guard_is_required,
+    job_name_matches,
+    parse_workflow,
+    required_contexts,
+)
 
 
 def parse_workflow_merge_group(path: Path) -> tuple[str | None, set[str]]:
-    """Parse a workflow file and return (has_merge_group, {job_names}).
+    """Path-taking wrapper over :func:`nousergon_lib.merge_queue.parse_workflow`.
 
-    Returns has_merge_group as the name of the merge_group types list if
-    present, None otherwise. job_names is the set of job name: values from
-    the workflow (these are the check context names that appear in CI).
+    Retained because the guard reads files off disk while the fleet sweep reads
+    them from the contents API — the shared function takes text so both callers
+    are natural, and this keeps the local one a one-liner.
     """
-    with open(path) as fh:
-        doc = yaml.safe_load(fh)
-
-    if not isinstance(doc, dict):
-        return None, set()
-
-    has_mg = None
-    on_block = doc.get("on", doc.get(True, {}))
-    if isinstance(on_block, dict):
-        mg = on_block.get("merge_group")
-        if isinstance(mg, dict):
-            mg_types = mg.get("types")
-            if isinstance(mg_types, list):
-                has_mg = str(mg_types)
-
-    jobs = doc.get("jobs", {})
-    job_names: set[str] = set()
-    if isinstance(jobs, dict):
-        for jid, job_def in jobs.items():
-            if isinstance(job_def, dict):
-                name = job_def.get("name")
-                # Matrix-expanded job names contain ${{ matrix.* }} — skip
-                # those for exact match; they're handled via pattern.
-                if isinstance(name, str) and "${{" not in name:
-                    job_names.add(name)
-                elif isinstance(name, str):
-                    # Store the raw name for pattern matching later
-                    job_names.add(name)
-                else:
-                    # No `name:` on the job — GitHub then uses the JOB ID as
-                    # the status-check context. Omitting this fallback made the
-                    # guard blind to the single most common workflow shape.
-                    #
-                    # Measured 2026-07-29: reported `Produced by: UNKNOWN` for
-                    # every one of 14 required checks across 7 repos, including
-                    # alpha-engine-config's `pytest` — produced by
-                    # `scripts-tests.yml`'s `jobs.pytest`, which carries no
-                    # `name:` key.
-                    #
-                    # Two failures, not one. The guard could not name the file to
-                    # edit, and — worse — it could not see a merge_group trigger
-                    # that DID cover such a job, so it would keep reporting a gap
-                    # after the gap was closed. A guard that cannot confirm its
-                    # own remediation cannot be promoted to blocking, which
-                    # scm-platform-policy §3 requires before merge-queue
-                    # re-adoption.
-                    job_names.add(str(jid))
-
-    return has_mg, job_names
+    return parse_workflow(Path(path).read_text())
 
 
-def job_name_matches(job_pattern: str, check_context: str) -> bool:
-    """Check if a job name pattern (potentially with matrix vars) matches
-    a concrete check context name.
+def _flag(argv: list[str], name: str) -> str | None:
+    for i, arg in enumerate(argv):
+        if arg == name and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith(f"{name}="):
+            return arg.split("=", 1)[1]
+    return None
 
-    Example: job_pattern="pytest (py${{ matrix.python-version }})"
-             matches check_context="pytest (py3.9)"
+
+def _resolve_repo(argv: list[str]) -> str:
+    return _flag(argv, "--repo") or os.environ.get("GITHUB_REPOSITORY", "")
+
+
+def should_fail(gaps: list, guard_gap: bool) -> bool:
+    """Only a missing `merge_group` trigger fails this check.
+
+    Separated from `main` so the asymmetry is pinned by a test rather than
+    resting on one `if`. `guard_gap` is repo configuration no PR can change, and
+    failing on it would redden every PR on the repo — see the block in `main`
+    for why adding this check to `gate_pr_actions._ADVISORY_CHECK_NAMES` is not
+    the escape hatch it looks like.
     """
-    # If no template var, exact match
-    if "${{" not in job_pattern:
-        return job_pattern == check_context
-
-    # Build a regex: replace ${{ ... }} with a capture group for any non-empty chars
-    import re
-    escaped = re.escape(job_pattern)
-    escaped = escaped.replace(r"\${{", "\\${{")
-    pattern = re.sub(r"\\\$\\\{\\{[^}]+\\}\\}", r"(.+)", escaped)
-    return bool(re.fullmatch(pattern, check_context))
+    return bool(gaps)
 
 
 def main() -> int:
-    repo = os.environ.get("GITHUB_REPOSITORY", "")
-    if not repo:
-        # Allow local runs with --repo flag
-        for i, arg in enumerate(sys.argv[1:], 1):
-            if arg == "--repo" and i < len(sys.argv):
-                repo = sys.argv[i + 1]
-            elif arg.startswith("--repo="):
-                repo = arg.split("=", 1)[1]
+    repo = _resolve_repo(sys.argv[1:])
     if not repo:
         print("::error::GITHUB_REPOSITORY not set and no --repo flag provided")
         return 1
 
     print(f"Auditing required checks for merge_group triggers in {repo}")
 
-    required = get_required_checks(repo)
-    if not required:
+    contexts = required_contexts(repo)
+    if not contexts:
         print("No required status checks found — nothing to validate.")
         return 0
 
-    print(f"Found {len(required)} required check context(s):")
-    for ctx in required:
+    print(f"Found {len(contexts)} required check context(s):")
+    for ctx in contexts:
         print(f"  - {ctx}")
 
-    workflows_dir = Path(".github/workflows")
+    workflows_dir = Path(_flag(sys.argv[1:], "--workflows-dir") or ".github/workflows")
     if not workflows_dir.is_dir():
-        print("::error::.github/workflows/ directory not found", file=sys.stderr)
+        print(f"::error::{workflows_dir} not found", file=sys.stderr)
         return 1
 
-    wf_files = sorted(workflows_dir.glob("*.yml"))
-    if not wf_files:
-        print("::error::No workflow files found in .github/workflows/", file=sys.stderr)
+    workflows = {
+        str(p): p.read_text()
+        for p in sorted([*workflows_dir.glob("*.yml"), *workflows_dir.glob("*.yaml")])
+    }
+    if not workflows:
+        print(f"::error::No workflow files found in {workflows_dir}", file=sys.stderr)
         return 1
 
-    print(f"\nScanning {len(wf_files)} workflow file(s)...")
+    # The scanned directory is printed because `--repo` and the working tree are
+    # independent: running `--repo owner/A` from a checkout of B audits A's
+    # required checks against B's workflows and reports every context as
+    # `UNKNOWN`, which reads as a fleet of gaps rather than as operator error.
+    print(f"\nScanning {len(workflows)} workflow file(s) in {workflows_dir.resolve()}...")
+    gaps = coverage_gaps(contexts, workflows)
 
-    gaps: list[tuple[str, str | None]] = []  # (context, workflow_file or None)
-
-    for ctx in required:
-        found = False
-        for wf_path in wf_files:
-            has_mg, job_names = parse_workflow_merge_group(wf_path)
-            if has_mg is None:
-                continue  # workflow doesn't have merge_group at all
-            # Check if any job in this workflow produces this check context
-            for jname in job_names:
-                if job_name_matches(jname, ctx):
-                    found = True
-                    break
-            if found:
-                break
-
-        if not found:
-            # Find which workflow produces this context (so we can report it)
-            producer = None
-            for wf_path in wf_files:
-                _, job_names = parse_workflow_merge_group(wf_path)
-                for jname in job_names:
-                    if job_name_matches(jname, ctx):
-                        producer = str(wf_path)
-                        break
-                if producer:
-                    break
-            gaps.append((ctx, producer))
+    # Only evaluated when a queue is actually running here. Requiring the guard
+    # on a repo with no queue would add a required check that protects nothing,
+    # and scm-platform-policy §3.1 is explicit that a required check which cannot
+    # fail usefully is a liability rather than a safeguard.
+    queue = active_merge_queue(repo)
+    guard_gap = queue is not None and not guard_is_required(contexts)
 
     if gaps:
         print("\n--- MISSING merge_group TRIGGERS ---\n")
         for ctx, wf in gaps:
+            print(f"  Required check:  {ctx}")
             if wf:
-                print(f"  Required check:  {ctx}")
                 print(f"  Produced by:     {wf}")
                 print("  Missing:         merge_group: {types: [checks_requested]}\n")
             else:
-                print(f"  Required check:  {ctx}")
                 print("  Produced by:     UNKNOWN (no matching workflow job found)")
-                print("  Action needed:   identify the producing workflow and add merge_group trigger\n")
+                print("  Action needed:   identify the producing workflow and add the trigger\n")
 
-        msg = f"{len(gaps)} required check(s) lack merge_group: {{types: [checks_requested]}} triggers."
-        print(f"::error::{msg}")
-        print("Add merge_group: {types: [checks_requested]} to the on: block of each listed workflow.")
+    # Reported, deliberately NOT failed. Two reasons, both load-bearing:
+    #
+    #  1. It is a property of the REPO's configuration, not of the PR being
+    #     checked — red on every PR until an admin changes a setting no PR can
+    #     change. scm-platform-policy §3.1: a check that is red whenever it is
+    #     working may never be required, and this check is required wherever a
+    #     queue runs.
+    #  2. Concretely, it would brick the auto-merge lanes. `gate_pr_actions.py`
+    #     excludes only `gate-label-guard` from its red/green evaluation, so a
+    #     red guard would put every PR on the repo into the `ci_red` bucket —
+    #     handing an unfixable-by-design failure to an LLM fix pass and blocking
+    #     the un-draft path. That is config-I4447 repeating with a new check.
+    #     Adding this guard to that exclusion set is NOT the fix: once it is
+    #     promoted to required it must count, and a permanent exemption for a
+    #     required check is worse than the problem.
+    #
+    # Enforcement lives in the org-wide sweep (`alpha-engine-config`'s
+    # merge-queue readiness check), which files a finding on the check-result
+    # surface instead of reddening every PR. Detection here, consequence there.
+    if guard_gap:
+        print("\n--- GUARD IS ADVISORY WHILE A QUEUE IS RUNNING ---\n")
+        print(f"  Ruleset:         {queue['_ruleset_name']} (id {queue.ruleset_id})")
+        print("  Missing:         merge-group-required-check-guard in required contexts")
+        print("  Why it matters:  this check's failure mode is a silent dequeue, and an")
+        print("                   advisory check can only report one. scm-platform-policy")
+        print("                   §3.2 makes blocking a precondition of running a queue.")
+        print("  Not failed here: it is repo configuration, not this PR — the org-wide")
+        print("                   readiness sweep raises it as a finding.\n")
+        print("::warning::merge-group-required-check-guard is advisory while a merge "
+              "queue is active — scm-platform-policy §3.2 precondition unmet.")
+
+    if should_fail(gaps, guard_gap):
+        print(f"::error::{len(gaps)} required check(s) lack "
+              "merge_group: {types: [checks_requested]} triggers.")
+        print("Add the trigger to the on: block of each listed workflow.")
         return 1
 
+    if queue is not None and not guard_gap:
+        print(f"\nMerge queue active (ruleset {queue.ruleset_id}); guard is a required check.")
     print("\nAll required checks have merge_group triggers — no gaps.")
     return 0
 
