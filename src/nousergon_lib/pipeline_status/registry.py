@@ -76,6 +76,12 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
+    # alpha-engine-config-I5758: ThinkTankCoverage moved off a direct
+    # lambda:invoke (TimeoutSeconds 900 — the AWS Lambda MAXIMUM, which the
+    # agent loop does not fit in) onto the spot dispatcher, so it gained the
+    # standard dispatch/poll companion. Without this row the wait renders as
+    # its own dashboard row instead of rolling up into its parent.
+    "WaitForThinkTank": "ThinkTankCoverage",
     # Per-execution ephemeral dispatch box (nousergon-data#975) — retires the
     # always-on dashboard-box SPOF that every weekly SSM stage dispatched from.
     "WaitForWeeklyFreshnessSpotBootstrap": "DispatchWeeklyFreshnessSpot",
@@ -358,6 +364,26 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "launch. No per-run rendered artifact — a preventive guard "
         "(fail-open on fetch/parse misses, mirroring LibPinDriftCheck).",
     ),
+    # config#2348: THIRD pre-spend sibling gate, composed after
+    # PipelineContractGate — checks each evaluator Lambda's :live alias SHA
+    # against origin/main via the Lambda's own action=check_deploy_drift
+    # dispatch. The two aliases share one image but can drift apart if only
+    # one got promoted, so they are probed independently.
+    "EvaluatorDeployDriftCheck": ArtifactReason(
+        reason="Evaluator Lambda-SHA deploy-drift gate (config#2348) — "
+        "asserts alpha-engine-evaluator:live is built from origin/main "
+        "before any spot launch; halts the run on confirmed drift. No "
+        "per-run rendered artifact — a preventive guard, fail-open on "
+        "probe failure (mirrors LibPinDriftCheck).",
+    ),
+    "EvaluatorDirectorDeployDriftCheck": ArtifactReason(
+        reason="Evaluator-director Lambda-SHA deploy-drift gate "
+        "(config#2348) — the sibling probe for "
+        "alpha-engine-evaluator-director:live, run independently because "
+        "the two aliases share one image but are promoted separately. No "
+        "per-run rendered artifact — a preventive guard, fail-open on "
+        "probe failure.",
+    ),
     # config#2249: fast pre-dispatch substrate health gate, immediately
     # before MorningEnrich (the first state to actually dispatch work to
     # the Saturday box). Replaces discovering a dead dispatch box (disk
@@ -395,6 +421,32 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "to catch. No persisted artifact (the email IS the surface); see "
         "NotifyCompleteGatesDegraded / NotifyCompleteGatesAndHealthDegraded "
         "for the terminal marker this alert sets up.",
+    ),
+    # config#2348: the same fail-open alert shape as the two above, for the
+    # third pre-spend sibling gate pair. Both publish independently — the
+    # grading probe's degraded chain proceeds INTO the director probe
+    # (config#2278's "don't silently skip the sibling gate"), so a run can
+    # fire either, or both.
+    "PublishEvaluatorGateDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when EvaluatorDeployDriftCheck "
+        "could not verify alpha-engine-evaluator:live against origin/main "
+        "(gate Lambda failed after retries, or malformed payload) — the "
+        "run proceeds fail-open, unprotected against the stale-deploy "
+        "break the gate exists to catch. No persisted artifact (the email "
+        "IS the surface); see NotifyCompleteGatesDegraded / "
+        "NotifyCompleteGatesAndHealthDegraded for the terminal marker this "
+        "alert sets up.",
+    ),
+    "PublishEvaluatorDirectorGateDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when "
+        "EvaluatorDirectorDeployDriftCheck could not verify "
+        "alpha-engine-evaluator-director:live against origin/main (gate "
+        "Lambda failed after retries, or malformed payload) — the run "
+        "proceeds fail-open, unprotected against the stale-deploy break "
+        "the gate exists to catch. No persisted artifact (the email IS the "
+        "surface); see NotifyCompleteGatesDegraded / "
+        "NotifyCompleteGatesAndHealthDegraded for the terminal marker this "
+        "alert sets up.",
     ),
     # config#1824 (2026-07-06): run-day gate mirroring the weekday
     # TradingDayGate (config#1430) — predictor Lambda action=
