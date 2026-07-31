@@ -39,6 +39,11 @@ Network failure is a hard error, never a pass. A guard that treats an
 unreachable API as "no findings" reports green precisely when it has checked
 nothing.
 
+Invisibility is reported as invisibility. ``GITHUB_TOKEN`` reads only the repo
+running the workflow, so a ``uses:`` into a *different private* repo 404s at
+every object endpoint — byte-identical to a deleted SHA. That case names the
+access problem instead, because the fix is a token, not a repin.
+
 Exit codes: ``0`` clean, ``1`` findings, ``2`` could not complete the check.
 
 Usage::
@@ -133,6 +138,20 @@ def classify_ref(owner_repo: str, sha: str, token: str | None = None) -> str | N
             "is a BLOB SHA (the file object), not a commit. This is what "
             "`GET /repos/{owner}/{repo}/contents/{path}` returns in `.sha` -- "
             "read the commit from `GET /repos/{owner}/{repo}/commits/{ref}` instead"
+        )
+
+    # Everything above 404s identically when the repository itself is invisible
+    # to this token. GITHUB_TOKEN is scoped to the repo running the workflow, so
+    # a `uses:` into a DIFFERENT private repo reads exactly like a deleted
+    # object — and reporting it as one sends someone hunting a SHA that is fine.
+    # Separate the two by asking whether the repo is visible at all.
+    repo_status, _ = _get(f"repos/{owner_repo}", token)
+    if repo_status != 200:
+        return (
+            f"could not be checked: `{owner_repo}` is not visible to this token "
+            f"(private to another repo, renamed, or deleted). GITHUB_TOKEN only "
+            f"reads the repo running the workflow -- a cross-repo private `uses:` "
+            f"needs a token with access to both"
         )
 
     return f"does not exist in `{owner_repo}` as any reachable object"

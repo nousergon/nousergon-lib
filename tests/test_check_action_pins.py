@@ -83,9 +83,27 @@ def test_a_commit_sha_is_accepted(guard, monkeypatch):
     assert guard.classify_ref("o/r", SHA_A) is None
 
 
-def test_object_absent_entirely_says_so_without_guessing(guard, monkeypatch):
-    monkeypatch.setattr(guard, "_get", lambda path, token: (404, None))
+def test_object_absent_from_a_visible_repo_says_so_without_guessing(guard, monkeypatch):
+    """Repo readable, object genuinely gone — the only case that earns this wording."""
+    monkeypatch.setattr(
+        guard,
+        "_get",
+        lambda path, token: (200, {"full_name": "o/r"}) if path == "repos/o/r" else (404, None),
+    )
     assert "does not exist" in guard.classify_ref("o/r", SHA_A)
+
+
+def test_invisible_repo_is_not_reported_as_a_missing_object(guard, monkeypatch):
+    """GITHUB_TOKEN reads only the repo running the workflow.
+
+    A `uses:` into a different PRIVATE repo 404s at every object endpoint, which
+    is byte-identical to a deleted SHA. Reporting it as a bad pin sends someone
+    hunting a SHA that is correct — the fix is a token, not a repin.
+    """
+    monkeypatch.setattr(guard, "_get", lambda path, token: (404, None))
+    problem = guard.classify_ref("o/private", SHA_A)
+    assert "not visible to this token" in problem
+    assert "does not exist" not in problem
 
 
 # ── ref-shape rules ──────────────────────────────────────────────────────────
