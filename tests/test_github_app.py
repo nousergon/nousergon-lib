@@ -82,6 +82,53 @@ def test_mint_installation_token_success(rsa_keys):
     assert req.get_header("Authorization", "").startswith("Bearer ")
 
 
+def test_mint_narrows_permissions_in_the_request_body(rsa_keys):
+    """GitHub only permits NARROWING at mint. Sending the permissions block is
+    what lets a read-only consumer share a write-capable installation instead of
+    needing a second App (identity-access-policy.md §4 vs §7)."""
+    pem, _ = rsa_keys
+    with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response()) as m:
+        github_app.mint_installation_token(
+            app_id="1",
+            installation_id="99",
+            private_key_pem=pem,
+            permissions={"contents": "read"},
+        )
+    assert json.loads(m.call_args[0][0].data) == {"permissions": {"contents": "read"}}
+
+
+def test_mint_without_permissions_sends_an_empty_body(rsa_keys):
+    """The default must stay the installation's full grants — a change here would
+    silently narrow every existing consumer, including the groom harness."""
+    pem, _ = rsa_keys
+    with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response()) as m:
+        github_app.mint_installation_token(app_id="1", installation_id="99", private_key_pem=pem)
+    assert m.call_args[0][0].data == b"{}"
+
+
+def test_narrowed_and_full_tokens_do_not_share_a_cache_entry(monkeypatch):
+    """A single cache key would serve a full-authority token to a narrowed caller
+    in the same process, silently undoing the narrowing."""
+    _patch_secrets(monkeypatch)
+    github_app.clear_cache()
+    full = github_app.InstallationToken(
+        token="ghs_full", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
+    )
+    narrow = github_app.InstallationToken(
+        token="ghs_narrow", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
+    )
+    with mock.patch.object(
+        github_app, "mint_installation_token", side_effect=[full, narrow]
+    ) as m:
+        assert github_app.installation_token() == "ghs_full"
+        assert github_app.installation_token(permissions={"contents": "read"}) == "ghs_narrow"
+        # …and each is cached under its own key.
+        assert github_app.installation_token() == "ghs_full"
+        assert github_app.installation_token(permissions={"contents": "read"}) == "ghs_narrow"
+    assert m.call_count == 2
+    assert m.call_args.kwargs["permissions"] == {"contents": "read"}
+
+
 def test_mint_http_error_raises(rsa_keys):
     pem, _ = rsa_keys
     err = urllib.error.HTTPError(
