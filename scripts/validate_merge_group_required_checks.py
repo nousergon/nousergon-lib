@@ -23,7 +23,27 @@ import os
 import sys
 from pathlib import Path
 
-from nousergon_lib.merge_queue import (  # noqa: F401 — job_name_matches re-exported for tests
+# ── Self-bootstrap, and why it is not belt-and-braces ────────────────────────
+#
+# This script is executed from a CHECKOUT of nousergon-lib, not from an
+# installed package: the reusable workflow clones this repo beside the caller's
+# and runs the file directly. Every consumer pins the reusable workflow at a
+# revision of its own choosing, but the script always comes from lib's DEFAULT
+# BRANCH — so the moment the script grew a `nousergon_lib` import, every repo
+# whose pinned skeleton predated the matching PYTHONPATH step failed with
+# `ModuleNotFoundError: No module named 'nousergon_lib'`. Observed within
+# minutes on alpha-engine-config (run 30666273877), fleet-wide, on a check that
+# scm-platform-policy §3.2 wants promoted to blocking.
+#
+# Adding the PYTHONPATH to the workflow fixes it only for consumers who bump
+# their pin, which is the skew itself, not a fix for it. The script sits at
+# `<checkout>/scripts/`, so `<checkout>/src` is unambiguously its sibling —
+# resolving it here removes the class: no consumer has to bump anything, ever,
+# for the script to keep importing its own library.
+if __package__ is None:  # executed as a file, which is the only way this runs
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from nousergon_lib.merge_queue import (  # noqa: E402, F401 — bootstrap must precede
     active_merge_queue,
     coverage_gaps,
     guard_is_required,
