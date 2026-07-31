@@ -70,7 +70,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+
+# `datetime.UTC` is 3.11+, and this package declares requires-python >=3.9.
+# The alpha-engine-config original could use it because that repo runs 3.12
+# only; the lib's CI matrix starts at 3.9, which is where it broke on the lift.
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +114,7 @@ def build(
         "schema_version": SCHEMA_VERSION,
         "check_id": check_id,
         "label": label,
-        "ran_at": (now or datetime.now(UTC)).isoformat(),
+        "ran_at": (now or datetime.now(timezone.utc)).isoformat(),
         "status": status,
         "summary": summary,
         "cadence_minutes": cadence_minutes,

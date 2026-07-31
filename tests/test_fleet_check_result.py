@@ -17,13 +17,13 @@ surface exists to prevent.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import pytest
 
 from nousergon_lib import fleet_check_result as fcr
 
-NOW = datetime(2026, 7, 29, 20, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 29, 20, 0, tzinfo=timezone.utc)
 
 
 def _ok(**over):
