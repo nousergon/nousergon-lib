@@ -67,6 +67,11 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForMorningEnrich": "MorningEnrich",
     "WaitForDataPhase1": "DataPhase1",
     "WaitForRAGIngestion": "RAGIngestion",
+    # alpha-engine-config-I5759: DataPhase2 became a spot stage on 2026-07-31,
+    # so it acquired a poll companion like its siblings. Without this row the
+    # companion renders as its own console row instead of rolling up into
+    # DataPhase2, and alpha-engine-data's registry-source check fails.
+    "WaitForDataPhase2": "DataPhase2",
     "WaitForPredictorTraining": "PredictorTraining",
     "WaitForBacktester": "Backtester",
     "WaitForPredictorBacktest": "PredictorBacktest",
