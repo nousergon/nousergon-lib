@@ -142,3 +142,24 @@ jobs:
     _, job_names = guard.parse_workflow_merge_group(wf)
     assert any("${{" in j for j in job_names), (
         "matrix name templates must be retained for pattern matching")
+
+
+def test_a_guard_that_is_only_advisory_does_NOT_fail_this_check(guard):
+    """The asymmetry that keeps this check promotable.
+
+    `guard_is_required` being false is REPO CONFIGURATION — red on every PR until
+    an admin changes a setting no PR can change. `scm-platform-policy` §3.1 says
+    a check that is red whenever it is working may never be required, and §3.2
+    requires this very check on any repo running a queue, so failing on it would
+    make the precondition unsatisfiable by construction.
+
+    The concrete consequence is worse than the principle: `gate_pr_actions.py`
+    excludes only `gate-label-guard` from its red/green evaluation, so a red
+    guard would drop every PR on the repo into the `ci_red` bucket — handing an
+    unfixable-by-design failure to an LLM fix pass and blocking the un-draft
+    path. That is config-I4447 repeating with a new check.
+    """
+    assert guard.should_fail([], guard_gap=True) is False
+    assert guard.should_fail([("pytest", "ci.yml")], guard_gap=False) is True
+    assert guard.should_fail([("pytest", "ci.yml")], guard_gap=True) is True
+    assert guard.should_fail([], guard_gap=False) is False

@@ -50,7 +50,10 @@ _ENV_OVERRIDES = {
 }
 _USER_AGENT = "nousergon-lib-github-app"
 
-_cache: dict[str, InstallationToken] = {}
+# Keyed by (ssm_prefix, requested-permissions) — NOT by prefix alone. A single
+# key would let a full-authority token minted by one consumer be served to a
+# narrowed one in the same process, silently undoing §4's narrowest-grant rule.
+_cache: dict[tuple[str, str], InstallationToken] = {}
 _cache_lock = threading.Lock()
 
 
@@ -106,21 +109,36 @@ def mint_installation_token(
     app_id: str,
     installation_id: str,
     private_key_pem: str,
+    permissions: dict[str, str] | None = None,
     api: str = GITHUB_API,
 ) -> InstallationToken:
     """POST /app/installations/{id}/access_tokens → short-lived ``ghs_`` token.
+
+    ``permissions`` narrows the minted token below what the installation holds —
+    e.g. ``{"contents": "read"}`` against an installation carrying
+    ``contents: write``. **GitHub only permits narrowing**: asking for more than
+    the installation has is rejected by the API, so this cannot widen authority
+    by accident or by a typo.
+
+    That property is why it exists. `identity-access-policy.md` §4 requires the
+    narrowest grant that works, and §7 forbids a second identity per consumer.
+    Without narrowing those two pull opposite ways: a read-only consumer either
+    holds a write token it does not need, or a new App is created for it. Mint
+    time is where the tension resolves, and it resolves per-request rather than
+    by a configuration a later edit could widen.
 
     Raises :class:`GitHubAppTokenError` on any transport or contract failure —
     consumers own the decision to fall back to a PAT, this module never does.
     """
     app_jwt = build_app_jwt(app_id, private_key_pem)
+    body = json.dumps({"permissions": permissions}).encode() if permissions else b"{}"
     url = f"{api}/app/installations/{installation_id}/access_tokens"
     # S310 can't see through the ``api`` parameter indirection (kept for
     # testability); constructing a Request does no I/O — the https scheme is
     # enforced at runtime by _safe_urlopen below, mirroring preflight.py.
     req = urllib.request.Request(  # noqa: S310 -- scheme validated in _safe_urlopen
         url,
-        data=b"{}",
+        data=body,
         method="POST",
         headers={
             "Authorization": f"Bearer {app_jwt}",
@@ -187,9 +205,16 @@ def installation_token(
     *,
     ssm_prefix: str = DEFAULT_SSM_PREFIX,
     region: str | None = None,
+    permissions: dict[str, str] | None = None,
     api: str = GITHUB_API,
 ) -> str:
     """Cached installation token from SSM-held App credentials.
+
+    ``permissions`` narrows the token below the installation's own grants (see
+    :func:`mint_installation_token`). Narrowed tokens are cached under a key that
+    includes the requested permissions, so a ``contents: read`` caller can never
+    be served a cached full-authority token minted by a different consumer in the
+    same process — which would silently undo the narrowing.
 
     Reads ``{ssm_prefix}github_app_id`` / ``_installation_id`` /
     ``_private_key`` (env overrides ``GROOM_GH_APP_*`` win — the groom
@@ -197,17 +222,22 @@ def installation_token(
     concurrent callers (Streamlit threads, Lambda warm starts) can't
     stampede the GitHub endpoint.
     """
+    cache_key = (ssm_prefix, json.dumps(permissions, sort_keys=True) if permissions else "")
     with _cache_lock:
-        cached = _cache.get(ssm_prefix)
+        cached = _cache.get(cache_key)
         if cached and not cached.expiring_within(REFRESH_MARGIN_SECONDS):
             return cached.token
         app_id = _read_credential("github_app_id", ssm_prefix, region)
         inst_id = _read_credential("github_app_installation_id", ssm_prefix, region)
         pem = normalize_pem(_read_credential("github_app_private_key", ssm_prefix, region))
         minted = mint_installation_token(
-            app_id=app_id, installation_id=inst_id, private_key_pem=pem, api=api
+            app_id=app_id,
+            installation_id=inst_id,
+            private_key_pem=pem,
+            permissions=permissions,
+            api=api,
         )
-        _cache[ssm_prefix] = minted
+        _cache[cache_key] = minted
         return minted.token
 
 

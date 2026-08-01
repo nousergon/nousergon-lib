@@ -1,0 +1,191 @@
+name: Empty PR Guard
+
+# Reusable (workflow_call) fleet primitive: fail a PR that contributes NOTHING
+# — zero changed files against its merge base (alpha-engine-config#5940).
+#
+# ── The bug class this exists for ───────────────────────────────────────────
+#
+# `ne-groomer[bot]`'s unattended conflict-resolution pass merges `main` into a
+# PR branch and resolves the conflicts. On 2026-07-30/31 it resolved them by
+# taking main's side WHOLESALE, producing merge commits whose tree is
+# byte-identical to `main`. The branch's entire contribution was deleted.
+# Four nousergon-data PRs (#784, #1118, #1134, #1158) ended at 0 changed
+# files, and three of them (config#2340, #2699, #5567) were P1 fixes whose
+# content is NOT on main — the work is simply gone. `DegradedSucceeded`, the
+# false-green terminal from the 2026-07-15 incident, is still live because of
+# it.
+#
+# Nothing caught it, for three compounding reasons:
+#   1. CI stayed GREEN — an empty PR has nothing left to break. Green is not
+#      evidence of content.
+#   2. The PRs stayed OPEN and two were routed to Brian as
+#      `needs:human-review`, so they read as pending work, not destroyed work.
+#   3. Their source issues were already CLOSED, so the fleet believed three P1
+#      defects were fixed.
+#
+# The conflict-resolution prompt (`.github/groom-conflict-resolve-prompt.md`,
+# line 18) ALREADY says "never blind-pick 'ours' or 'theirs' as a shortcut."
+# The agent did it anyway. That is the whole argument for this workflow: an
+# instruction to a model is not a control. This check is the enforcement
+# plane, and it binds every author — agent, human, or automation.
+#
+# ── Why "zero changed files" is the right rule ──────────────────────────────
+#
+# A tempting alternative is to flag any merge commit whose tree equals one of
+# its parents. That has a real false positive: when a branch's changes already
+# landed on main by another route (a squash-merged duplicate), merging main in
+# legitimately yields tree == main. That was exactly nousergon-data#1134.
+#
+# But BOTH cases — work destroyed, and work already landed — produce a PR that
+# changes nothing, and in both cases the PR must not stay open. So the guard
+# tests the symptom that is common to both and has NO false positive: a PR
+# whose diff against its merge base is empty is never legitimate work.
+#
+# Telling the two apart is disposition, not admission, and it is the
+# groomer's / a human's job. The failure message prints the diagnostic walk
+# that names where the content disappeared so that disposition is one command
+# away, but the pass/fail decision never depends on it.
+#
+# ── Consumers ───────────────────────────────────────────────────────────────
+#
+# Call from a workflow triggered by `pull_request` (and `merge_group` for any
+# repo enforcing merges through a GitHub merge queue), with a top-level job id
+# of `empty-pr-guard`, then add the resulting check context
+# ("empty-pr-guard / empty-pr-guard") to the repo's required status checks.
+#
+# Deliberately UNFILTERED — no `paths:` / `paths-ignore:`. A path-filtered
+# workflow serving a REQUIRED context cannot report on a zero-changed-file PR
+# at all (config#5941), which is the precise failure mode that left these four
+# PRs `BLOCKED` with every posted check green. A guard about empty PRs must
+# above all else be able to run on an empty PR.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: empty-pr-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve base and head SHAs
+        id: refs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Read the event payload from GITHUB_EVENT_PATH rather than passing
+          # toJson(github.event) through env: — the latter exceeds expression
+          # evaluation limits on large pull_request payloads and produces a
+          # startup_failure with zero log output (2026-07-23 incident).
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            BASE=$(jq -r '.pull_request.base.sha' "$GITHUB_EVENT_PATH")
+            HEAD=$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")
+            LABEL="PR #$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+          elif [ "$EVENT_NAME" = 'merge_group' ]; then
+            BASE=$(jq -r '.merge_group.base_sha' "$GITHUB_EVENT_PATH")
+            HEAD=$(jq -r '.merge_group.head_sha' "$GITHUB_EVENT_PATH")
+            LABEL="merge_group entry"
+          else
+            echo "::error::Unsupported event_name='$EVENT_NAME' — empty-pr-guard handles pull_request and merge_group only. Failing closed."
+            exit 1
+          fi
+
+          if [ -z "$BASE" ] || [ "$BASE" = 'null' ] || [ -z "$HEAD" ] || [ "$HEAD" = 'null' ]; then
+            echo "::error::Could not resolve base/head SHAs from the $EVENT_NAME payload (base='$BASE' head='$HEAD'). Failing closed — an unresolvable ref cannot be shown to contain work."
+            exit 1
+          fi
+
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+          echo "$LABEL: base=$BASE head=$HEAD"
+
+      - name: Checkout with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The diagnostic walk needs every commit between the merge base and
+          # the head, and `git merge-base` needs both sides' history.
+          fetch-depth: 0
+
+      - name: Fail if the PR changes nothing
+        env:
+          BASE: ${{ steps.refs.outputs.base }}
+          HEAD: ${{ steps.refs.outputs.head }}
+          LABEL: ${{ steps.refs.outputs.label }}
+        run: |
+          set -euo pipefail
+
+          # fetch-depth: 0 normally brings both endpoints, but the base branch
+          # can move between the event and the checkout. Fetch anything missing
+          # by SHA, and fail CLOSED if it still cannot be read — the guard must
+          # never compare the wrong tree and call the result "has content".
+          for sha in "$BASE" "$HEAD"; do
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$sha" 2>/dev/null || true
+            fi
+            if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+              echo "::error::Commit $sha is not present in this checkout and could not be fetched. Failing closed — the guard cannot verify content it cannot read."
+              exit 1
+            fi
+          done
+
+          MERGE_BASE=$(git merge-base "$BASE" "$HEAD")
+          echo "$LABEL: merge_base=$MERGE_BASE"
+
+          # Three-dot semantics: what THIS branch contributes on top of the
+          # merge base, ignoring anything that landed on the base since.
+          CHANGED=$(git diff --name-only "$MERGE_BASE" "$HEAD" | wc -l | tr -d ' ')
+          echo "$LABEL: changed files vs merge base = $CHANGED"
+
+          if [ "$CHANGED" -gt 0 ]; then
+            echo "This PR contributes $CHANGED changed file(s) — check passes."
+            exit 0
+          fi
+
+          # ── Failing. Everything below is DIAGNOSTIC ONLY — it explains where
+          # the content went, and never influences the verdict above.
+          echo ""
+          echo "── Diagnostic: which commit stopped carrying a contribution ──"
+          # Each commit is measured against ITS OWN merge base with the target
+          # branch, never against today's merge base. Comparing an older commit
+          # to the current base measures how far behind it is, not what it
+          # contributes — that reads as "89 files changed" on a branch that in
+          # fact contributes nothing, which is the opposite of the answer.
+          #
+          # The walk follows --first-parent, so a "merge main into branch"
+          # commit keeps it on the branch side. It runs newest-first and stops
+          # at the first commit that still carried a contribution; the commit
+          # after that one is where the content was lost. Bounded at 200 so a
+          # long-lived branch cannot turn the diagnostic into the slow part.
+          LAST_NONEMPTY=""
+          for c in $(git rev-list --first-parent --max-count=200 "$HEAD"); do
+            mb_c=$(git merge-base "$BASE" "$c" 2>/dev/null) || continue
+            if ! git diff --quiet "$mb_c" "$c" 2>/dev/null; then
+              LAST_NONEMPTY="$c"
+              break
+            fi
+          done
+
+          if [ -n "$LAST_NONEMPTY" ]; then
+            echo "Content was still present at $LAST_NONEMPTY:"
+            git log -1 --format='  %h  %an  %ad  %s' --date=short "$LAST_NONEMPTY"
+            CHILD=$(git rev-list --first-parent --reverse "$LAST_NONEMPTY..$HEAD" | head -1)
+            if [ -n "$CHILD" ]; then
+              echo "Content was gone by $CHILD:"
+              git log -1 --format='  %h  %an  %ad  %s' --date=short "$CHILD"
+            fi
+            echo ""
+            echo "  The lost contribution:  git diff $(git merge-base "$BASE" "$LAST_NONEMPTY") $LAST_NONEMPTY"
+          else
+            echo "No commit in the last 200 on this branch ever carried a contribution —"
+            echo "either the branch never had one, or the loss is older than the walk."
+          fi
+
+          echo ""
+          echo "::error::$LABEL changes ZERO files against its merge base ($MERGE_BASE) — it contributes nothing and must not merge. Either (a) the branch's work was destroyed by a conflict resolution that took one side wholesale, in which case re-apply it (see the diagnostic above), or (b) the work already landed on the base by another route, in which case close this PR as superseded. Root cause and disposition rules: alpha-engine-config#5940."
+          exit 1

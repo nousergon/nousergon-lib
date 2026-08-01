@@ -1,0 +1,92 @@
+name: Action pin guard
+
+# Reusable (workflow_call) fleet primitive: every `uses:` in the caller's
+# .github/workflows/ must be pinned to a 40-hex SHA that resolves to a COMMIT
+# in the named repository.
+#
+# A ref naming a real object of the wrong type — the blob SHA of the target
+# file, or an annotated tag object — is not reported as an error anywhere.
+# The workflow fails to resolve it and dies as startup_failure: zero jobs,
+# zero logs, and no annotation naming the line. crucible-predictor PR #433
+# (2026-07-31) carried six of them at once and killed four required checks;
+# the SHAs survived review because each one WAS a real object in the right
+# repo. See scripts/check_action_pins.py for the full diagnosis.
+#
+# This is the `uses:`-resolvability half of the class that
+# alpha-engine-config's check_workflow_shape.py covers for malformed YAML.
+# That script says as much in its own docstring: "Deliberately structural
+# only. It does not validate action versions."
+#
+# Deliberately NOT a required check. Its verdict depends on api.github.com
+# being reachable, so promoting it to blocking makes every merge in the fleet
+# contingent on a third-party read (config-I5309 records what casually adding
+# required checks costs). It runs advisory on every PR touching workflows.
+#
+# Consumers: add one workflow file, pinned per the fleet convention —
+#
+#   name: Action pin guard
+#   on:
+#     pull_request:
+#       branches: [main]
+#       paths: [".github/workflows/**"]
+#     push:
+#       branches: [main]
+#       paths: [".github/workflows/**"]
+#   permissions:
+#     contents: read
+#   jobs:
+#     guard:
+#       uses: nousergon/nousergon-lib/.github/workflows/action-pin-guard.yml@<commit-sha>
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: action pin guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # Under workflow_call the checkout above gets the CALLER's repo
+      # (github.repository inherits from the caller), which is what we want to
+      # scan. The script lives here, so fetch it separately into a subdirectory
+      # and leave CWD at the caller's checkout.
+      #
+      # Deliberately unpinned, matching merge-group-required-check-guard.yml:
+      # the consumer pins the SKELETON, and if the script were pinned with it,
+      # every fix to the script would wait on ten pin bumps. The one mechanism
+      # that cannot be pinned away lives in the file the consumer cannot pin.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: nousergon/nousergon-lib
+          path: _nousergon-lib-script
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - name: Every `uses:` resolves to a commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 _nousergon-lib-script/scripts/check_action_pins.py

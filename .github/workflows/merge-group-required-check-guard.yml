@@ -68,6 +68,13 @@ jobs:
       - name: Install deps (PyYAML only — gh CLI is pre-installed on ubuntu-latest)
         run: pip install pyyaml
 
+      # No PYTHONPATH here on purpose. The script resolves its own `src/`
+      # sibling (see the bootstrap block at the top of it), because setting the
+      # path in THIS file only helps consumers who bump their pin — and the
+      # script always comes from lib's default branch while the skeleton is
+      # pinned per consumer. That skew is what broke every repo's guard within
+      # minutes of the import landing. One mechanism, in the file that cannot
+      # be pinned away from it.
       - name: Validate merge_group coverage of required checks
         env:
           GH_TOKEN: ${{ github.token }}
