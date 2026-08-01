@@ -170,12 +170,28 @@ class UpstreamError(Exception):
     """No usable upstream response after salvage + retry - answer 502."""
 
 
+def _opaque_log_line(message: str) -> str:
+    """Build a log line that contains zero credential content.
+
+    Reconstructs from token *lengths* only (no ``re.sub`` callback — CodeQL
+    taint analysis treats ``re.sub`` as preserving secret taint into
+    ``f.write`` / ``stderr``, alert #52). Short tokens (<8 chars) and
+    whitespace pass through; everything else becomes ``***[len=N]``.
+    """
+    parts: list[str] = []
+    for token in re.findall(r"\S+|\s+", message):
+        if not token or token.isspace() or len(token) < 8:
+            parts.append(token)
+        else:
+            parts.append("***[len=%d]" % len(token))
+    return "%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), "".join(parts))
+
+
 def log(message):
     # Mask credential-length tokens so secrets never reach the log file or
     # stderr in clear text — same self-masking used for forensic excerpts.
-    # Timestamp is added AFTER masking so it is never itself masked.
-    sanitized = mask_secrets(message)
-    line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {sanitized}\n"
+    # Timestamp is baked inside _opaque_log_line after length-only redaction.
+    line = _opaque_log_line(message)
     log_path = ProxyHandler.log_path
     if log_path is not None:
         try:
@@ -187,9 +203,7 @@ def log(message):
 
 
 def die(message):
-    sanitized = mask_secrets(message)
-    sys.stderr.write(
-        f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} FATAL: {sanitized}\n")
+    sys.stderr.write("FATAL: " + _opaque_log_line(message))
     sys.exit(1)
 
 
