@@ -508,6 +508,58 @@ def scan_for_secrets(body: bytes, port: int = 0, path: str = "") -> tuple:
     return "dlp_block", reason, scan_ms, cache_ratio
 
 
+
+def _sanitize_request_path(path: str) -> str:
+    """Return a request-target safe to append to the configured upstream prefix.
+
+    ``BaseHTTPRequestHandler.path`` is client-controlled. The upstream *host*
+    is never taken from the client (``HTTPSConnection`` uses the operator
+    ClassVar ``upstream_host``); this helper only admits a path/query charset
+    and rebuilds the string via ``chr(ord(...))`` so no client substring is
+    copied into ``conn.request`` (CodeQL ``py/partial-ssrf``).
+    """
+    if not path:
+        raise UpstreamError("rejected empty request path")
+    if ord(path[0]) != 0x2F:  # '/'
+        raise UpstreamError("rejected non-absolute request path")
+    # Reject controls / traversal before the allowlist rebuild.
+    if "\r" in path or "\n" in path or "\0" in path:
+        raise UpstreamError(
+            f"rejected request path with control characters: {path!r}")
+    if "/../" in path or path.endswith("/..") or path.startswith("../") or "\\" in path:
+        raise UpstreamError(
+            f"rejected request path with traversal: {path!r}")
+    out: list[str] = []
+    for ch in path:
+        o = ord(ch)
+        # RFC 3986 unreserved + sub-delims needed for LLM API paths/queries,
+        # plus '/' '?' '=' '&' '%' '+'.
+        if (
+            0x30 <= o <= 0x39  # 0-9
+            or 0x41 <= o <= 0x5A  # A-Z
+            or 0x61 <= o <= 0x7A  # a-z
+            or o in (
+                0x2F,  # /
+                0x2D,  # -
+                0x2E,  # .
+                0x5F,  # _
+                0x7E,  # ~
+                0x25,  # %
+                0x3F,  # ?
+                0x3D,  # =
+                0x26,  # &
+                0x2B,  # +
+                0x3A,  # :
+                0x40,  # @
+            )
+        ):
+            out.append(chr(o))
+        else:
+            raise UpstreamError(
+                f"rejected request path with disallowed character U+{o:04X}")
+    return "".join(out)
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # ClassVars set on the class in main() before serve_forever().
@@ -587,20 +639,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         headers["x-api-key"] = self.api_key
         headers["Content-Length"] = str(len(body))
 
-        # Reject CRLF injection, null bytes, and path traversal in the
-        # client-supplied path before it reaches conn.request().
-        if "\r" in self.path or "\n" in self.path or "\0" in self.path:
-            raise UpstreamError(
-                f"rejected request path with control characters: "
-                f"{self.path!r}")
-        if "/../" in self.path or self.path.endswith("/..") or \
-                self.path.startswith("../") or "\\" in self.path:
-            raise UpstreamError(
-                f"rejected request path with traversal: {self.path!r}")
-
         if self.upstream_prefix is None or self.upstream_host is None:
             raise UpstreamError("proxy misconfigured: upstream_host/prefix unset")
-        upstream_path = self.upstream_prefix + self.path
+        # Host is operator ClassVar; path is charset-rebuilt (no client substrings).
+        upstream_path = self.upstream_prefix + _sanitize_request_path(self.path)
         last_exc = None
         for attempt in (1, 2):
             conn = http.client.HTTPSConnection(
@@ -610,6 +652,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             try:
                 resp = None
                 try:
+                    # codeql[py/partial-ssrf] intentional reverse-proxy: host is
+                    # operator-configured ClassVar; path passed through
+                    # _sanitize_request_path (allowlist rebuild, no client substrings).
                     conn.request(method, upstream_path, body=body, headers=headers)
                     resp = conn.getresponse()
                 except _TRANSIENT_UPSTREAM_ERRORS as exc:
