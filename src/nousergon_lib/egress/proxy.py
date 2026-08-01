@@ -183,8 +183,8 @@ def _opaque_log_line(message: str) -> str:
         if not token or token.isspace() or len(token) < 8:
             parts.append(token)
         else:
-            parts.append("***[len=%d]" % len(token))
-    return "%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), "".join(parts))
+            parts.append(f"***[len={len(token)}]")
+    return f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {''.join(parts)}\n"
 
 
 def log(message):
