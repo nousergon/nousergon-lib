@@ -91,8 +91,13 @@ def _resolve_dirs() -> tuple[str, str]:
         _pkg_cfg = _rf("nousergon_lib.egress") / "gitleaks-egress.toml"
         if _pkg_cfg.is_file():
             config_dir = str(_rf("nousergon_lib.egress"))
-    except Exception:
-        pass
+    except (ModuleNotFoundError, TypeError, OSError, AttributeError):
+        # (a) package resources unavailable (editable install / missing
+        #     package_data / Traversable without is_file) — not a hard
+        #     failure: CONFIG_DIR falls back to __file__ dirname below.
+        # (c) recording surface: this fallback path; no separate log —
+        #     proxy start still fails loud later if gitleaks config missing.
+        config_dir = None
     if config_dir is None:
         config_dir = os.path.dirname(os.path.abspath(__file__))
 
