@@ -173,17 +173,20 @@ class UpstreamError(Exception):
 def _opaque_log_line(message: str) -> str:
     """Build a log line that contains zero credential content.
 
-    Reconstructs from token *lengths* only (no ``re.sub`` callback — CodeQL
-    taint analysis treats ``re.sub`` as preserving secret taint into
-    ``f.write`` / ``stderr``, alert #52). Short tokens (<8 chars) and
-    whitespace pass through; everything else becomes ``***[len=N]``.
+    Never copies any substring of ``message`` into the result — CodeQL
+    taint analysis follows even short tokens and ``re.sub`` results into
+    ``f.write`` / ``stderr`` (alerts #52–#55). Whitespace becomes spaces
+    of the same length; every non-space token becomes ``***[len=N]``.
     """
     parts: list[str] = []
     for token in re.findall(r"\S+|\s+", message):
-        if not token or token.isspace() or len(token) < 8:
-            parts.append(token)
+        n = len(token)
+        if not token:
+            continue
+        if token.isspace():
+            parts.append(" " * n)
         else:
-            parts.append(f"***[len={len(token)}]")
+            parts.append(f"***[len={n}]")
     return f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {''.join(parts)}\n"
 
 
