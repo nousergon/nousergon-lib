@@ -61,6 +61,7 @@ import threading
 import time
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar, Optional
 
 __version__ = "2.1.0"
 
@@ -175,11 +176,13 @@ def log(message):
     # Timestamp is added AFTER masking so it is never itself masked.
     sanitized = mask_secrets(message)
     line = f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {sanitized}\n"
-    try:
-        with open(ProxyHandler.log_path, "a") as f:
-            f.write(line)
-    except OSError:
-        pass
+    log_path = ProxyHandler.log_path
+    if log_path is not None:
+        try:
+            with open(log_path, "a") as f:
+                f.write(line)
+        except OSError:
+            pass
     sys.stderr.write(line)
 
 
@@ -490,13 +493,14 @@ def scan_for_secrets(body: bytes, port: int = 0, path: str = "") -> tuple:
 
 class ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    api_key = None  # set on the class before serve_forever()
-    upstream_host = None  # set on the class before serve_forever()
-    upstream_prefix = None  # set on the class before serve_forever()
-    upstream_timeout = 120  # set on the class before serve_forever()
-    log_path = None  # set on the class before serve_forever()
-    port = 0  # set on the class before serve_forever()
-    started_at = 0.0  # set on the class before serve_forever()
+    # ClassVars set on the class in main() before serve_forever().
+    api_key: ClassVar[Optional[str]] = None
+    upstream_host: ClassVar[Optional[str]] = None
+    upstream_prefix: ClassVar[Optional[str]] = None
+    upstream_timeout: ClassVar[int] = 120
+    log_path: ClassVar[Optional[str]] = None
+    port: ClassVar[int] = 0
+    started_at: ClassVar[float] = 0.0
 
     counters = {
         "requests": 0,
@@ -577,6 +581,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             raise UpstreamError(
                 f"rejected request path with traversal: {self.path!r}")
 
+        if self.upstream_prefix is None or self.upstream_host is None:
+            raise UpstreamError("proxy misconfigured: upstream_host/prefix unset")
         upstream_path = self.upstream_prefix + self.path
         last_exc = None
         for attempt in (1, 2):
