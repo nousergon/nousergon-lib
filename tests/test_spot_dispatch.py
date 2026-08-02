@@ -369,6 +369,124 @@ class TestRunningInstanceIds:
         assert len(kwargs["Filters"]) == 2
 
 
+class TestTerminationImminent:
+    """The reclaim-aware leg of the concurrent guard (groom relaunch race,
+    2026-08-02). A spot-reclaimed instance is observably `running` to
+    describe-instances for ~2 min after the interruption notice — the guard
+    must see past that via the spot request's Status.Code."""
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_terminated_state_is_imminent(self, mock_boto3):
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": [{"Instances": [
+            {"InstanceId": "i-dead", "State": {"Name": "terminated"}},
+        ]}]}
+
+        assert spot_dispatch.termination_imminent(["i-dead"], region=REGION) == {"i-dead"}
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_shutting_down_state_is_imminent(self, mock_boto3):
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": [{"Instances": [
+            {"InstanceId": "i-dying", "State": {"Name": "shutting-down"}},
+        ]}]}
+
+        assert spot_dispatch.termination_imminent(["i-dying"], region=REGION) == {"i-dying"}
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_healthy_running_with_no_spot_request_is_not_imminent(self, mock_boto3):
+        """A genuinely-live on-demand or spot box with no reclaim notice is the
+        real duplicate the guard exists to suppress."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": [{"Instances": [
+            {"InstanceId": "i-healthy", "State": {"Name": "running"}},
+        ]}]}
+        # No SpotInstanceRequestId on the instance -> no spot-request lookup.
+        mock_ec2.get_paginator.return_value.paginate.return_value = []
+
+        assert spot_dispatch.termination_imminent(["i-healthy"], region=REGION) == set()
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_running_instance_with_marked_spot_request_is_imminent(self, mock_boto3):
+        """The race case: instance still `running`, but the spot request already
+        carries `marked-for-termination` from the 2-min notice window. This is
+        the exact signal State alone cannot see (2026-08-02 low-only reclaim)."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": [{"Instances": [
+            {"InstanceId": "i-reclaimed", "State": {"Name": "running"},
+             "SpotInstanceRequestId": "sir-abc"},
+        ]}]}
+        mock_ec2.get_paginator.return_value.paginate.return_value = [
+            {"SpotInstanceRequests": [
+                {"SpotInstanceRequestId": "sir-abc", "State": "active",
+                 "Status": {"Code": "marked-for-termination"}},
+            ]}]
+
+        assert spot_dispatch.termination_imminent(["i-reclaimed"], region=REGION) == {"i-reclaimed"}
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_running_instance_with_closed_spot_request_is_imminent(self, mock_boto3):
+        """A closed/cancelled spot request means the instance is gone or going
+        regardless of the specific Status.Code (the live 2026-08-02 reclaim read
+        State=closed, Status=instance-terminated-no-capacity)."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": [{"Instances": [
+            {"InstanceId": "i-closed", "State": {"Name": "running"},
+             "SpotInstanceRequestId": "sir-closed"},
+        ]}]}
+        mock_ec2.get_paginator.return_value.paginate.return_value = [
+            {"SpotInstanceRequests": [
+                {"SpotInstanceRequestId": "sir-closed", "State": "closed",
+                 "Status": {"Code": "instance-terminated-no-capacity"}},
+            ]}]
+
+        assert spot_dispatch.termination_imminent(["i-closed"], region=REGION) == {"i-closed"}
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_mixed_set_returns_only_the_dying_subset(self, mock_boto3):
+        """One healthy, one reclaimed, one already terminated — only the latter
+        two are imminent, so the caller relaunches past only those."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.return_value = {"Reservations": [{"Instances": [
+            {"InstanceId": "i-healthy", "State": {"Name": "running"},
+             "SpotInstanceRequestId": "sir-healthy"},
+            {"InstanceId": "i-reclaimed", "State": {"Name": "running"},
+             "SpotInstanceRequestId": "sir-reclaimed"},
+            {"InstanceId": "i-dead", "State": {"Name": "terminated"}},
+        ]}]}
+        mock_ec2.get_paginator.return_value.paginate.return_value = [
+            {"SpotInstanceRequests": [
+                {"SpotInstanceRequestId": "sir-healthy", "State": "active",
+                 "Status": {"Code": "fulfilled"}},
+                {"SpotInstanceRequestId": "sir-reclaimed", "State": "active",
+                 "Status": {"Code": "marked-for-stop"}},
+            ]}]
+
+        result = spot_dispatch.termination_imminent(
+            ["i-healthy", "i-reclaimed", "i-dead"], region=REGION)
+        assert result == {"i-reclaimed", "i-dead"}
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_probe_failure_fails_safe_to_empty_set(self, mock_boto3):
+        """A broken EC2 API must never risk a duplicate launch — degrade to the
+        original guard suppression (empty set = nothing imminent). The failure
+        is logged, not swallowed silently."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.describe_instances.side_effect = RuntimeError("EC2 API hiccup")
+
+        assert spot_dispatch.termination_imminent(["i-maybe"], region=REGION) == set()
+
+    def test_empty_input_returns_empty_set_without_api_call(self):
+        assert spot_dispatch.termination_imminent([], region=REGION) == set()
+
+
 class TestTerminateOnFailure:
     @mock.patch("nousergon_lib.spot_dispatch.boto3")
     def test_terminates_instance(self, mock_boto3):
