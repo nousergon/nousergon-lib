@@ -298,6 +298,120 @@ TERMINATION_REASON_TAG = "termination-reason"
 TERMINATION_SOURCE_TAG = "termination-source"
 
 
+# EC2 instance states that mean the box is already on its way out — a relaunch
+# past the concurrent guard is safe for any of these, because the "live" box the
+# guard found is the dying prior attempt, not a competing workload. AWS retains
+# a spot-reclaimed instance in `running` for ~2 min after the interruption
+# NOTICE fires (the on-box IMDS watcher catches it there); `shutting-down`/
+# `terminated`/`stopping` follow. The reconciler's own comment
+# (scheduled-groom-dispatcher) acknowledges the same ~1h describe-instances
+# retention of terminated instances.
+_TERMINAL_OR_STOPPING = frozenset({
+    "shutting-down", "terminated", "stopping", "stopped",
+})
+
+# Spot-instance-request Status.Code values that precede the instance state
+# flipping to shutting-down — the 2-minute interruption-notice window where the
+# box is observably `running` to describe-instances but already marked for
+# reclamation. `describe-spot-instance-requests` surfaces these BEFORE the
+# state change (verified: AWS docs + the live 2026-08-02 reclaim where
+# sir-me6zkjnk read `instance-terminated-no-capacity` while the instance was
+# still terminating). This is the discriminator a tag/state-only guard misses.
+_SPOT_RECLAIM_CODES = frozenset({
+    "marked-for-termination", "marked-for-stop",
+    "instance-stopped", "instance-terminated",
+    "instance-terminated-no-capacity",
+})
+
+
+def termination_imminent(instance_ids: list[str], *, region: str) -> set[str]:
+    """The subset of ``instance_ids`` already terminating or spot-reclaimed.
+
+    A relaunch past the concurrent-tier guard (config#1979) is safe for these:
+    they are the dying prior attempt, not a competing live box. Used by the
+    groom dispatcher's relaunch ladder — the on-box spot watcher fires
+    ``send_task_failure(SpotInterrupted)`` on the IMDS notice ~2 min before AWS
+    terminates the box, so the SF's relaunch runs while the prior instance is
+    still ``running`` and the concurrent guard would otherwise suppress the
+    replacement (measured 2026-08-02 20:00 UTC: low-only reclaimed, relaunch
+    skipped as a "duplicate", lane died unworked).
+
+    Two signals, both consulted:
+      1. EC2 ``State.Name`` in shutting-down/terminated/stopping/stopped.
+      2. For instances still ``running`` but backed by a spot request, the
+         spot request's ``Status.Code`` — ``marked-for-termination`` /
+         ``instance-terminated-no-capacity`` etc. fire during the notice
+         window, before the state flips. This is the only signal that catches
+         the race; State alone sees the box as healthy until the 2 min elapse.
+
+    Fail-safe: a probe error returns an EMPTY set (treat as not-imminent), so
+    the caller degrades to the original guard behavior (suppress the launch)
+    rather than risk a duplicate. The failure is logged loudly — silence here
+    would re-introduce the race under the exact API hiccup that matters.
+    """
+    if not instance_ids:
+        return set()
+    try:
+        ec2 = boto3.client("ec2", region_name=region)
+        resp = ec2.describe_instances(InstanceIds=list(instance_ids))
+        ids_by_state: dict[str, str] = {}  # instance_id -> state
+        spot_request_ids: list[str] = []
+        for reservation in resp.get("Reservations", []):
+            for inst in reservation.get("Instances", []):
+                iid = inst.get("InstanceId", "")
+                state = inst.get("State", {}).get("Name", "")
+                ids_by_state[iid] = state
+                sir = inst.get("SpotInstanceRequestId")
+                if sir:
+                    spot_request_ids.append(sir)
+        dying: set[str] = {
+            iid for iid, state in ids_by_state.items()
+            if state in _TERMINAL_OR_STOPPING
+        }
+        # For instances still pending/running, consult the spot request — the
+        # reclaim notice lands here before the state changes.
+        live_ids = {iid for iid, state in ids_by_state.items()
+                    if state in ("pending", "running")}
+        if spot_request_ids:
+            sir_to_state: dict[str, str] = {}
+            paginator = ec2.get_paginator("describe_spot_instance_requests")
+            for page in paginator.paginate(
+                    SpotInstanceRequestIds=spot_request_ids):
+                for sir in page.get("SpotInstanceRequests", []):
+                    code = (sir.get("Status") or {}).get("Code", "")
+                    sir_to_state[sir.get("SpotInstanceRequestId", "")] = code
+                    # A closed/cancelled request means the instance is gone or
+                    # going regardless of the specific code.
+                    if sir.get("State") in ("closed", "cancelled", "failed"):
+                        # Map back to the instance id below.
+                        sir_to_state[sir.get("SpotInstanceRequestId", "")] = "closed"
+            if sir_to_state:
+                # Re-walk the reservations to map spot-request-id -> instance-id
+                # (the request does not carry the instance id on every response
+                # shape, but the instance carries its request id).
+                inst_to_sir: dict[str, str] = {}
+                for reservation in resp.get("Reservations", []):
+                    for inst in reservation.get("Instances", []):
+                        iid = inst.get("InstanceId", "")
+                        sir = inst.get("SpotInstanceRequestId")
+                        if iid and sir:
+                            inst_to_sir[iid] = sir
+                for iid, sir in inst_to_sir.items():
+                    if iid not in live_ids:
+                        continue
+                    code = sir_to_state.get(sir, "")
+                    if code in _SPOT_RECLAIM_CODES or code == "closed":
+                        dying.add(iid)
+        return dying
+    except Exception as exc:  # noqa: BLE001 - fail-safe: empty set, never a duplicate
+        logger.error(
+            "termination-imminent probe failed for %s: %s: %s — returning empty "
+            "set (caller degrades to the original concurrent-guard suppression)",
+            instance_ids, type(exc).__name__, exc,
+        )
+        return set()
+
+
 def terminate_on_failure(
     instance_id: str, *, region: str, label: str = "spot", reason: str = ""
 ) -> None:
