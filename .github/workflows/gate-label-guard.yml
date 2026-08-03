@@ -32,6 +32,15 @@ name: Gate Label Guard
 # check errors rather than silently passing) per the fleet's no-silent-
 # fails default.
 #
+# DRAFT DEFERRAL (alpha-engine-config-I6282, 2026-08-03): on a `pull_request`
+# event whose PR is a DRAFT, a gate:* label is reported as a notice and the
+# check PASSES. This is a merge guard and a draft cannot merge, so failing it
+# there protected nothing while costing the whole signal — measured that day,
+# 29 of the fleet's 50 red open PRs failed this check and 12 failed ONLY this
+# check, all of them groom-authored drafts the groomer had itself gated. The
+# PR643 protection is unchanged: `ready_for_review` re-triggers the check, and
+# a merge_group entry is never a draft.
+#
 # Consumers: call from a workflow triggered by both
 #   pull_request: {types: [opened, reopened, labeled, unlabeled,
 #                           ready_for_review, synchronize]}
@@ -95,6 +104,8 @@ jobs:
           fi
 
       - name: Fail if any gate:* label is present
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
@@ -108,9 +119,34 @@ jobs:
           echo "Labels under check:"
           cat /tmp/pr_labels.txt || echo "(none)"
 
+          # This guard is a MERGE guard. A draft cannot merge, so failing it on
+          # a draft protects nothing and costs the signal: measured 2026-08-03,
+          # 29 of the fleet's 50 red open PRs failed this check and 12 failed
+          # ONLY this check, every one of them a groom-authored draft the
+          # groomer had itself gated. Red-by-construction is indistinguishable
+          # from a real failure at the moment someone comes to promote one, and
+          # it is why "the groomer produces no green PRs" reads as true.
+          #
+          # Enforcement is unchanged where it matters. `ready_for_review` is in
+          # the consumer's trigger list, so the check re-runs the instant a
+          # draft is flipped — which is precisely the nousergon-data-PR643
+          # failure mode this exists for (config#1446 / EPIC config#1464): a
+          # gated DRAFT flipped ready by ne-groomer[bot] and merged. And a
+          # merge_group entry is never a draft, so the queue path is untouched.
+          IS_DRAFT=false
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            IS_DRAFT=$(jq -r '.pull_request.draft // false' "$GITHUB_EVENT_PATH")
+          fi
+
           if grep -q '^gate:' /tmp/pr_labels.txt; then
+            GATES=$(grep '^gate:' /tmp/pr_labels.txt | paste -sd, -)
+            if [ "$IS_DRAFT" = 'true' ]; then
+              echo ""
+              echo "::notice::DRAFT carrying gate:* ($GATES). A draft cannot merge, so this guard defers — it re-runs and FAILS on ready_for_review while any gate:* label is still attached."
+              exit 0
+            fi
             echo ""
-            echo "::error::This PR carries a gate:* label ($(grep '^gate:' /tmp/pr_labels.txt | paste -sd, -)) — the gate:* taxonomy means this PR is NOT verified ready to merge. Remove the gate:* label only after verifying the blocker is actually resolved."
+            echo "::error::This PR carries a gate:* label ($GATES) — the gate:* taxonomy means this PR is NOT verified ready to merge. Remove the gate:* label only after verifying the blocker is actually resolved."
             exit 1
           fi
 
