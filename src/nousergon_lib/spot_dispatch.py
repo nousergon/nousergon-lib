@@ -288,12 +288,59 @@ def running_instance_ids(
         ) from exc
 
 
-def terminate_on_failure(instance_id: str, *, region: str, label: str = "spot") -> None:
+#: EC2 caps a tag VALUE at 256 characters. Truncate rather than let create_tags
+#: reject the whole call and lose the reason entirely.
+_TAG_VALUE_MAX = 256
+
+#: Tag keys carrying why a dispatcher tore a box down. Read by lane reconcilers
+#: and any other consumer that would otherwise only see the EC2 instance state.
+TERMINATION_REASON_TAG = "termination-reason"
+TERMINATION_SOURCE_TAG = "termination-source"
+
+
+def terminate_on_failure(
+    instance_id: str, *, region: str, label: str = "spot", reason: str = ""
+) -> None:
     """Best-effort terminate of a just-launched box whose post-launch steps
     failed, to avoid orphaning it (no watchdog/trap is armed yet — that only
     happens inside the box's own bootstrap script). Never masks the original
     error (logged, not raised) — the caller still surfaces/raises/returns
-    the original failure."""
+    the original failure.
+
+    ``reason`` (alpha-engine-config-I6199) is recorded on the instance as the
+    ``termination-reason`` tag BEFORE the terminate call, so a downstream
+    consumer can distinguish "the dispatcher killed this box, here is why" from
+    "the spot market reclaimed it". Every fleet dispatcher tears boxes down
+    through this one function, and every one of them used to discard the
+    exception text — leaving reconcilers to infer a cause from EC2 state alone.
+    On 2026-08-03 that produced 11 pages reading ``instance is shutting-down``
+    for boxes the dispatcher itself had terminated after
+    ``SSM agent not Online after 180s``, and two groom cycles were spent
+    diagnosing a groom defect that did not exist.
+
+    Tagging is best-effort and strictly subordinate: a create_tags failure must
+    never prevent the terminate, and the terminate must never be delayed by it.
+    """
+    if reason:
+        try:
+            boto3.client("ec2", region_name=region).create_tags(
+                Resources=[instance_id],
+                Tags=[
+                    {"Key": TERMINATION_REASON_TAG, "Value": reason[:_TAG_VALUE_MAX]},
+                    {"Key": TERMINATION_SOURCE_TAG, "Value": "dispatcher"},
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Swallowed deliberately: (a) the failure mode is losing the
+            # termination REASON, an observability enrichment; (b) the primary
+            # deliverable — not orphaning the box — is the terminate below and
+            # survives intact; (c) recorded here at warning level, on the same
+            # dispatcher log stream the reason itself would have appeared on.
+            logger.warning(
+                "could not tag %s box %s with its termination reason (%s) — "
+                "the page for this box will fall back to EC2 instance state",
+                label, instance_id, exc,
+            )
     try:
         boto3.client("ec2", region_name=region).terminate_instances(InstanceIds=[instance_id])
         logger.warning(
