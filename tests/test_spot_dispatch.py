@@ -387,3 +387,65 @@ class TestTerminateOnFailure:
 
         # Must not raise — best-effort cleanup, original caller error takes precedence.
         spot_dispatch.terminate_on_failure("i-abc123", region=REGION)
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_tags_the_termination_reason_before_terminating(self, mock_boto3):
+        """alpha-engine-config-I6199 — the reason must survive the terminate.
+
+        Order matters: create_tags on an already-terminating instance is not
+        reliable, so the tag has to be written first.
+        """
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+
+        spot_dispatch.terminate_on_failure(
+            "i-abc123", region=REGION, label="groom",
+            reason="RuntimeError: SSM agent not Online after 180s for i-abc123",
+        )
+
+        tags = {t["Key"]: t["Value"]
+                for t in mock_ec2.create_tags.call_args.kwargs["Tags"]}
+        assert tags[spot_dispatch.TERMINATION_REASON_TAG] == (
+            "RuntimeError: SSM agent not Online after 180s for i-abc123"
+        )
+        assert tags[spot_dispatch.TERMINATION_SOURCE_TAG] == "dispatcher"
+        assert mock_ec2.create_tags.call_args.kwargs["Resources"] == ["i-abc123"]
+        assert [c[0] for c in mock_ec2.method_calls] == ["create_tags", "terminate_instances"]
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_reason_is_truncated_to_the_ec2_tag_value_limit(self, mock_boto3):
+        """A long traceback string must not make create_tags reject the call."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+
+        spot_dispatch.terminate_on_failure(
+            "i-abc123", region=REGION, reason="x" * 900
+        )
+
+        tags = {t["Key"]: t["Value"]
+                for t in mock_ec2.create_tags.call_args.kwargs["Tags"]}
+        assert len(tags[spot_dispatch.TERMINATION_REASON_TAG]) == 256
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_tagging_failure_never_prevents_the_terminate(self, mock_boto3):
+        """Tagging is strictly subordinate to not orphaning the box."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+        mock_ec2.create_tags.side_effect = RuntimeError("tag denied")
+
+        spot_dispatch.terminate_on_failure(
+            "i-abc123", region=REGION, reason="RuntimeError: boom"
+        )
+
+        mock_ec2.terminate_instances.assert_called_once_with(InstanceIds=["i-abc123"])
+
+    @mock.patch("nousergon_lib.spot_dispatch.boto3")
+    def test_no_tag_call_when_no_reason_given(self, mock_boto3):
+        """Existing callers that pass no reason must behave exactly as before."""
+        mock_ec2 = mock.MagicMock()
+        mock_boto3.client.return_value = mock_ec2
+
+        spot_dispatch.terminate_on_failure("i-abc123", region=REGION)
+
+        mock_ec2.create_tags.assert_not_called()
+        mock_ec2.terminate_instances.assert_called_once_with(InstanceIds=["i-abc123"])
