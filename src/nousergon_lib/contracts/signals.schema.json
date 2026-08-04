@@ -56,7 +56,7 @@
     "universe": {
       "type": "array",
       "items": { "$ref": "#/$defs/signal_entry" },
-      "description": "Full tracked population with per-ticker signals; executor + predictor + backtester read this"
+      "description": "SIZING ENVELOPE, NOT A SCOPE (alpha-engine-config#5809): one row per name on the whole scanner board (~900 names, all sectors), written so the executor can size and exit anything it might hold. It is board-width by construction and carries no cardinality ceiling here — do not read it as a decision set / ticker scope. The scoped decision set (a named cut such as scanner_candidates@60 or attractiveness_top_20@25, plus held positions) lives in universe_membership/{date}/membership.json and is resolved via nousergon_lib.decision_set. The one legitimate reader of this field as board-width is the executor's sizing/exit path, which is exactly what the envelope is for; every other per-ticker consumer should resolve its ticker list from universe_membership instead (rag-corpus-policy.md §2.1)."
     },
     "buy_candidates": {
       "type": "array",

@@ -139,6 +139,22 @@ if doc is None:
 
 Single source of truth, consolidating ≥4 independent reimplementations of this scan (`crucible-evaluator` `get_json_windowed`, `crucible-executor` `read_signals_with_fallback` + `eod_reconcile`, `crucible-predictor`/`backtester` signal-fallback). `resolve_windowed_artifact` is the generic HEAD-only resolver (returns a `ResolvedArtifact` with the freshest key) and supports a `latest`-pointer-first fast path. Fail-loud: a missing key keeps the scan walking back; a corrupt half-written JSON candidate is skipped to the last good one; any other S3 error (auth / throttle / wrong-bucket) is raised. Mirror of the same "freshest within a window, never the exact key" rule the `artifact_freshness` monitor enforces on the alerting side.
 
+### `decision_set` — the fleet's shared decision-set resolver
+
+`signals/{date}/signals.json::universe` is a **sizing envelope** (one row per name on the whole ~900-name scanner board, so the executor can size and exit anything it might hold) — it is not a scope, but it is the easiest ticker list in the system to reach, so per-ticker stages kept reading it as if it were one (alpha-engine-config#5809). The correct artifact is `universe_membership/{date}/membership.json`, published by the scanner with named cuts (`scanner_candidates`@60, `attractiveness_top_20`@25, ...). This module resolves any named cut by an O(1) `latest.json` pointer read, unions in held positions (a position needs evidence whether or not it ranks this cycle), and drops non-equity identifiers (e.g. Metron's Treasury CUSIPs) with a strict ticker regex:
+
+```python
+from nousergon_lib.decision_set import load_decision_set, DecisionSetUnavailable, CUT_SCANNER_CANDIDATES
+
+try:
+    result = load_decision_set(cut=CUT_SCANNER_CANDIDATES, bucket="alpha-engine-research")
+except DecisionSetUnavailable:
+    ...  # raised, never widened to signals.json::universe — see module docstring
+tickers = result["tickers"]
+```
+
+Lifted from `nousergon-data/rag/pipelines/_rag_scope.py` (config-I5700, the first of two independent implementations — the second is `alpha-engine-predictor/inference/stages/load_universe.py`) and generalized from one hardcoded cut to any named cut. **Fail-loud, no fallback:** `DecisionSetUnavailable` is raised on a missing membership artifact or an empty/absent named cut — there is deliberately no fallback to `signals.json::universe`, since that fallback is the defect this module exists to remove.
+
 ### `decision_capture` — agent decision audit logger
 
 Captures every agent decision as a structured artifact: prompt metadata (id + version), input snapshot, agent output, and cost. Each decision becomes replayable, auditable, and attributable to a specific prompt revision. Backbone of the Phase 2 measurement substrate.
