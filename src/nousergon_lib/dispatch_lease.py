@@ -51,7 +51,6 @@ import logging
 import os
 import socket
 import time
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +71,7 @@ class LeaseHolder:
         return json.dumps(dataclasses.asdict(self), sort_keys=True)
 
     @classmethod
-    def from_json(cls, payload: str) -> "LeaseHolder":
+    def from_json(cls, payload: str) -> LeaseHolder:
         d = json.loads(payload)
         return cls(
             owner_id=str(d["owner_id"]),
@@ -116,7 +115,7 @@ def _build_holder(owner_id: str, ttl_seconds: int) -> LeaseHolder:
     )
 
 
-def _read_existing_holder(s3_client, bucket: str, key: str) -> Optional[LeaseHolder]:
+def _read_existing_holder(s3_client, bucket: str, key: str) -> LeaseHolder | None:
     """Read + parse the current lease body, or None if absent / malformed.
 
     A malformed body can't be interpreted as "held by someone we know

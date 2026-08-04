@@ -18,7 +18,6 @@ about the module under test.
 
 from __future__ import annotations
 
-import pytest
 from botocore.exceptions import ClientError
 
 from nousergon_lib import dispatch_lease
