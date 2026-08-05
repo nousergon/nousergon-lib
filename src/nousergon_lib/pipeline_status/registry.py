@@ -389,6 +389,25 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "per-run rendered artifact — a preventive guard, fail-open on "
         "probe failure.",
     ),
+    # I4494: FOURTH pre-spend sibling gate, composed after the evaluator-
+    # director deploy-drift gate and immediately before CheckMutexRole (the
+    # last pre-spend probe of all). Runs the alpha-engine-weekly-preflight
+    # Lambda's sf_preflight checks (IAM reachability, tool contracts,
+    # definition input coherence, Lambda memory headroom) against live AWS
+    # state before the pipeline spends on any spot or mutex acquisition.
+    # Fail-hard (fail-closed) on a failing or malformed check — the opposite
+    # posture to the advisory LibPinDriftCheck/PipelineContractCheck gates —
+    # because it is the last check before spend. Routes failures through
+    # ExtractWeeklyPreflightError -> NormalizeFailureContext like the other
+    # pre-spend gates.
+    "WeeklyPreflight": ArtifactReason(
+        reason="Pre-spend I4494 weekly-preflight gate (alpha-engine-"
+        "config#4494) — runs sf_preflight.py checks (IAM reachability, "
+        "tool contracts, definition input coherence, Lambda memory "
+        "headroom) against live AWS before any spot or mutex acquisition; "
+        "fail-hard on violation, fail-closed on a malformed verdict. No "
+        "per-run rendered artifact — a blocking preventive guard.",
+    ),
     # config#2249: fast pre-dispatch substrate health gate, immediately
     # before MorningEnrich (the first state to actually dispatch work to
     # the Saturday box). Replaces discovering a dead dispatch box (disk
