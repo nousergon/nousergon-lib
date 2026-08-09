@@ -585,6 +585,35 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "degraded (config#2278 + config#2276). No persisted artifact (the "
         "email IS the surface)."
     ),
+    # config#6685: SUCCESS-path notifier for a run whose ReportCard advisory
+    # grading (Evaluator Report Card v2 Lambda) degraded, with neither of
+    # the other two flag families also set — mirrors NotifyCompleteGatesDegraded
+    # / NotifyCompleteHealthDegraded exactly. Pre-fix, a ReportCard failure
+    # on an otherwise-clean run terminated at plain NotifyComplete ("All
+    # steps completed successfully") with no mention of the degradation —
+    # weekly-sf-policy.md §2.3 violation closed by this notifier.
+    "NotifyCompleteReportCardDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run whose ReportCard "
+        "advisory grading (Evaluator Report Card v2 Lambda) failed "
+        "(config#6685) — a PublishReportCardDegraded alert fired earlier "
+        "in the run. No persisted artifact (the email IS the surface)."
+    ),
+    # config#6685: folded combined notifier — fires when report_card_degraded
+    # is true TOGETHER WITH gate_degraded and/or health_check_degraded.
+    # Deliberately generic (names report card, points at the execution
+    # record for which other family also degraded) rather than enumerating
+    # all 4 additional 3-flag combinations as separate hardcoded notifiers —
+    # the CheckGateDegradedNotify Choice's own config#2276 comment predicted
+    # exactly this: a third flag family should fold into a data-driven
+    # notifier, not a 7-way enumeration.
+    "NotifyCompleteMultipleDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run where ReportCard "
+        "advisory grading degraded TOGETHER WITH one or more pre-spend "
+        "gates and/or tail health checks (config#6685) — the exact "
+        "combination is on the execution record ($.gate_degraded / "
+        "$.health_check_degraded / $.report_card_degraded). No persisted "
+        "artifact (the email IS the surface)."
+    ),
     "NotifyShellRunComplete": ArtifactReason(
         reason="Friday-PM shell-run dry-pass terminal SNS publish; "
         "no persisted artifact (the email IS the surface)."
