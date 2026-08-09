@@ -507,6 +507,22 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="analysis",
         artifact_label="Parity replay diff",
     ),
+    # alpha-engine-config-I6025: WARNING-severity alert fired when Parity
+    # (pit_parity look-ahead/walk-forward contamination check + backtester
+    # ↔executor replay) does not complete — SSM timeout/crash (terminal
+    # non-Success via CheckParityStatus.Default), or send/poll infra failure
+    # (the Parity + WaitForParity Task Catches). Degrade-not-fail: the run
+    # continues to Evaluator/ReportCard/Director. Mirrors
+    # PublishReportCardDegraded / PublishLibPinGateDegraded's shape.
+    "PublishParityDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when the Parity stage "
+        "(pit_parity + replay) does not complete — SSM timeout, crash, or "
+        "dispatch/poll failure (alpha-engine-config-I6025). Non-fatal: the "
+        "weekly run's real trading artifacts are unaffected, but no "
+        "parity verdict was produced this run — absence of a verdict must "
+        "NOT be read as a clean pass (alpha-engine-config-I6044). No "
+        "persisted artifact (the email IS the surface)."
+    ),
     "Evaluator": ArchivePageRef(
         page="analysis",
         artifact_label="Backtester evaluator report",
@@ -598,21 +614,38 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "(config#6685) — a PublishReportCardDegraded alert fired earlier "
         "in the run. No persisted artifact (the email IS the surface)."
     ),
-    # config#6685: folded combined notifier — fires when report_card_degraded
-    # is true TOGETHER WITH gate_degraded and/or health_check_degraded.
-    # Deliberately generic (names report card, points at the execution
-    # record for which other family also degraded) rather than enumerating
-    # all 4 additional 3-flag combinations as separate hardcoded notifiers —
+    # config#6685 + alpha-engine-config-I6025: folded combined notifier —
+    # fires when TWO OR MORE of the four degraded-flag families (pre-spend
+    # gates, tail health checks, report card advisory grading, parity
+    # verdict) are true together. Deliberately generic (names all four
+    # categories, points at the execution record for the exact combination)
+    # rather than enumerating every additional per-combination Task state —
     # the CheckGateDegradedNotify Choice's own config#2276 comment predicted
-    # exactly this: a third flag family should fold into a data-driven
-    # notifier, not a 7-way enumeration.
+    # exactly this: a third (and now fourth) flag family should fold into a
+    # data-driven notifier, not an N-way enumeration.
     "NotifyCompleteMultipleDegraded": ArtifactReason(
-        reason="Terminal success SNS publish for a run where ReportCard "
-        "advisory grading degraded TOGETHER WITH one or more pre-spend "
-        "gates and/or tail health checks (config#6685) — the exact "
-        "combination is on the execution record ($.gate_degraded / "
-        "$.health_check_degraded / $.report_card_degraded). No persisted "
+        reason="Terminal success SNS publish for a run where two or more "
+        "of {pre-spend gates, tail health checks, report card advisory "
+        "grading, parity verdict} degraded together (config#6685, "
+        "alpha-engine-config-I6025) — the exact combination is on the "
+        "execution record ($.gate_degraded / $.health_check_degraded / "
+        "$.report_card_degraded / $.parity_degraded). No persisted "
         "artifact (the email IS the surface)."
+    ),
+    # alpha-engine-config-I6025/I6044: SUCCESS-path notifier for a run whose
+    # Parity verdict degraded, with none of the other three flag families
+    # also set — mirrors NotifyCompleteReportCardDegraded /
+    # NotifyCompleteGatesDegraded / NotifyCompleteHealthDegraded exactly.
+    # Pre-fix, a Parity degradation on an otherwise-clean run set
+    # $.parity_degraded but never threaded it into CheckGateDegradedNotify,
+    # so the terminal email still said plain "SUCCESS" — the
+    # absence-of-verdict-read-as-pass shape alpha-engine-config-I6044 rules
+    # against, at the terminal-notification surface.
+    "NotifyCompleteParityDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run whose Parity verdict "
+        "degraded (alpha-engine-config-I6025) — a PublishParityDegraded "
+        "alert fired earlier in the run. No persisted artifact (the email "
+        "IS the surface)."
     ),
     "NotifyShellRunComplete": ArtifactReason(
         reason="Friday-PM shell-run dry-pass terminal SNS publish; "
