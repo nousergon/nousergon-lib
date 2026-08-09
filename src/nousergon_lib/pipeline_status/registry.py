@@ -816,6 +816,34 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     ),
     # Shared state name across the pre-open AND post-close SFs (the registry
     # is keyed by state name; one entry serves both, like MorningEnrich).
+    # alpha-engine-config-I6615 / sf-pipeline-policy §3 (2026-08-09): the
+    # morning DeployDriftGate now distinguishes drift families — SF-definition
+    # drift halts, CloudFormation/stack-state drift degrades loudly.
+    "PublishDeployDriftDegraded": ArtifactReason(
+        reason="Degraded-path SNS alert fired when the morning DeployDriftGate "
+        "finds CloudFormation/stack-state drift WITHOUT SF-definition drift "
+        "(alpha-engine-config-I6615): trading proceeds on the last verified "
+        "frozen SHA with the degraded flag set, and the day terminates "
+        "DEGRADED rather than halting. No persisted artifact (the alert IS "
+        "the surface).",
+    ),
+    # alpha-engine-config-I5569 (2026-08-09): CaptureSnapshot is the EOD
+    # pipeline's one non-re-runnable stage (live-capture-only) — bounded
+    # same-day retry with paging on first failure and on budget exhaustion.
+    "PageCaptureSnapshotFailureImmediate": ArtifactReason(
+        reason="Same-day SNS page fired on CaptureSnapshot's FIRST failure, "
+        "before its single bounded retry (alpha-engine-config-I5569) — "
+        "snapshots are live-capture-only, so the operator response window "
+        "closes at the date boundary. No persisted artifact (the page IS the "
+        "surface).",
+    ),
+    "PageCaptureSnapshotIrreversibleFailure": ArtifactReason(
+        reason="SNS page fired when CaptureSnapshot's bounded retry budget is "
+        "exhausted (alpha-engine-config-I5569): the day's snapshot becomes "
+        "permanently unrecoverable at the date boundary; the execution still "
+        "hard-fails via HandleFailure (no silent fallback to live IB). No "
+        "persisted artifact (the page IS the surface).",
+    ),
     "PublishDataSpotFailureImmediate": ArtifactReason(
         reason="Fail-open SNS alert fired when a data-spot phase fails — the "
         "pipeline continues past it (daemon / EOD reconcile proceed on prior "
