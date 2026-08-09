@@ -77,6 +77,16 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForPredictorBacktest": "PredictorBacktest",
     "WaitForPortfolioOptimizerBacktest": "PortfolioOptimizerBacktest",
     "WaitForParity": "Parity",
+    # alpha-engine-config#6030 (2026-08-09): the bundled Parity stage was
+    # split into a ParityParallel of three fail-open branch quartets + a
+    # PitParityCompare join, each with its own poll companion. The legacy
+    # WaitForParity row above is retained until the SF cutover
+    # (nousergon-data PR) merges everywhere and the transition window
+    # closes (cleanup rides alpha-engine-config-I6725).
+    "WaitForPitParityLookahead": "PitParityLookahead",
+    "WaitForPitParityWalkforward": "PitParityWalkforward",
+    "WaitForParityReplay": "ParityReplay",
+    "WaitForPitParityCompare": "PitParityCompare",
     "WaitForEvaluator": "Evaluator",
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
@@ -506,6 +516,43 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     "Parity": ArchivePageRef(
         page="analysis",
         artifact_label="Parity replay diff",
+    ),
+    # alpha-engine-config#6030 (2026-08-09): the bundled Parity stage was
+    # split per sf-pipeline-policy §2.1 into three ParityParallel branches
+    # (each its own spot + script + timeout + skip flag) and a
+    # PitParityCompare join. The legacy "Parity" row above is retained for
+    # the transition window (pre-cutover executions still render it);
+    # cleanup rides alpha-engine-config-I6725. Each pass publishes a
+    # versioned per-pass stats artifact
+    # (parity/{run_date}/pit_stats_{pass}.json, crucible-backtester
+    # contracts/pit_stats_pass.schema.json); the compare reads both and
+    # writes backtest/{run_date}/pit_parity.json — verdict UNKNOWN when a
+    # pass artifact is missing (§2.3a).
+    "PitParityLookahead": ArchivePageRef(
+        page="analysis",
+        artifact_label="Pit-parity lookahead pass stats",
+    ),
+    "PitParityWalkforward": ArchivePageRef(
+        page="analysis",
+        artifact_label="Pit-parity walkforward (PIT) pass stats",
+    ),
+    "ParityReplay": ArchivePageRef(
+        page="analysis",
+        artifact_label="Parity replay diff",
+    ),
+    "PitParityCompare": ArchivePageRef(
+        page="analysis",
+        artifact_label="Pit-parity contamination report (delta + verdict)",
+    ),
+    "PublishParityCompareDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when the PitParityCompare "
+        "join stage (reads both pit_stats pass artifacts, writes "
+        "backtest/{run_date}/pit_parity.json) does not complete — SSM "
+        "timeout, crash, or dispatch/poll failure (alpha-engine-config#6030). "
+        "Non-fatal: the weekly run continues, but no parity verdict was "
+        "produced this run — absence of a verdict must NOT be read as a "
+        "clean pass (sf-pipeline-policy §2.3a). No persisted artifact (the "
+        "email IS the surface)."
     ),
     # alpha-engine-config-I6025: WARNING-severity alert fired when Parity
     # (pit_parity look-ahead/walk-forward contamination check + backtester
