@@ -770,6 +770,28 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "that day, which is otherwise indistinguishable from a day nobody "
         "looked at.",
     ),
+    # alpha-engine-config-I6689: the declared-cadence read/gate inserted
+    # ahead of LaunchWeeklyExerciseRun (ReadExerciseCadence ->
+    # CheckExerciseCadence). Both alerts are fail-open + best-effort SNS
+    # publishes, same shape as WeeklyExerciseLaunchFailed / PublishLibPinGateDegraded
+    # above — no persisted artifact, the alert IS the surface.
+    "PublishCadenceReadDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when ReadExerciseCadence cannot "
+        "read /alpha-engine/weekly-sf/exercise-cadence from SSM (most "
+        "likely: the IAM grant for alpha-engine-step-functions-role has not "
+        "landed yet — alpha-engine-config#6689). The run proceeds fail-open "
+        "as cadence=daily, i.e. the pre-config#6689 default behavior — the "
+        "exercise launch is NOT skipped. No persisted artifact (the alert "
+        "IS the surface).",
+    ),
+    "PublishCadenceUnknownValueDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when ReadExerciseCadence's read "
+        "succeeded but returned a value CheckExerciseCadence does not "
+        "recognize (not one of daily / weekly-only / off — a manifest/SSM "
+        "typo, or an undeployed edit to infrastructure/weekly_cadence.json). "
+        "The run proceeds fail-open as cadence=daily (alpha-engine-config#6689). "
+        "No persisted artifact (the alert IS the surface).",
+    ),
     # ── Post-close Trading SF (6 substantive Task steps) ────────────────────────────────
     "PostMarketData": ArtifactReason(
         reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
