@@ -438,6 +438,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     # / PipelineContractCheck itself can't check (Lambda failed after
     # retries, or returned a malformed payload) — the run proceeds fail-open
     # rather than halting, and this notifier is the alert that it did.
+    "PublishMutexAcquireDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when AcquireMutex hit a DynamoDB "
+        "infra error other than ConditionalCheckFailedException (which the "
+        "separate MutexConflict hard-fail already handles) — the run "
+        "proceeds fail-open without the run-slot mutex, so a concurrent "
+        "duplicate execution would no longer be excluded. No persisted "
+        "artifact (the email IS the surface); sets $.gate_degraded, carried "
+        "to the terminal degraded notifier (config#6722).",
+    ),
     "PublishLibPinGateDegraded": ArtifactReason(
         reason="Fail-open SNS alert fired when LibPinDriftCheck could not "
         "verify cross-repo pin parity (gate Lambda failed after retries, or "
