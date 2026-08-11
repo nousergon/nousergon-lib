@@ -31,6 +31,13 @@ subclasses whose ``today()`` / ``now()`` / ``utcnow()`` return the shifted
 instant. Construction, arithmetic and comparison are untouched, so a test that
 never asks the clock behaves identically.
 
+**Run it with a per-test timeout.** Wall-clock coupling does not only surface
+as a failed assertion: measured on `crucible-backtester` at ``+400`` days, a
+module that passes in seconds today ran past ten minutes without finishing —
+code that iterates or retries toward a date condition the shift pushes out of
+reach. A hang is a finding, but an un-timed job cannot report it, so pair this
+with ``pytest-timeout`` (``--timeout=120``) and treat a timeout as a hit.
+
 **Known limit, stated rather than hidden:** C extensions that captured the
 original types before the shift (pandas' own `Timestamp.now`, for instance)
 keep their own clock. This finds Python-level wall-clock coupling, which is
@@ -102,8 +109,8 @@ def pytest_configure(config):  # pragma: no cover - pytest hook wiring
     reporter = config.pluginmanager.get_plugin("terminalreporter")
     if reporter is not None:
         reporter.write_line(
-            f"[time-shift] clock advanced {days}d — a failure here is a test "
-            f"coupled to the wall clock, not a regression in today's code "
-            f"(config#6923)",
+            f"[time-shift] clock advanced {days}d — a failure OR A HANG here is "
+            f"a test coupled to the wall clock, not a regression in today's "
+            f"code. Run with --timeout so a hang is reportable (config#6923)",
             yellow=True,
         )
