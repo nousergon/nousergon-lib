@@ -922,6 +922,28 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "data) per the fail-open contract of the config#1687 spot migration. "
         "No persisted artifact (the email IS the surface).",
     ),
+    "PublishScannerFailureImmediate": ArtifactReason(
+        reason="Fail-open SNS alert fired when the weekday Scanner fails — the "
+        "pipeline continues to predictor inference and daemon start "
+        "(alpha-engine-config#6722). Added by config-I6903: this was the only "
+        "one of the five degraded paths in the weekday definition with no "
+        "alert at all, so on 2026-08-11 the Scanner timed out twice at 300s "
+        "and nothing said so for 37 minutes — until the terminal, past the "
+        "window where a rerun before the 06:30 open was still possible. "
+        "No persisted artifact (the alert IS the surface); what it carries is "
+        "that the day's universe board, membership and leaderboard were not "
+        "written and the optimizer is running without per-name ADV.",
+    ),
+    "PublishDaemonFailureImmediate": ArtifactReason(
+        reason="Fail-open SNS alert fired when the RunDaemon systemd restart "
+        "fails and the pipeline continues on the assumption that the boot "
+        "trigger starts the daemon instead (config-I6903). "
+        "sf-pipeline-policy.md §5 names this fail-open explicitly as one that "
+        "must page immediately, and the paging half was never built. That the "
+        "boot trigger is a backup is WHY this stage fails open; it is not a "
+        "reason to stay quiet, because a backup that also missed leaves the "
+        "book unmanaged. No persisted artifact (the alert IS the surface).",
+    ),
     "WeeklyExerciseLaunchFailed": ArtifactReason(
         reason="Fail-open SNS alert fired when postclose cannot start the "
         "weekly pipeline's daily EXERCISE run (alpha-engine-config-I5489). "
