@@ -87,7 +87,12 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForPitParityWalkforward": "PitParityWalkforward",
     "WaitForParityReplay": "ParityReplay",
     "WaitForPitParityCompare": "PitParityCompare",
-    "WaitForEvaluator": "Evaluator",
+    # alpha-engine-config-I3112 deliverable 3 (2026-08-11): the single
+    # Evaluator state became EvaluatorDiagnostics -> EvaluatorOptimize, each
+    # with its own dispatch/poll pair. Both companions must roll up, or each
+    # renders as its own dashboard row.
+    "WaitForEvaluatorDiagnostics": "EvaluatorDiagnostics",
+    "WaitForEvaluatorOptimize": "EvaluatorOptimize",
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
@@ -579,9 +584,20 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "NOT be read as a clean pass (alpha-engine-config-I6044). No "
         "persisted artifact (the email IS the surface)."
     ),
-    "Evaluator": ArchivePageRef(
+    # alpha-engine-config-I3112 deliverable 3 (2026-08-11): one Evaluator
+    # state became two. Both halves point at the same archive page — they are
+    # two stages of one report, not two reports: the diagnostics half writes
+    # the signal-quality and component-diagnostics results, the optimize half
+    # consumes them (via the S3 handoff snapshot) and produces the optimizer
+    # verdicts and champion promotion that the page renders. Distinct labels
+    # so a reader can tell which half a row is without opening it.
+    "EvaluatorDiagnostics": ArchivePageRef(
         page="analysis",
-        artifact_label="Backtester evaluator report",
+        artifact_label="Backtester evaluator report (diagnostics)",
+    ),
+    "EvaluatorOptimize": ArchivePageRef(
+        page="analysis",
+        artifact_label="Backtester evaluator report (optimizers)",
     ),
     "DriftDetection": ArchivePageRef(
         page="fleet-status",
