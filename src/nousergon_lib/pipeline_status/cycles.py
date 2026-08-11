@@ -44,7 +44,7 @@ the absence is visible rather than inferred.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -302,9 +302,9 @@ def _depth_of(entered_states: Iterable[str], stage_order: Sequence[str]) -> tupl
 def build_reliability_window(
     summaries: Sequence[PipelineExecutionSummary],
     *,
-    cycle_key_of: callable[[PipelineExecutionSummary], str | None],
-    failure_of: callable[[PipelineExecutionSummary], tuple[str | None, str | None]],
-    entered_states_of: callable[[PipelineExecutionSummary], Iterable[str]],
+    cycle_key_of: Callable[[PipelineExecutionSummary], str | None],
+    failure_of: Callable[[PipelineExecutionSummary], tuple[str | None, str | None]],
+    entered_states_of: Callable[[PipelineExecutionSummary], Iterable[str]],
     stage_order: Sequence[str],
     max_cycles: int | None = None,
 ) -> ReliabilityWindow:
