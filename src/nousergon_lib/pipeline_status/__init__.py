@@ -9,6 +9,10 @@ consumer.
 
 **Public surface:**
 
+- :func:`build_reliability_window` — CYCLE-level projection: attempts per
+  cycle, attempts-to-success, stage depth reached, and whether each failure
+  cause is new or a repeat of an earlier cycle's (alpha-engine-config-I6919).
+  Answers "are we making progress or looping", which red/green cannot.
 - :func:`read_pipeline_state` — projection entry point. Returns a
   :class:`PipelineRun` for the most-recent execution of the given SF ARN.
 - :class:`PipelineRun` / :class:`TaskRow` / :class:`RunStatus` — typed shape.
@@ -30,6 +34,13 @@ on first build, not after the second consumer arrives.
 
 from __future__ import annotations
 
+from .cycles import (
+    AttemptOutcome,
+    CycleReliability,
+    ReliabilityWindow,
+    build_reliability_window,
+    fingerprint,
+)
 from .read import (
     PipelineExecutionSummary,
     PipelineRun,
@@ -41,6 +52,7 @@ from .read import (
     TaskStatus,
     list_recent_pipeline_runs,
     read_pipeline_state,
+    read_reliability_window,
 )
 from .registry import (
     PIPELINE_LABELS,
@@ -63,15 +75,18 @@ from .templates import format_failure_message, format_success_message
 
 __all__ = [
     "ADHOC_ROLES",
+    "AttemptOutcome",
     "ALL_ROLES",
     "ArchivePageRef",
     "ArtifactReason",
     "CADENCE_ROLES",
+    "CycleReliability",
     "EXERCISE_ROLES",
     "PIPELINE_LABELS",
     "PipelineExecutionSummary",
     "PipelineRun",
     "RECOVERY_ROLES",
+    "ReliabilityWindow",
     "RunStatus",
     "SFNAccessDenied",
     "SFNNoExecutions",
@@ -81,10 +96,13 @@ __all__ = [
     "TaskRow",
     "TaskStatus",
     "WAIT_GROUPING",
+    "build_reliability_window",
     "cadence_filter",
     "classify",
+    "fingerprint",
     "format_failure_message",
     "format_success_message",
     "list_recent_pipeline_runs",
     "read_pipeline_state",
+    "read_reliability_window",
 ]

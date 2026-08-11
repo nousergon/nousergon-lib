@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import Enum
@@ -50,6 +51,8 @@ from .registry import (
 
 if TYPE_CHECKING:  # pragma: no cover — type-only import
     from mypy_boto3_stepfunctions.client import SFNClient
+
+    from .cycles import ReliabilityWindow
 
 logger = logging.getLogger(__name__)
 
@@ -893,3 +896,148 @@ def _raise_for_boto_error(exc: Exception, action: str) -> NoReturn:
     raise PipelineStatusError(
         f"Unexpected boto3 error on states:{action}: {code or type(exc).__name__}: {exc}"
     ) from exc
+
+
+# ── Cycle-level reliability (alpha-engine-config-I6919) ───────────────────
+
+
+_RUN_DATE_IN_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _extract_run_date(describe_resp: Mapping[str, Any]) -> str | None:
+    """The cycle key: ``input.run_date``, falling back to the execution name.
+
+    Both sources are needed. Scheduled executions carry ``run_date`` in their
+    input and have opaque UUID names; operator reruns are named
+    ``watch-rerun-2026-08-10-5`` and may or may not thread the field. Reading
+    only the input would drop every rerun into "no cycle" and destroy the
+    attempts-per-cycle count, which is the whole metric.
+
+    Returns None rather than guessing when neither carries a date — the
+    caller drops such executions rather than inventing single-attempt cycles
+    for them (see ``cycles.build_reliability_window``).
+    """
+    raw_input = describe_resp.get("input")
+    if isinstance(raw_input, str) and raw_input:
+        try:
+            parsed = json.loads(raw_input)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            value = parsed.get("run_date")
+            if isinstance(value, str) and _RUN_DATE_IN_NAME.fullmatch(value):
+                return value
+    name = describe_resp.get("name")
+    if isinstance(name, str):
+        match = _RUN_DATE_IN_NAME.search(name)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _entered_state_names(history_events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Every Task state this execution ENTERED, completed or not.
+
+    Entered, not exited: a run that reached PredictorTraining and died inside
+    it got that far, and depth is about how far the pipeline got before
+    failing.
+    """
+    names: list[str] = []
+    for event in history_events:
+        if event.get("type") != "TaskStateEntered":
+            continue
+        name = (event.get("taskStateEnteredEventDetails") or {}).get("name")
+        if name:
+            names.append(_absorb_wait_companion(name))
+    return names
+
+
+def read_reliability_window(
+    state_machine_arn: str,
+    *,
+    stage_order: Sequence[str],
+    max_cycles: int = 20,
+    scan_limit: int = 120,
+    client: SFNClient | None = None,
+) -> ReliabilityWindow:
+    """Cycle-level reliability for a Step Function — the progress surface.
+
+    Answers "are we making progress or looping" (alpha-engine-config-I6919),
+    which no red/green surface can: it groups executions into cycles by run
+    date, counts attempts-to-success, measures how deep each cycle got, and
+    labels every failure cause new or a repeat of an earlier cycle's.
+
+    ``scan_limit`` is deliberately larger than ``max_cycles``: a bad cycle
+    can carry 16 attempts (measured 2026-07-26), so scanning only
+    ``max_cycles`` executions would return two cycles and call it twenty.
+
+    Costs one ``ListExecutions`` page walk plus one ``DescribeExecution`` and
+    one ``GetExecutionHistory`` per execution scanned — O(scan_limit) calls,
+    which is why this belongs behind a cached console driver rather than on
+    every page render.
+    """
+    from .cycles import build_reliability_window
+
+    if client is None:  # pragma: no cover — production path
+        import boto3
+
+        client = cast(
+            "SFNClient",
+            boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn)),
+        )
+
+    summaries = list_recent_pipeline_runs(state_machine_arn, limit=scan_limit, client=client)
+
+    # One describe + one history per execution, memoised so the three
+    # callables below do not each pay for their own round trip.
+    described: dict[str, Mapping[str, Any]] = {}
+    histories: dict[str, list[Mapping[str, Any]]] = {}
+
+    def _describe(arn: str) -> Mapping[str, Any]:
+        if arn not in described:
+            try:
+                described[arn] = client.describe_execution(executionArn=arn)
+            except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+                _raise_for_boto_error(exc, "DescribeExecution")
+        return described[arn]
+
+    def _history(arn: str) -> list[Mapping[str, Any]]:
+        if arn not in histories:
+            events: list[Mapping[str, Any]] = []
+            token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {"executionArn": arn, "includeExecutionData": False}
+                if token:
+                    kwargs["nextToken"] = token
+                try:
+                    resp = client.get_execution_history(**kwargs)
+                except Exception as exc:  # noqa: BLE001 — narrow + re-raise
+                    _raise_for_boto_error(exc, "GetExecutionHistory")
+                events.extend(resp.get("events") or [])
+                token = resp.get("nextToken")
+                if not token:
+                    break
+            histories[arn] = events
+        return histories[arn]
+
+    def _failure_of(summary: PipelineExecutionSummary) -> tuple[str | None, str | None]:
+        events = _history(summary.execution_arn)
+        state = _failing_state_from_history(events)
+        error: str | None = None
+        for event in events:
+            details = event.get("taskFailedEventDetails") or event.get(
+                "executionFailedEventDetails"
+            )
+            if details and details.get("error"):
+                error = details["error"]
+                break
+        return state, error
+
+    return build_reliability_window(
+        summaries,
+        cycle_key_of=lambda s: _extract_run_date(_describe(s.execution_arn)),
+        failure_of=_failure_of,
+        entered_states_of=lambda s: _entered_state_names(_history(s.execution_arn)),
+        stage_order=stage_order,
+        max_cycles=max_cycles,
+    )
