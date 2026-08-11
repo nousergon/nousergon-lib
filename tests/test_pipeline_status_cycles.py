@@ -27,7 +27,8 @@ _STAGES = (
     "RAGIngestion",
     "PredictorTraining",
     "Backtester",
-    "Evaluator",
+    "EvaluatorDiagnostics",
+    "EvaluatorOptimize",
     "ReportCard",
 )
 

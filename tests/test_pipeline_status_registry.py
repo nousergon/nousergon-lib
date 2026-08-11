@@ -115,7 +115,14 @@ def test_registry_covers_known_saturday_substantive_states():
         "PredictorTraining",
         "Backtester",
         "Parity",
-        "Evaluator",
+        # alpha-engine-config-I3112 deliverable 3: the merged "Evaluator"
+        # state no longer exists in the Saturday SF. Both halves are required
+        # here, not one — a registry entry for only the first would let the
+        # second render as an unknown state on the pipeline-status surface,
+        # which is the config#1115/#1120/#2372/#2430 drift class this test
+        # exists to catch.
+        "EvaluatorDiagnostics",
+        "EvaluatorOptimize",
         "DriftDetection",
         "SaturdayHealthCheck",
         "WeeklySubstrateHealthCheck",
