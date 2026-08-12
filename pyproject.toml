@@ -65,7 +65,7 @@ quant-stats = ["numpy>=1.24", "pandas>=2.0", "scipy>=1.7"]
 # (rc5) the three-state fix-CLI outcome so a working-as-intended "no auto-fix"
 # (e.g. an EXTERNAL provider outage) is a green notification, not a red failure.
 # Bump to >=0.6.0,<0.7 when 0.6.0 final ships and the soak passes.
-flow_doctor = ["krepis[flow_doctor]"]  # delegate the pin to krepis (owns the flow-doctor glue)
+flow_doctor = ["krepis[flow-doctor]"]  # delegate the pin to krepis (owns the flow-doctor glue)
 # GitHub App installation-token minting (nousergon_lib.github_app) — RS256
 # App JWTs need PyJWT with its crypto backend (config-I2785).
 github_app = ["PyJWT[crypto]>=2.8"]
