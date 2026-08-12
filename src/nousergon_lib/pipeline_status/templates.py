@@ -24,17 +24,13 @@ from __future__ import annotations
 
 from typing import Final
 
-# Hardcoded console base URL. The dashboard is reachable at three hosts:
-#
-#   - console.nousergon.ai — private (Cloudflare Access gated)
-#   - live.nousergon.ai    — public Streamlit page (subset of pages)
-#   - <ec2-host>:8501      — direct (debug only)
-#
-# Page 25 (Pipeline Status) lives on the PRIVATE console — operator-only
-# surface. The success / failure emails are operator-only too, so
-# console.nousergon.ai is the right deep-link target.
-CONSOLE_BASE_URL: Final[str] = "https://console.nousergon.ai"
-PIPELINE_STATUS_PAGE: Final[str] = "Pipeline_Status"
+# Hardcoded console base URL. The Streamlit operator console (nginx-routed
+# on the dashboard EC2 box) is dashboard.nousergon.ai. console.nousergon.ai
+# is console v2 — a separate fleet ENTITY INDEX app that only serves
+# `/`, `/search`, `/registry/<name>`, `/component/<id>`; it does not serve
+# Streamlit page slugs and 404s on this deep link (alpha-engine-config-I6140).
+CONSOLE_BASE_URL: Final[str] = "https://dashboard.nousergon.ai"
+PIPELINE_STATUS_PAGE: Final[str] = "pipeline-status"
 
 # Cause truncation — kept in lockstep with sf-telegram-notifier
 # (alpha-engine-data/infrastructure/lambdas/sf-telegram-notifier/index.py L69).

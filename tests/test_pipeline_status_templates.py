@@ -22,7 +22,7 @@ def test_format_success_message_basic_shape():
     )
     expected = (
         "Weekly Freshness SF SUCCEEDED\n"
-        "Console: https://console.nousergon.ai/Pipeline_Status"
+        "Console: https://dashboard.nousergon.ai/pipeline-status"
         "?run=arn:aws:states:us-east-1:711398986525:execution:"
         "ne-weekly-freshness-pipeline:run-abc"
     )
@@ -36,7 +36,7 @@ def test_format_success_message_for_each_pipeline_label():
             pretty_label=label, execution_arn="arn:fake"
         )
         assert out.startswith(f"{label} SUCCEEDED\n")
-        assert "Console: https://console.nousergon.ai/Pipeline_Status?run=arn:fake" in out
+        assert "Console: https://dashboard.nousergon.ai/pipeline-status?run=arn:fake" in out
 
 
 def test_format_success_message_is_two_lines():
@@ -57,7 +57,7 @@ def test_format_failure_message_basic_shape():
     )
     assert out.startswith("Pre-open Trading SF FAILED at state MorningEnrich\n")
     assert (
-        "Console: https://console.nousergon.ai/Pipeline_Status"
+        "Console: https://dashboard.nousergon.ai/pipeline-status"
         "?run=arn:aws:states:us-east-1:711398986525:execution:"
         "ne-preopen-trading-pipeline:run-xyz" in out
     )
@@ -114,9 +114,23 @@ def test_format_failure_message_strips_whitespace_on_cause():
     assert out.endswith("actual error message")
 
 
-def test_console_link_is_hardcoded_to_private_console():
-    """The deep-link MUST point to the private console (Cloudflare Access
-    gated); operator-only surface for operator-only emails. Drift would
-    leak the link to the public site, which doesn't host page 25."""
-    assert templates.CONSOLE_BASE_URL == "https://console.nousergon.ai"
-    assert templates.PIPELINE_STATUS_PAGE == "Pipeline_Status"
+def test_console_link_is_hardcoded_to_dashboard_streamlit_app():
+    """The deep-link MUST point to the Streamlit operator console
+    (dashboard.nousergon.ai), not console v2 (console.nousergon.ai), which
+    is a separate fleet entity index that only serves `/`, `/search`,
+    `/registry/<name>`, `/component/<id>` and 404s on this page slug
+    (alpha-engine-config-I6140)."""
+    assert templates.CONSOLE_BASE_URL == "https://dashboard.nousergon.ai"
+    assert templates.PIPELINE_STATUS_PAGE == "pipeline-status"
+
+
+def test_console_link_does_not_leak_to_console_v2():
+    """Regression guard for alpha-engine-config-I6140: the emitted link
+    must never point at console.nousergon.ai (console v2, entity index —
+    404s on Streamlit page slugs) and must point at the Streamlit app's
+    registered `pipeline-status` route on dashboard.nousergon.ai."""
+    out = templates.format_success_message(
+        pretty_label="Weekly Freshness SF", execution_arn="arn:fake"
+    )
+    assert "console.nousergon.ai" not in out
+    assert "dashboard.nousergon.ai/pipeline-status" in out
