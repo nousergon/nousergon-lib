@@ -222,6 +222,19 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "+ venv on it; writes no run artifact — its output is the "
         "instance id threaded into $.ec2_instance_id."
     ),
+    # alpha-engine-config-I7119: the same dispatcher, invoked to REPLACE a
+    # launcher box AWS reclaimed mid-run (spot no-capacity). Registered as its
+    # own state rather than folded into DispatchWeeklyFreshnessSpot because the
+    # two answer different operational questions: this one appearing in a run
+    # means the run survived an infrastructure event, which is the whole signal.
+    "RelaunchWeeklyFreshnessSpot": ArtifactReason(
+        reason="Replaces the ephemeral launcher spot after a mid-run reclaim, "
+        "forced on-demand so the replacement cannot itself be reclaimed; "
+        "writes no run artifact — its output is the new instance id, which "
+        "REPLACES $.ec2_instance_id. Its presence in an execution is the "
+        "run's substrate-loss signal; the count also rides the SF completion "
+        "marker as substrate_relaunches."
+    ),
     "MorningEnrich": ArtifactReason(
         reason="Daily OHLCV write to predictor/daily_closes/{date}.parquet; "
         "no per-run rendered artifact — substrate for downstream stages."
