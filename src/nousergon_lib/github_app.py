@@ -83,7 +83,12 @@ def build_app_jwt(app_id: str, private_key_pem: str) -> str:
         import jwt
     except ImportError as exc:  # pragma: no cover — packaging error, not logic
         raise GitHubAppTokenError(
-            "PyJWT not installed — pip install 'nousergon-lib[github_app]'"
+            # HYPHENATED (alpha-engine-config-I6963): pip <23.3 does not
+            # normalise `_` to `-` in a REQUESTED extra and drops it with a
+            # WARNING on a SUCCESSFUL exit. This message is the one an
+            # operator copies, so the underscored form told them to run the
+            # install that reproduces this very error.
+            "PyJWT not installed — pip install 'nousergon-lib[github-app]'"
         ) from exc
     now = int(time.time())
     payload = {"iat": now - 60, "exp": now + JWT_TTL_SECONDS, "iss": str(app_id)}
