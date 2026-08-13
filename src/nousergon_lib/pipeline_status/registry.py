@@ -778,6 +778,57 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         reason="Boot diagnostic call against the trading instance; "
         "no artifact — operational only."
     ),
+    # alpha-engine-config-I7111 (Brian ruling 2026-08-13, option c): the
+    # "no trading-pipeline start during NYSE market hours" boundary, sited on
+    # the PIPELINE rather than on one caller's IAM role. These five states are
+    # the FIRST thing both weekday definitions do — shared by name across
+    # step_function_daily.json and step_function_eod.json, so one entry each
+    # serves both (same convention as MorningEnrich / PublishDeployDriftDegraded
+    # above). None of them writes an artifact: the gate's whole output is which
+    # SF branch is taken, and it is preserved in $.market_hours_gate in
+    # execution history plus the SNS alert.
+    "MarketHoursGate": ArtifactReason(
+        reason="NYSE regular-session gate — predictor Lambda invoke (action="
+        "check_market_hours), pure calendar math judged on "
+        "$$.Execution.StartTime, run before the mutex and before anything "
+        "that spends. Refuses a start inside [09:30, 16:00) ET from every "
+        "principal (scheduler, overseer-sf-watch, operator); the config#2932 "
+        "IAM-toggle mechanism it replaces bound only one caller and was never "
+        "deployed. No artifact — the verdict is encoded in the SF branch "
+        "taken and in $.market_hours_gate.",
+    ),
+    "RecordMarketHoursOverride": ArtifactReason(
+        reason="Audit publish for an authorised in-session start: an explicit, "
+        "expiring market_hours_override (reason + authorized_by + expires_at, "
+        "bounded to 24h) crossed the market-hours boundary. Announced rather "
+        "than silent; no persisted artifact (the alert plus "
+        "$.market_hours_gate in execution history ARE the record).",
+    ),
+    "NotifyMarketHoursBlocked": ArtifactReason(
+        reason="Refusal SNS publish — a trading pipeline was started inside "
+        "the NYSE regular session with no override. Precedes the "
+        "MarketHoursBlocked Fail terminal, so the run does not read green to "
+        "a status-keyed watcher (sf-pipeline-policy §2.3). The message "
+        "carries the override shape needed to authorise one start. No "
+        "persisted artifact (the alert IS the surface).",
+    ),
+    "NotifyMarketHoursOverrideMalformed": ArtifactReason(
+        reason="Refusal SNS publish — a market_hours_override was offered and "
+        "is not usable (missing/blank field, unparseable or back-dated "
+        "expires_at, or one beyond the 24h ceiling). Distinct from "
+        "NotifyMarketHoursBlocked because it calls for a different operator "
+        "action: fix the override, not wait for the close. No persisted "
+        "artifact (the alert IS the surface).",
+    ),
+    "NotifyMarketHoursUnverified": ArtifactReason(
+        reason="The market-hours gate Lambda did not answer after retries. "
+        "The two weekday pipelines diverge here on purpose: preopen fails "
+        "CLOSED (this alert precedes a Fail — the same Lambda serves "
+        "PredictorInference, so nothing was left to rescue), postclose fails "
+        "OPEN and DEGRADED (NAV continuity, sf-pipeline-policy §1.3, and its "
+        "only automated caller applies the identical predicate earlier). No "
+        "persisted artifact (the alert IS the surface).",
+    ),
     # config#1430 (2026-06-30): replaced the on-box SSM trading_calendar check
     # (CheckTradingDay / TradingDayCheckFailed, whose stdout was unreliably
     # captured on a just-cold-booted instance) with a pre-boot Lambda gate
