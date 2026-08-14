@@ -473,6 +473,68 @@ class TestAttractivenessEvalContract:
         payload["counterfactual"]["top_n"][0]["n_cycles"] = 4
         contracts.validate("attractiveness_eval", payload)
 
+    # ── Population leg (alpha-engine-config-I7213) ───────────────────────────
+    # The top-N-basket-vs-PIT-population read Brian asked for. Described here
+    # because the SCHEMA is where a cross-repo number's convention has to be
+    # stated: the producer emitted these fields undocumented, so the artifact
+    # carried a number no contract explained.
+
+    _POP_LEG = {
+        "population_mean_alpha": 0.0059,
+        "excess_vs_population": 0.0075,
+        "excess_t": 3.1,
+        "excess_p": 0.008,
+        "excess_ci95": [0.0029, 0.0121],
+    }
+
+    def test_population_leg_documented_on_both_arms(self):
+        """Both a top_n row AND live_gate must accept the population leg —
+        the incumbent arm is a basket too and needs the same denominator."""
+        schema = contracts.load_schema("attractiveness_eval")
+        cf = schema["properties"]["counterfactual"]["properties"]
+        row = cf["top_n"]["items"]["properties"]
+        lg = cf["live_gate"]["properties"]
+        for key in self._POP_LEG:
+            assert key in row, f"top_n row schema does not document {key!r}"
+            assert key in lg, f"live_gate schema does not document {key!r}"
+        assert "holding_rule" in cf, "counterfactual schema does not document holding_rule"
+
+    def test_population_leg_validates_on_both_arms(self):
+        payload = _attractiveness_eval()
+        cf = payload["counterfactual"]
+        cf["holding_rule"] = (
+            "weekly rebalance, 21d hold, equal-weight, no intra-period turnover"
+        )
+        cf["top_n"][0].update(self._POP_LEG)
+        cf["live_gate"].update(self._POP_LEG)
+        contracts.validate("attractiveness_eval", payload)
+
+    def test_population_leg_stays_optional_for_pre_i7213_artifacts(self):
+        """Artifacts written before the producer landed (e.g.
+        backtest/2026-08-07) carry no population leg and are still valid v2 —
+        the consumer grades an honest N/A naming the missing field rather than
+        the contract failing."""
+        contracts.validate("attractiveness_eval", _attractiveness_eval())
+
+    def test_population_leg_nulls_tolerated(self):
+        """Below the 3-cycle floor the t/p/ci are honestly null, never
+        fabricated — the contract must accept that, not just numbers."""
+        payload = _attractiveness_eval()
+        payload["counterfactual"]["live_gate"].update(
+            {"population_mean_alpha": None, "excess_vs_population": None,
+             "excess_t": None, "excess_p": None, "excess_ci95": None}
+        )
+        contracts.validate("attractiveness_eval", payload)
+
+    def test_malformed_excess_ci95_is_rejected(self):
+        """A CI is a 2-element interval; a scalar or a 3-tuple is a producer
+        bug the contract must catch, not pass through to the report card."""
+        payload = _attractiveness_eval()
+        payload["counterfactual"]["top_n"][0]["excess_ci95"] = [0.001]
+        assert contracts.conformance_errors("attractiveness_eval", payload)
+        payload["counterfactual"]["top_n"][0]["excess_ci95"] = 0.001
+        assert contracts.conformance_errors("attractiveness_eval", payload)
+
 
 def _loop_record(**overrides):
     record = {
