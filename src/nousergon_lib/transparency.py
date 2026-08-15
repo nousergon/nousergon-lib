@@ -831,12 +831,22 @@ def format_report(results: list[CheckResult]) -> str:
     }
     for r in results:
         lines.append(f"  [{icon.get(r.status, '?')}] {r.row_id:30s} {r.detail}")
-    failures = [r for r in results if r.status == "fail"]
-    if failures:
-        lines.append("")
-        lines.append("ACTIONS NEEDED:")
-        for r in failures:
-            lines.append(f"  - {r.row_id}: {r.detail}")
+    # The non-fatal sections print FIRST and the report ends with the failing
+    # rows plus an explicit exit-cause line (alpha-engine-config-I7393).
+    #
+    # The order is load-bearing, not cosmetic. This report is emitted through
+    # `krepis.ssm_log_capture`, which summarises a non-zero exit by quoting the
+    # command's LAST output line. With DEGRADED printed last, the weekly SF's
+    # WeeklySubstrateHealthCheck failure on 2026-08-15 read:
+    #
+    #   ssm_log_capture: ERROR: [substrate-health-check] failed (rc=1) —
+    #     - agent_decisions: degraded: producer status='no_recent_sf_run' ...
+    #
+    # naming a row that is explicitly NON-FATAL — degraded never contributes to
+    # the exit code — while the actual cause, `cost_telemetry`, appeared nowhere
+    # in what the operator read. Two separate sessions diagnosed the wrong row
+    # from that line. sf-pipeline-policy.md §2.3's corollary: the failure
+    # message must carry the actual error.
     gated = [r for r in results if r.status == "gated"]
     if gated:
         lines.append("")
@@ -851,6 +861,17 @@ def format_report(results: list[CheckResult]) -> str:
         lines.append("DEGRADED (non-fatal — observability, no action gate):")
         for r in degraded:
             lines.append(f"  - {r.row_id}: {r.detail}")
+    failures = [r for r in results if r.status == "fail"]
+    if failures:
+        lines.append("")
+        lines.append("ACTIONS NEEDED:")
+        for r in failures:
+            lines.append(f"  - {r.row_id}: {r.detail}")
+        lines.append("")
+        lines.append(
+            "EXIT 1 — failing row(s): "
+            + ", ".join(f"{r.row_id}: {r.detail}" for r in failures)
+        )
     return "\n".join(lines)
 
 

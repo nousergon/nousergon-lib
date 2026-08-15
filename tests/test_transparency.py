@@ -1044,10 +1044,43 @@ def test_format_report_separates_degraded_from_actions():
     assert "Degraded: 1" in report
     assert "[DEGR] degr_row" in report
     # degraded must NOT appear under ACTIONS NEEDED
-    actions = report.split("ACTIONS NEEDED:")[1].split("DEGRADED")[0]
+    actions = report.split("ACTIONS NEEDED:")[1]
     assert "degr_row" not in actions
     assert "bad_row" in actions
     assert "DEGRADED (non-fatal" in report
+    # ...and DEGRADED must come BEFORE it, so the report ends on the cause.
+    assert report.index("DEGRADED (non-fatal") < report.index("ACTIONS NEEDED:")
+
+
+def test_the_last_line_of_a_failing_report_names_the_failing_row():
+    """alpha-engine-config-I7393.
+
+    `krepis.ssm_log_capture` summarises a non-zero exit by quoting the
+    command's LAST output line, so the last line has to be the cause. When
+    DEGRADED printed last, the weekly SF's substrate-health failure named
+    `agent_decisions` — a row whose degraded status can never produce a
+    non-zero exit — and the real cause appeared nowhere in the alert.
+    """
+    from nousergon_lib.transparency import CheckResult, format_report
+    results = [
+        CheckResult("ok_row", "weekly", "ok", "fine", "2026-01-01"),
+        CheckResult("degr_row", "weekly", "degraded", "no upstream data", "2026-01-01"),
+        CheckResult("cost_telemetry", "weekly", "fail", "missing column 'run_id'", "2026-01-01"),
+    ]
+    last = format_report(results).strip().splitlines()[-1]
+    assert last.startswith("EXIT 1 — failing row(s): ")
+    assert "cost_telemetry" in last
+    assert "missing column 'run_id'" in last
+    assert "degr_row" not in last
+
+
+def test_a_clean_report_has_no_exit_cause_line():
+    from nousergon_lib.transparency import CheckResult, format_report
+    results = [
+        CheckResult("ok_row", "weekly", "ok", "fine", "2026-01-01"),
+        CheckResult("degr_row", "weekly", "degraded", "no upstream data", "2026-01-01"),
+    ]
+    assert "EXIT 1" not in format_report(results)
 
 
 def test_real_inventory_pipeline_execution_is_non_fatal():
