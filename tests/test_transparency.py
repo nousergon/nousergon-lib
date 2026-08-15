@@ -1061,3 +1061,122 @@ def test_real_inventory_agent_decisions_degrades_on_no_recent_sf_run():
     row = next(r for r in inv["inventory"] if r["id"] == "agent_decisions")
     src = next(s for s in row["sources"] if s["kind"] == "s3_json")
     assert "no_recent_sf_run" in src.get("non_fatal_statuses", [])
+
+
+from unittest.mock import MagicMock  # noqa: E402
+
+from nousergon_lib import transparency  # noqa: E402
+
+# ── config-I7412: a switched-off producer is GATED, not failing ─────────────
+# `cost_telemetry` failed EVERY week against decision_artifacts/_cost/, whose
+# only remaining producer is the Think Tank — the agentic research graph was
+# retired 2026-07-12 (config#1580) and `alpha-research-thinktank-daily` is
+# DISABLED per Brian's 2026-08-07 ruling. That single FAIL took the weekly SF's
+# terminal to DEGRADED. Same shape as the config_research_params tombstone:
+# "paging on 88 days of staleness against a producer that will never write
+# again".
+
+_GATED_ROW = {
+    "id": "gated_row",
+    "cadence": "weekly",
+    "effective_date": "2026-01-01",
+    "gated_on_events_rule": "alpha-research-thinktank-daily",
+    "gate_reason": "the sole producer's schedule is DISABLED",
+    "sources": [{"kind": "s3_json", "key_pattern": "nope/{date}.json",
+                 "max_age_days": 1}],
+}
+
+
+def _events(state):
+    ev = MagicMock()
+    ev.describe_rule.return_value = {"State": state}
+    return ev
+
+
+class TestGatedRows:
+    def test_a_disabled_producer_gates_the_row(self):
+        r = transparency._check_row(
+            dict(_GATED_ROW), date(2026, 8, 15), MagicMock(), MagicMock(),
+            _events("DISABLED"),
+        )
+        assert r.status == "gated"
+        assert "DISABLED" in r.detail or "sole producer" in r.detail
+
+    def test_an_enabled_producer_does_not_gate(self):
+        r = transparency._check_row(
+            dict(_GATED_ROW), date(2026, 8, 15), MagicMock(), MagicMock(),
+            _events("ENABLED"),
+        )
+        assert r.status != "gated"
+
+    def test_a_gated_row_costs_no_s3_calls(self):
+        """The point of gating before the sources, not after."""
+        s3 = MagicMock()
+        transparency._check_row(
+            dict(_GATED_ROW), date(2026, 8, 15), s3, MagicMock(),
+            _events("DISABLED"),
+        )
+        s3.get_object.assert_not_called()
+        s3.head_object.assert_not_called()
+
+    def test_an_UNREADABLE_rule_state_never_gates(self):
+        """A denied lookup must not silence a real failure — the exact class
+        config-I7400 was filed for (a denial rendered as an absence)."""
+        ev = MagicMock()
+        ev.describe_rule.side_effect = RuntimeError("AccessDenied")
+        r = transparency._check_row(
+            dict(_GATED_ROW), date(2026, 8, 15), MagicMock(), MagicMock(), ev,
+        )
+        assert r.status != "gated"
+        assert "gate UNKNOWN" in r.detail
+
+    def test_a_row_with_no_gate_declared_is_unaffected(self):
+        row = {k: v for k, v in _GATED_ROW.items()
+               if k not in ("gated_on_events_rule", "gate_reason")}
+        ev = MagicMock()
+        r = transparency._check_row(
+            row, date(2026, 8, 15), MagicMock(), MagicMock(), ev,
+        )
+        assert r.status != "gated"
+        ev.describe_rule.assert_not_called()
+
+    def test_gated_is_not_counted_as_a_failure(self):
+        results = [
+            transparency.CheckResult("a", "weekly", "gated", "g", "2026-01-01"),
+            transparency.CheckResult("b", "weekly", "ok", "o", "2026-01-01"),
+        ]
+        report = transparency.format_report(results)
+        assert "Failed: 0" in report
+        assert "Gated: 1" in report
+        # The gating denominator excludes it, so one ok row is 100%.
+        assert "100.0% of gating rows passing" in report
+
+    def test_gated_is_named_in_its_own_section(self):
+        results = [transparency.CheckResult(
+            "cost_telemetry", "weekly", "gated",
+            "gated: the sole producer's schedule is DISABLED", "2026-01-01")]
+        report = transparency.format_report(results)
+        assert "[GATE]" in report
+        assert "not a fault, and not a pass" in report
+
+    def test_gated_emits_a_passing_row_metric_and_its_own_counter(self):
+        cw = MagicMock()
+        transparency.emit_cloudwatch_metrics(
+            [transparency.CheckResult("a", "weekly", "gated", "g", "2026-01-01")],
+            cloudwatch_client=cw,
+        )
+        published = [m for c in cw.put_metric_data.call_args_list
+                     for m in c.kwargs["MetricData"]]
+        row = next(m for m in published if m["MetricName"] == "SubstrateRowOK")
+        assert row["Value"] == 1.0, "a gated row must not trip SubstrateRowOK"
+        gated = next(m for m in published
+                     if m["MetricName"] == "SubstrateChecksGated")
+        assert gated["Value"] == 1.0
+
+
+def test_the_cost_telemetry_row_declares_its_gate():
+    """The live instance this was built for."""
+    inv = transparency.load_inventory()
+    row = next(r for r in inv["inventory"] if r["id"] == "cost_telemetry")
+    assert row["gated_on_events_rule"] == "alpha-research-thinktank-daily"
+    assert "DISABLED" in row["gate_reason"]
