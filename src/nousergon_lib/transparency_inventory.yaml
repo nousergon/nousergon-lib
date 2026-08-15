@@ -257,6 +257,28 @@ inventory:
 
   - id: cost_telemetry
     cadence: weekly
+    # config-I7412. This artifact's ONLY remaining producer is the Think Tank:
+    # the agentic six-team + CIO research graph was retired 2026-07-12
+    # (config#1580), and its cost-capture went with it. `alpha-research-
+    # thinktank-daily` is DISABLED per Brian's 2026-08-07 ruling ("shut down
+    # all automatic AWS processes except the weekly SF, the daily preopen and
+    # postclose SFs, and the 24/7 dashboard box").
+    #
+    # So while that rule is off, nothing is scheduled to write the parquet and
+    # its staleness measures an operator decision, not the system's health.
+    # This row failed EVERY week on that basis and took the weekly SF's
+    # terminal to DEGRADED with it. Same shape as the config_research_params
+    # tombstone: "paging on 88 days of staleness against a producer that will
+    # never write again".
+    #
+    # The gate reads the LIVE rule state and clears itself the moment the
+    # schedule is re-enabled — it is not a hand-set exemption with no reachable
+    # clearing condition.
+    gated_on_events_rule: alpha-research-thinktank-daily
+    gate_reason: >-
+      the sole producer's schedule (alpha-research-thinktank-daily) is
+      DISABLED, so no cost parquet is scheduled to be written; re-enabling
+      that rule clears this gate automatically
     # Per-run LLM cost telemetry workstream shipped via alpha-engine-
     # research PR #73 (merged 2026-05-01). The first Weekly Freshness SF run
     # that captured a ``cost.parquet`` was 2026-05-02. Consumers

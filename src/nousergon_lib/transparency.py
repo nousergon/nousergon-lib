@@ -57,6 +57,8 @@ log = logging.getLogger(__name__)
 
 INVENTORY_PATH = Path(__file__).parent / "transparency_inventory.yaml"
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_BUCKET = "alpha-engine-research"
 DEFAULT_NAMESPACE_OUT = "AlphaEngine/Substrate"
 DEFAULT_SNS_TOPIC = "arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts"
@@ -68,12 +70,35 @@ class CheckResult:
 
     row_id: str
     cadence: str
-    # "ok" | "fail" | "degraded" | "not_yet_effective" | "error"
+    # "ok" | "fail" | "gated" | "degraded" | "not_yet_effective" | "error"
+    # "gated" = the row's declared producer is switched off, so the artifact's
+    # staleness is not a finding about the system. See GATED below.
     # "degraded" = non-fatal: either a diagnostic row (non_fatal: true, e.g.
     # pipeline_execution success_rate — observability, not a gate) or a present
     # artifact carrying a benign producer status (non_fatal_statuses, e.g.
     # no_recent_sf_run = no upstream data this cycle, not a missing diagnostic).
     # Degraded does NOT count as a failure: no SNS alert, exit 0, CW value 1.0.
+    #
+    # GATED (config-I7412). A row may declare ``gated_on_events_rule: <name>``.
+    # When that EventBridge rule is DISABLED, nothing is scheduled to write the
+    # artifact, so asserting its freshness measures an operator decision rather
+    # than the system's health.
+    #
+    # Measured 2026-08-15: ``cost_telemetry`` failed every week against
+    # ``decision_artifacts/_cost/``, whose only remaining producer is the Think
+    # Tank -- the agentic research graph was retired 2026-07-12 (config#1580)
+    # and ``alpha-research-thinktank-daily`` is DISABLED per Brian's 2026-08-07
+    # ruling. That single FAIL took the weekly SF's terminal to DEGRADED. It is
+    # the same shape as the ``config_research_params`` tombstone, which had been
+    # "paging on 88 days of staleness against a producer that will never write
+    # again".
+    #
+    # GATED is a THIRD verdict on purpose, not a demotion to degraded or a
+    # silent pass. principles.md §2.7 runs in both directions: `no data` is
+    # never rendered as green, and never as a fault in a component that is
+    # deliberately off. The gate clears itself the moment the rule is
+    # re-enabled -- it has a reachable clearing condition, unlike a hand-set
+    # exemption.
     status: str
     detail: str
     effective_date: str
@@ -101,6 +126,7 @@ def check_inventory(
     inventory: dict | None = None,
     s3_client: Any = None,
     cloudwatch_client: Any = None,
+    events_client: Any = None,
 ) -> list[CheckResult]:
     """Validate every inventory row whose ``cadence`` matches the input.
 
@@ -120,7 +146,9 @@ def check_inventory(
     results: list[CheckResult] = []
 
     for row in rows:
-        results.append(_check_row(row, today, s3_client, cloudwatch_client))
+        results.append(
+            _check_row(row, today, s3_client, cloudwatch_client, events_client)
+        )
 
     return results
 
@@ -149,11 +177,34 @@ def _filter_rows(rows: Iterable[dict], cadence: str) -> Iterable[dict]:
             yield row
 
 
+def _rule_state(rule_name: str, events_client: Any = None) -> str | None:
+    """Live ``State`` of an EventBridge rule, or None when it cannot be read.
+
+    None is deliberately distinct from DISABLED: a denied or failed lookup must
+    never gate a row. Gating on an unreadable answer would silence a real
+    failure on an IAM error, which is the failure mode this whole area keeps
+    producing (config-I7400: a denial rendered as an absence).
+    """
+    try:
+        if events_client is None:
+            import boto3
+
+            events_client = boto3.client("events", region_name="us-east-1")
+        return str(events_client.describe_rule(Name=rule_name).get("State") or "")
+    except Exception as exc:  # noqa: BLE001 — unreadable is a distinct answer
+        logger.warning(
+            "transparency: could not read state of EventBridge rule %r: %s: %s",
+            rule_name, type(exc).__name__, exc,
+        )
+        return None
+
+
 def _check_row(
     row: dict,
     today: date,
     s3_client: Any,
     cloudwatch_client: Any,
+    events_client: Any = None,
 ) -> CheckResult:
     eff = date.fromisoformat(str(row["effective_date"]))
     if today < eff:
@@ -164,6 +215,32 @@ def _check_row(
             detail=f"effective_date={eff} > today={today}",
             effective_date=str(eff),
         )
+
+    # config-I7412: a row whose declared producer is switched off is GATED,
+    # not failing. Evaluated BEFORE the sources so a gated row costs no S3 or
+    # CloudWatch calls at all.
+    gate_rule = row.get("gated_on_events_rule")
+    gate_note = ""
+    if gate_rule:
+        state = _rule_state(gate_rule, events_client)
+        if state is None:
+            # Unreadable is NOT gated. Fall through to the real check and say
+            # so, rather than silencing a genuine failure on an IAM error.
+            gate_note = (
+                f" [gate UNKNOWN: could not read the state of EventBridge rule "
+                f"'{gate_rule}' — this row was evaluated normally]"
+            )
+        elif state == "DISABLED":
+            reason = row.get("gate_reason") or (
+                f"the producer's schedule '{gate_rule}' is DISABLED"
+            )
+            return CheckResult(
+                row_id=row["id"],
+                cadence=row["cadence"],
+                status="gated",
+                detail=f"gated: {reason}",
+                effective_date=str(eff),
+            )
 
     sub: list[str] = []
     artifact_hint: str | None = None
@@ -204,7 +281,7 @@ def _check_row(
             row_id=row["id"],
             cadence=row["cadence"],
             status="degraded",
-            detail=degraded_detail or "; ".join(sub),
+            detail=(degraded_detail or "; ".join(sub)) + gate_note,
             effective_date=str(eff),
             artifact=artifact_hint,
             sub_failures=sub,
@@ -214,7 +291,7 @@ def _check_row(
         row_id=row["id"],
         cadence=row["cadence"],
         status="fail",
-        detail="; ".join(sub),
+        detail="; ".join(sub) + gate_note,
         effective_date=str(eff),
         artifact=artifact_hint,
         sub_failures=sub,
@@ -702,7 +779,7 @@ def emit_cloudwatch_metrics(results: list[CheckResult], cloudwatch_client: Any =
     for r in results:
         # 1 = ok / not_yet_effective / degraded (all non-failing), 0 = fail.
         # Degraded is non-fatal so it must not trip the SubstrateRowOK alarm.
-        value = 1.0 if r.status in ("ok", "not_yet_effective", "degraded") else 0.0
+        value = 1.0 if r.status in ("ok", "not_yet_effective", "degraded", "gated") else 0.0
         metric_data.append({
             "MetricName": "SubstrateRowOK",
             "Dimensions": [{"Name": "RowID", "Value": r.row_id}],
@@ -713,11 +790,13 @@ def emit_cloudwatch_metrics(results: list[CheckResult], cloudwatch_client: Any =
     n_fail = sum(1 for r in results if r.status == "fail")
     n_degraded = sum(1 for r in results if r.status == "degraded")
     n_pending = sum(1 for r in results if r.status == "not_yet_effective")
+    n_gated = sum(1 for r in results if r.status == "gated")
     metric_data.extend([
         {"MetricName": "SubstrateChecksOK", "Value": float(n_ok), "Unit": "Count"},
         {"MetricName": "SubstrateChecksFailed", "Value": float(n_fail), "Unit": "Count"},
         {"MetricName": "SubstrateChecksDegraded", "Value": float(n_degraded), "Unit": "Count"},
         {"MetricName": "SubstrateChecksPending", "Value": float(n_pending), "Unit": "Count"},
+        {"MetricName": "SubstrateChecksGated", "Value": float(n_gated), "Unit": "Count"},
     ])
 
     for i in range(0, len(metric_data), 20):
@@ -733,18 +812,21 @@ def format_report(results: list[CheckResult]) -> str:
     n_fail = sum(1 for r in results if r.status == "fail")
     n_degraded = sum(1 for r in results if r.status == "degraded")
     n_pending = sum(1 for r in results if r.status == "not_yet_effective")
+    n_gated = sum(1 for r in results if r.status == "gated")
     n_total = len(results)
-    # Gating denominator excludes pending (not yet effective) AND degraded
-    # (non-fatal, can't be scored pass/fail this cycle).
-    n_gating = n_total - n_pending - n_degraded
+    # Gating denominator excludes pending (not yet effective), degraded
+    # (non-fatal, can't be scored pass/fail this cycle) AND gated (the
+    # producer is switched off, so there is nothing to score).
+    n_gating = n_total - n_pending - n_degraded - n_gated
     pct = (100.0 * n_ok / n_gating) if n_gating > 0 else 100.0
     lines.append(
         f"OK: {n_ok}  Failed: {n_fail}  Degraded: {n_degraded}  "
-        f"Pending: {n_pending}  ({pct:.1f}% of gating rows passing)"
+        f"Gated: {n_gated}  Pending: {n_pending}  "
+        f"({pct:.1f}% of gating rows passing)"
     )
     lines.append("")
     icon = {
-        "ok": "OK ", "fail": "FAIL", "degraded": "DEGR",
+        "ok": "OK ", "fail": "FAIL", "degraded": "DEGR", "gated": "GATE",
         "not_yet_effective": "PEND", "error": "ERR ",
     }
     for r in results:
@@ -754,6 +836,14 @@ def format_report(results: list[CheckResult]) -> str:
         lines.append("")
         lines.append("ACTIONS NEEDED:")
         for r in failures:
+            lines.append(f"  - {r.row_id}: {r.detail}")
+    gated = [r for r in results if r.status == "gated"]
+    if gated:
+        lines.append("")
+        lines.append(
+            "GATED (the producer is switched off — not a fault, and not a pass):"
+        )
+        for r in gated:
             lines.append(f"  - {r.row_id}: {r.detail}")
     degraded = [r for r in results if r.status == "degraded"]
     if degraded:
