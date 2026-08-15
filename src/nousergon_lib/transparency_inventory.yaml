@@ -257,28 +257,35 @@ inventory:
 
   - id: cost_telemetry
     cadence: weekly
-    # config-I7412. This artifact's ONLY remaining producer is the Think Tank:
-    # the agentic six-team + CIO research graph was retired 2026-07-12
-    # (config#1580), and its cost-capture went with it. `alpha-research-
-    # thinktank-daily` is DISABLED per Brian's 2026-08-07 ruling ("shut down
-    # all automatic AWS processes except the weekly SF, the daily preopen and
-    # postclose SFs, and the 24/7 dashboard box").
+    # UNGATED AGAIN, 2026-08-15 (alpha-engine-config-I7420) — read this before
+    # re-adding `gated_on_events_rule` here.
     #
-    # So while that rule is off, nothing is scheduled to write the parquet and
-    # its staleness measures an operator decision, not the system's health.
-    # This row failed EVERY week on that basis and took the weekly SF's
-    # terminal to DEGRADED with it. Same shape as the config_research_params
-    # tombstone: "paging on 88 days of staleness against a producer that will
-    # never write again".
+    # Earlier the same day this row was gated on `alpha-research-thinktank-daily`
+    # (config-I7412, lib#319) on the premise that the Think Tank was the
+    # artifact's ONLY remaining producer: the agentic six-team + CIO research
+    # graph was retired 2026-07-12 (config#1580) and its cost capture went with
+    # it, and that schedule is DISABLED per Brian's 2026-08-07 ruling. On that
+    # premise the gate was right — the row was asserting freshness against
+    # something nothing was scheduled to write.
     #
-    # The gate reads the LIVE rule state and clears itself the moment the
-    # schedule is re-enabled — it is not a hand-set exemption with no reachable
-    # clearing condition.
-    gated_on_events_rule: alpha-research-thinktank-daily
-    gate_reason: >-
-      the sole producer's schedule (alpha-research-thinktank-daily) is
-      DISABLED, so no cost parquet is scheduled to be written; re-enabling
-      that rule clears this gate automatically
+    # The premise stopped being true hours later. `alpha-engine-config-I7179`
+    # merged three PRs making the weekly SF's OWN LLM stages cost producers —
+    # `crucible-research#614` (eval-judge chain + the fan-in check),
+    # `crucible-backtester#648` (the ReplayConcordance Lambda) and
+    # `crucible-evaluator#197` (the Director). Those run on the weekly cadence,
+    # which is not paused. So the parquet now has a live, scheduled producer and
+    # the gate's clearing condition no longer describes the thing it gates.
+    #
+    # Leaving it would be the failure mode config-I7412's own deliverable 4
+    # names as worse than the noise it removes: a row gated on a RETIRED
+    # producer while a LIVE one exists renders GATED — excluded from the
+    # denominator, its own section, not a fault — for a genuine cost-capture
+    # failure. `principles.md` §2.7 in the direction that matters here: a gate
+    # is only honest while its premise holds, and this one's premise has a
+    # measurable expiry.
+    #
+    # The GATED mechanism itself is unchanged and correct; this is a scope
+    # correction to one row, not a retreat from the verdict.
     # Per-run LLM cost telemetry workstream shipped via alpha-engine-
     # research PR #73 (merged 2026-05-01). The first Weekly Freshness SF run
     # that captured a ``cost.parquet`` was 2026-05-02. Consumers

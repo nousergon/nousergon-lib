@@ -1207,9 +1207,29 @@ class TestGatedRows:
         assert gated["Value"] == 1.0
 
 
-def test_the_cost_telemetry_row_declares_its_gate():
-    """The live instance this was built for."""
+def test_the_cost_telemetry_row_is_NOT_gated_because_it_has_a_live_producer():
+    """alpha-engine-config-I7420 — the inverse of what this test asserted for
+    a few hours on 2026-08-15.
+
+    The row was gated on `alpha-research-thinktank-daily` (config-I7412) on the
+    premise that the Think Tank was the parquet's only remaining producer. That
+    premise expired the same day: config-I7179 merged three PRs making the
+    weekly SF's own LLM stages producers (crucible-research#614,
+    crucible-backtester#648, crucible-evaluator#197), and the weekly cadence is
+    not paused.
+
+    A row gated on a RETIRED producer while a LIVE one exists renders GATED —
+    excluded from the denominator, not a fault — for a genuine cost-capture
+    failure. That is the silencing direction config-I7412's own deliverable 4
+    calls worse than the noise it removes.
+
+    Asserted as an explicit NEGATIVE so re-adding the gate is a deliberate act
+    that has to argue with this docstring.
+    """
     inv = transparency.load_inventory()
     row = next(r for r in inv["inventory"] if r["id"] == "cost_telemetry")
-    assert row["gated_on_events_rule"] == "alpha-research-thinktank-daily"
-    assert "DISABLED" in row["gate_reason"]
+    assert "gated_on_events_rule" not in row, (
+        "cost_telemetry has live producers on the weekly cadence (config-I7179); "
+        "gating it on the retired Think Tank schedule would render a real "
+        "capture failure as GATED"
+    )
