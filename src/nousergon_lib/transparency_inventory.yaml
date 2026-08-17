@@ -24,6 +24,12 @@ inventory:
   - id: pipeline_execution
     cadence: weekly
     effective_date: 2026-04-01
+    # producer (config-I7412): the row's declared source of truth, for a
+    # human OR a sweep to check without deriving it from `sources` below.
+    # Freeform on purpose — cross-repo producers can't be import-checked
+    # from this repo; see the class-guard note on cost_telemetry's producer
+    # field for what IS and is not cheaply verifiable from here.
+    producer: "AWS/States CloudWatch metrics — live, always-on (SF executions)"
     # non_fatal (Phase 1c, 2026-05-29): raw CloudWatch SF success_rate is a
     # FIRST-PASS / OPERATOR-TOIL diagnostic, NOT a health gate. On a young,
     # recovery-stitched system a cycle that needs N executions (1 scheduled
@@ -68,6 +74,36 @@ inventory:
     # First Weekly Freshness SF observation after backtester #146 (decision
     # capture coverage % published from evaluator).
     effective_date: 2026-05-09
+    # RETIRED PRODUCER, live row (config-I7412) — this is NOT a TOMBSTONE-
+    # REMOVED entry like config_research_params or research_scorecard_latest
+    # in ARTIFACT_REGISTRY.yaml: the row stays live because its assertion
+    # (coverage_pct >= 99) is still meaningful the day a research producer
+    # writes decision_artifacts/{agent_id}/{run_id}.json again.
+    #
+    # The six-team + CIO agentic research graph — the only thing that ever
+    # wrote the canonical 8-agent captures this row counts (macro_economist,
+    # ic_cio, 6x sector_team; see crucible-backtester
+    # analysis/decision_capture_coverage.py::CANONICAL_AGENTS) — was retired
+    # 2026-07-12 (config#1580, spun off config-I3246). signals_envelope.py
+    # is the live producer since that retirement and writes no per-agent
+    # decision_artifacts at all. So `decision_capture_coverage.json` has
+    # returned `status: no_recent_sf_run, coverage_pct: 0.0` every week
+    # since, correctly and permanently (not a "research failed this cycle"
+    # blip — see decision_capture_coverage.py's own module docstring, updated
+    # alongside this row).
+    #
+    # The `non_fatal_statuses` softening below (Phase 1a, 2026-05-29) already
+    # keeps this from paging or failing the run — it predates the retirement
+    # and happens to cover it. What was missing, and cost a session
+    # (alpha-engine-config-I7412, escalated from a DEGRADED weekly terminal
+    # that traced here and to cost_telemetry/stance-drift/decision-capture
+    # in four different vocabularies, none saying "retired"): this comment.
+    # If the multi-agent research graph is ever revived, this row starts
+    # meaning something again with zero further changes — same shape as the
+    # config_research_params / research_scorecard_latest tombstones, minus
+    # the removal, because a live producer really could reappear behind this
+    # exact assertion.
+    producer: "RETIRED 2026-07-12 (config#1580) — crucible-research's agentic research graph (macro_economist / ic_cio / sector_team agents). No live producer as of 2026-08-17; revives with the graph."
     description: >-
       Per-call artifact: prompt version + decision-capture record + cost
       telemetry + judge rubric scores. Coverage ≥ 99%.
@@ -82,11 +118,12 @@ inventory:
         # emits this artifact now (alpha-engine-backtester #265), so absence
         # means the diagnostic never ran (a real failure), while a present
         # artifact with status=no_recent_sf_run means the upstream Weekly Freshness SF
-        # produced no agent captures this cycle (research failed / recovery
-        # was predictor-only) — a legitimate recovery-stitched state, not a
-        # coverage regression. Degrade rather than fail; a genuinely dead
-        # research pipeline is caught independently by the research_signals
-        # freshness row. See artifact-completion-monitoring-design-260529.md.
+        # produced no agent captures this cycle — since 2026-07-12 this is
+        # the EXPECTED, permanent reading (retired producer, see the
+        # `producer:` field above), not a recovery-stitched blip. Degrade
+        # rather than fail either way; a genuinely dead research pipeline is
+        # caught independently by the research_signals freshness row. See
+        # artifact-completion-monitoring-design-260529.md.
         non_fatal_statuses:
           - no_recent_sf_run
         assert:
@@ -97,6 +134,7 @@ inventory:
   - id: predictor_decisions
     cadence: daily
     effective_date: 2026-04-01
+    producer: "crucible-predictor — live, daily weekday-SF inference"
     description: >-
       Per-L1-component IC + L2 IC + confidence calibration + feature
       contributions.
@@ -115,6 +153,7 @@ inventory:
     # First ENTER fill after executor #138 (signal_date + prediction_date
     # lineage columns shipped 2026-05-06).
     effective_date: 2026-05-07
+    producer: "crucible-executor — live, daily weekday-SF fills"
     description: >-
       Per-fill: entry trigger + sizing breakdown + signal_date and
       prediction_date lineage columns populated on every ENTER row.
@@ -142,6 +181,7 @@ inventory:
     # First veto after executor #139 (structured risk_events table
     # shipped 2026-05-06).
     effective_date: 2026-05-07
+    producer: "crucible-executor — live, event-driven on any veto/override/halt"
     description: >-
       Per-event log of risk decisions (veto / override / halt) with
       rule + reason + value at threshold.
@@ -168,6 +208,7 @@ inventory:
     # First EOD reconcile after executor #140 (unattributed_residual_pct
     # + 5 attribution columns shipped 2026-05-06).
     effective_date: 2026-05-07
+    producer: "crucible-executor — live, daily EOD reconcile"
     description: >-
       Per-day attributed dollars (research / predictor / sizing / market)
       + unattributed residual ≤ 1% of NAV.
@@ -190,6 +231,7 @@ inventory:
   - id: config_changes
     cadence: weekly
     effective_date: 2026-04-01
+    producer: "crucible-backtester optimizers — live, event-driven (config-apply gate)"
     description: >-
       Per-change diff log + rationale + subsequent-week behavioral delta
       for autonomous-loop config updates (scoring weights, executor
@@ -216,6 +258,7 @@ inventory:
     # 2026-05-05; first weekday-SF run with the column populated was
     # 2026-05-06.
     effective_date: 2026-05-06
+    producer: "nousergon-data — live, daily weekday-SF data phase 1"
     description: >-
       Per-row source attribution + per-feature NaN/outlier rates +
       freshness on the daily_closes intermediate parquet.
@@ -238,6 +281,12 @@ inventory:
   - id: agent_quality
     cadence: weekly
     effective_date: 2026-04-01
+    # config-I7412: NOT the retired research graph — this is the LLM-as-judge
+    # rubric metric over WHATEVER agents ran a given week (the Think Tank and
+    # eval-judge chain today), not specifically the six-team+CIO graph. No
+    # tombstone needed; judged_agent_id just has a smaller live population
+    # since 2026-07-12 than it used to.
+    producer: "crucible-research evals/judge.py — live, weekly (judges whichever agents ran that cycle)"
     description: >-
       Rolling 4-week mean of LLM-as-judge rubric scores per
       (judged_agent_id, criterion, judge_model) combo. The min across
@@ -286,6 +335,7 @@ inventory:
     #
     # The GATED mechanism itself is unchanged and correct; this is a scope
     # correction to one row, not a retreat from the verdict.
+    producer: "krepis.cost_sink (Think Tank + eval-judge + ReplayConcordance + Director) — live, weekly. Verified 2026-08-17: decision_artifacts/_cost/2026-08-16/cost.parquet fresh (config-I7412)."
     # Per-run LLM cost telemetry workstream shipped via alpha-engine-
     # research PR #73 (merged 2026-05-01). The first Weekly Freshness SF run
     # that captured a ``cost.parquet`` was 2026-05-02. Consumers

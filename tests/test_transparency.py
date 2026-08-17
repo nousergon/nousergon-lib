@@ -1233,3 +1233,31 @@ def test_the_cost_telemetry_row_is_NOT_gated_because_it_has_a_live_producer():
         "gating it on the retired Think Tank schedule would render a real "
         "capture failure as GATED"
     )
+
+
+def test_every_row_declares_a_producer():
+    """alpha-engine-config-I7412 class guard, cheap half.
+
+    Five detectors were found alarming on a research graph retired
+    2026-07-12 with nothing in the alarming surface saying so — each row
+    described what it measured, never who was supposed to be writing it.
+    A `producer:` field is the minimum a human (or a future sweep) needs to
+    answer "is this row's producer still alive?" without re-deriving it from
+    `sources:` + institutional memory.
+
+    This does NOT check that a named producer still exists in its owning
+    repo — that requires cross-repo static analysis nousergon-lib's own test
+    suite has no way to perform (the producers live in crucible-predictor,
+    crucible-executor, crucible-backtester, crucible-research, nousergon-data
+    — none of them a dependency of this repo). That half is filed as
+    alpha-engine-config-I7412's follow-up rather than faked here.
+    """
+    inv = transparency.load_inventory()
+    missing = [
+        r["id"] for r in inv["inventory"]
+        if not (r.get("producer") or "").strip()
+    ]
+    assert not missing, (
+        f"rows with no `producer:` field: {missing} — every row must name "
+        "its producer so a retired one is documented, not rediscovered"
+    )
