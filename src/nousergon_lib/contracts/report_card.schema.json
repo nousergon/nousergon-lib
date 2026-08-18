@@ -13,7 +13,9 @@
     "executor",
     "tiles",
     "tiles_overall_status",
-    "_provenance"
+    "_provenance",
+    "attestation",
+    "degraded_attestation"
   ],
   "properties": {
     "schema_version": {
@@ -73,6 +75,39 @@
         }
       },
       "description": "Build provenance stamped by aggregate.py (run_date, grader_source, artifact-read audit)"
+    },
+    "attestation": {
+      "type": "object",
+      "required": ["schema", "run_date", "verdict", "as_of"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "description": "Attestation payload schema stamp, e.g. report_card_attestation-1.0.0"
+        },
+        "run_date": {
+          "type": "string",
+          "description": "Grading cycle date (YYYY-MM-DD) the attestation covers"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["PASS", "FAIL", "UNKNOWN"],
+          "description": "Closed-vocabulary correctness verdict. crucible-evaluator director/verdict.py gates its acting authority on this value; a producer emitting any other string is a contract violation, not a silently-UNKNOWN read."
+        },
+        "as_of": {
+          "type": "object",
+          "description": "Per-check-family timestamp map (observed producer shape: backtester / evaluator_stage / contamination), each value a timestamp string or null when that check family did not run this cycle.",
+          "properties": {
+            "backtester": { "type": ["string", "null"] },
+            "evaluator_stage": { "type": ["string", "null"] },
+            "contamination": { "type": ["string", "null"] }
+          }
+        }
+      },
+      "description": "Correctness attestation block (schema report_card_attestation-1.0.0), ALWAYS-EMIT per crucible-evaluator#187/#189 and pinned from the producer side by crucible-evaluator tests/test_report_card_producer_contract.py. Read by crucible-dashboard components/report_card_v2.py, the console's document-fields driver, and director/verdict.py's acting-authority gate."
+    },
+    "degraded_attestation": {
+      "type": "boolean",
+      "description": "True when the correctness guarantee is withheld this cycle (e.g. contamination check did not run). Read alongside attestation.verdict by the same three consumers."
     }
   },
   "$defs": {

@@ -661,6 +661,17 @@ def _report_card(**overrides):
                 "artifacts_missing": ["backtest/2026-07-11/pit_parity.json"],
             },
         },
+        "attestation": {
+            "schema": "report_card_attestation-1.0.0",
+            "run_date": "2026-07-11",
+            "verdict": "PASS",
+            "as_of": {
+                "backtester": "2026-07-11T16:31:20Z",
+                "evaluator_stage": "2026-07-11T16:29:59Z",
+                "contamination": None,
+            },
+        },
+        "degraded_attestation": False,
     }
     payload.update(overrides)
     return payload
@@ -690,6 +701,8 @@ class TestReportCardContract:
             "tiles",
             "tiles_overall_status",
             "_provenance",
+            "attestation",
+            "degraded_attestation",
         ],
     )
     def test_missing_required_top_level_fails(self, missing):
@@ -738,6 +751,58 @@ class TestReportCardContract:
 
     def test_additive_top_level_field_ok(self):
         contracts.validate("report_card", _report_card(some_future_tile_group={"x": 1}))
+
+    @pytest.mark.parametrize("field", ["schema", "run_date", "verdict", "as_of"])
+    def test_attestation_missing_field_fails(self, field):
+        payload = _report_card()
+        del payload["attestation"][field]
+        assert contracts.conformance_errors("report_card", payload)
+
+    def test_attestation_bad_verdict_enum_rejected(self):
+        # The enum is the point: a producer that starts writing "ok" must be a
+        # contract violation, not a silently-UNKNOWN read in three consumers.
+        payload = _report_card()
+        payload["attestation"]["verdict"] = "ok"
+        assert contracts.conformance_errors("report_card", payload)
+
+    @pytest.mark.parametrize("verdict", ["PASS", "FAIL", "UNKNOWN"])
+    def test_attestation_all_verdicts_accepted(self, verdict):
+        contracts.validate("report_card", _report_card(attestation={
+            **_report_card()["attestation"], "verdict": verdict,
+        }))
+
+    def test_attestation_as_of_object_accepted(self):
+        # Observed producer shape (config-I7156 correction): as_of is an
+        # object keyed by check family, not a bare ["string", "null"].
+        contracts.validate("report_card", _report_card(attestation={
+            **_report_card()["attestation"],
+            "as_of": {"backtester": "2026-08-15T16:31:20Z", "evaluator_stage": None, "contamination": None},
+        }))
+
+    def test_attestation_additive_fields_ok(self):
+        # Real producer output carries more than the required minimum
+        # (arithmetic_verdict, backtester, evaluator, contamination, ...).
+        payload = _report_card()
+        payload["attestation"].update({
+            "arithmetic_verdict": "PASS",
+            "contamination_verdict": "UNKNOWN",
+            "contamination_coverage_fraction": None,
+            "promotion_withheld": False,
+            "reason": "Correctness guarantee WITHHELD: contamination=UNKNOWN.",
+        })
+        contracts.validate("report_card", payload)
+
+    def test_missing_attestation_fails(self):
+        payload = _report_card()
+        del payload["attestation"]
+        assert contracts.conformance_errors("report_card", payload)
+
+    def test_degraded_attestation_wrong_type_rejected(self):
+        assert contracts.conformance_errors("report_card", _report_card(degraded_attestation="true"))
+
+    @pytest.mark.parametrize("degraded", [True, False])
+    def test_degraded_attestation_bool_accepted(self, degraded):
+        contracts.validate("report_card", _report_card(degraded_attestation=degraded))
 
     def test_additive_tile_fields_ok(self):
         payload = _report_card()
