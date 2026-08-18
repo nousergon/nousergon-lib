@@ -844,26 +844,64 @@ def _newest_under_prefix(
     prefix: str,
     suffix: str,
     *,
-    cap_pages: int = 8,
+    cap_pages: int = 64,
 ) -> tuple[str, datetime | None, str | None]:
     """Return ``(newest_key, newest_last_modified, probe_error)`` for the
     most-recently-modified object under ``prefix`` whose key ends with
     ``suffix``.
 
     Pure w.r.t. side effects beyond ``s3_client`` LIST calls. Paginates up
-    to ``cap_pages`` pages (8 × 1000 = 8000 objects) — every freshness-
-    tracked date-templated prefix is far smaller; the cap is a runaway
+    to ``cap_pages`` pages (64 × 1000 = 64,000 objects) as a runaway
     backstop. A LIST client error (403 / network) returns
     ``("", None, reason)`` so the caller can surface ``probe_failed`` rather
     than mis-reporting ``missing``.
+
+    **Hitting the cap is a probe failure, never a verdict**
+    (alpha-engine-config-I7617). The docstring used to claim "every
+    freshness-tracked date-templated prefix is far smaller"; on 2026-08-18
+    ``market_data/weekly/`` reached 8208 objects and the claim stopped being
+    true, silently. Because S3 lists lexically and these prefixes are
+    date-templated, the objects past the cap are the NEWEST — so a truncated
+    scan does not degrade gracefully, it names a stale instance as the
+    freshest and pages five registry rows CRITICAL for artifacts that were
+    fresh. The cap was raised so today's prefixes clear it by ~8×, AND made
+    loud so the next prefix to cross it says "I could not measure this"
+    instead of answering wrongly. A backstop whose limit is reachable by
+    ordinary growth needs both.
     """
     newest_lm: datetime | None = None
     newest_key = ""
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+        truncated = False
         for page_idx, page in enumerate(pages):
             if page_idx >= cap_pages:
+                # A TRUNCATED SCAN CANNOT ANSWER "newest" (alpha-engine-config-I7617).
+                #
+                # S3 LIST returns keys in LEXICAL order, and every prefix this
+                # function is pointed at is date-templated, so the keys it
+                # stops short of are precisely the MOST RECENT ones. Returning
+                # the newest object seen so far is therefore not an
+                # approximation that degrades gracefully — it is a confident,
+                # specifically-wrong answer that names a stale instance as the
+                # freshest, and it gets wronger every day the prefix grows.
+                #
+                # Measured 2026-08-18: `market_data/weekly/` crossed the old
+                # 8-page (8000-object) cap at 8208 objects. The scan stopped
+                # 208 objects short, reported
+                # `market_data/weekly/2026-08-13/short_interest.json` as the
+                # freshest instance when `.../2026-08-14/short_interest.json`
+                # (written 2026-08-15T09:49Z, two days newer and NEWER THAN
+                # THE FRESHNESS FLOOR) was just past the cut. Five registry
+                # rows sit under that one prefix, and every one of them paged
+                # CRITICAL for an artifact that was fresh.
+                #
+                # So the cap becomes a PROBE FAILURE, not a verdict. "I could
+                # not measure this" and "this is stale" are different claims
+                # and must not share a rendering; a monitor that cannot see
+                # the whole prefix has to say so.
+                truncated = True
                 break
             for obj in page.get("Contents", []) or []:
                 key = obj.get("Key", "")
@@ -883,6 +921,15 @@ def _newest_under_prefix(
         if state == "missing":
             reason = f"S3 LIST returned 404-class for prefix {prefix!r}: {reason}"
         return ("", None, reason)
+    if truncated:
+        return ("", None, (
+            f"S3 LIST over prefix {prefix!r} exceeded the {cap_pages}-page "
+            f"scan cap ({cap_pages * 1000} objects) and was truncated. Keys "
+            f"list lexically, so the objects past the cap are the newest ones "
+            f"— the freshest instance cannot be determined and is NOT being "
+            f"guessed at. Narrow the prefix, or raise the cap "
+            f"(alpha-engine-config-I7617)."
+        ))
     return (newest_key, newest_lm, None)
 
 

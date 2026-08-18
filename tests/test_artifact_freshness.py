@@ -1516,3 +1516,125 @@ class TestCheckCompleteness:
     def test_completeness_check_rejects_negative_min_count(self):
         with pytest.raises(ValueError, match="min_count must be"):
             CompletenessCheck(kind="csv_row_count", min_count=-1)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# A truncated LIST is a probe failure, not a verdict
+# (alpha-engine-config-I7617)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# S3 lists keys in LEXICAL order and every prefix this scan is pointed at is
+# date-templated, so the objects a truncated scan stops short of are precisely
+# the most recent ones. That makes truncation the opposite of a graceful
+# degradation: the function does not return "roughly the newest", it returns a
+# specifically-stale key and calls it the freshest, and it gets wronger every
+# day the prefix grows.
+#
+# Measured 2026-08-18: `market_data/weekly/` crossed the old 8-page/8000-object
+# cap at 8208 objects. The scan stopped 208 short and named
+# `.../2026-08-13/short_interest.json` the freshest instance while
+# `.../2026-08-14/short_interest.json` — written 2026-08-15T09:49Z, two days
+# newer and NEWER THAN THE FRESHNESS FLOOR — sat just past the cut. Five
+# registry rows share that prefix and every one of them paged CRITICAL for an
+# artifact that was fresh.
+
+
+def _paged_s3(keys_in_lexical_order, per_page=1000):
+    """An S3 fake that pages exactly as S3 does: lexical key order, fixed page
+    size. The ordering is the whole point — a fake that returned newest-first
+    would hide the defect these tests exist for."""
+    from unittest import mock as _mock
+
+    def _paginate(*, Bucket, Prefix):
+        contents = [
+            {"Key": k, "LastModified": lm}
+            for k, lm in keys_in_lexical_order
+            if k.startswith(Prefix)
+        ]
+        for i in range(0, max(len(contents), 1), per_page):
+            yield {"Contents": contents[i:i + per_page]}
+
+    paginator = _mock.Mock()
+    paginator.paginate.side_effect = _paginate
+    client = _mock.Mock()
+    client.get_paginator.return_value = paginator
+    return client
+
+
+def _weekly_fixture(n_filler=8000):
+    """`n_filler` older objects, then the one that matters — laid out so the
+    newest key sorts LAST, which is what a date-templated prefix always does."""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    keys = [
+        (f"market_data/weekly/2026-01-{i:05d}/filler.json", base)
+        for i in range(n_filler)
+    ]
+    keys.append((
+        "market_data/weekly/2026-08-14/short_interest.json",
+        datetime(2026, 8, 15, 9, 49, 5, tzinfo=timezone.utc),
+    ))
+    return keys
+
+
+def test_a_truncated_scan_returns_a_probe_error_not_a_stale_key():
+    """The 2026-08-18 case. With the newest object one page past the cap, the
+    function must refuse to answer rather than name the newest it happened to
+    see."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_weekly_fixture())
+    key, lm, err = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json", cap_pages=8,
+    )
+    assert err is not None
+    assert "truncated" in err
+    assert key == "" and lm is None
+
+
+def test_the_probe_error_names_the_cap_and_why_the_tail_matters():
+    """An operator reading this has to know it is a scan-scope problem, not a
+    producer problem — those have opposite fixes."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_weekly_fixture())
+    _k, _lm, err = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json", cap_pages=8,
+    )
+    assert "8-page" in err and "8000" in err
+    assert "lexically" in err
+
+
+def test_the_same_prefix_resolves_correctly_under_the_shipped_cap():
+    """8208 objects is the real measurement; the shipped cap must clear it
+    with room, and return the genuinely-newest instance."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_weekly_fixture(8207))
+    key, lm, err = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json",
+    )
+    assert err is None
+    assert key == "market_data/weekly/2026-08-14/short_interest.json"
+    assert lm == datetime(2026, 8, 15, 9, 49, 5, tzinfo=timezone.utc)
+
+
+def test_an_untruncated_scan_is_unchanged():
+    """The guard must not turn ordinary small prefixes into probe failures."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_weekly_fixture(3))
+    key, lm, err = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json",
+    )
+    assert err is None and key.endswith("2026-08-14/short_interest.json")
+
+
+def test_truncation_is_reported_even_when_nothing_matched_the_suffix():
+    """A truncated scan that saw no matching key must not report `missing` —
+    the match may be in the part it never read, and `missing` is the verdict
+    that fires a page about a producer."""
+    from nousergon_lib import artifact_freshness as af
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    keys = [(f"market_data/weekly/2026-01-{i:05d}/other.json", base)
+            for i in range(9000)]
+    key, lm, err = af._newest_under_prefix(
+        s3 := _paged_s3(keys), "b", "market_data/weekly/",
+        "/short_interest.json", cap_pages=8,
+    )
+    assert err is not None and key == "" and lm is None
