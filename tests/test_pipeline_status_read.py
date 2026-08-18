@@ -773,6 +773,91 @@ def test_list_recent_pipeline_runs_role_filter_pre_filters():
     assert all(s.pipeline_role == "weekly" for s in summaries)
 
 
+def test_list_recent_pipeline_runs_carries_run_date():
+    """The TRADING DAY, off the same DescribeExecution response as the role.
+
+    A consumer grouping executions into cycles must key on this and not on
+    `start_utc.date()`: measured 2026-08-15, the weekly pipeline's recovery
+    reruns for run_date 2026-08-15 started 20:21 US/Pacific, which is
+    2026-08-16 in UTC. A start-date key splits that cycle in two and the half
+    holding the recovery run reads as a standalone success.
+    """
+    arns = [EXECUTION_ARN + f"-{i}" for i in range(2)]
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": a, "name": f"exec-{i}"} for i, a in enumerate(arns)],
+        describe_by_arn={a: _make_describe_response(role="weekly") for a in arns},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=2, client=client)
+    assert [s.run_date for s in summaries] == ["2026-05-24", "2026-05-24"]
+    # One DescribeExecution per execution — reading run_date adds no API call.
+    assert client.describe_execution.call_count == 2
+
+
+def test_list_recent_pipeline_runs_run_date_none_when_input_lacks_it():
+    """Ad-hoc launches omit run_date. None, never a guess from start_utc."""
+    arn = EXECUTION_ARN + "-x"
+    resp = _make_describe_response(role="smoke")
+    resp["input"] = '{"pipeline_role": "smoke"}'
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": arn, "name": "exec-x"}],
+        describe_by_arn={arn: resp},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
+    assert summaries[0].run_date is None
+    assert summaries[0].pipeline_role == "smoke"
+
+
+def test_list_recent_pipeline_runs_input_run_date_wins_over_the_name():
+    """The 2026-08-15/16 case, exactly.
+
+    `watch-rerun-2026-08-16-4` is NAMED for the date it ran ON and carries in
+    its input the date it ran FOR. Keyed on the name — or on start_utc — that
+    execution lands in its own cycle, with no failed scheduled run beside it.
+    The input must win.
+    """
+    arn = EXECUTION_ARN + "-rerun"
+    resp = _make_describe_response(role="watch-rerun")
+    resp["input"] = '{"pipeline_role": "watch-rerun", "run_date": "2026-08-15"}'
+    resp["name"] = "watch-rerun-2026-08-16-4"
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": arn, "name": "watch-rerun-2026-08-16-4"}],
+        describe_by_arn={arn: resp},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
+    assert summaries[0].run_date == "2026-08-15"
+
+
+def test_list_recent_pipeline_runs_falls_back_to_a_date_in_the_name():
+    """Operator reruns do not always thread the field; dropping them would
+    destroy the attempts-per-cycle count, which is the whole metric."""
+    arn = EXECUTION_ARN + "-named"
+    resp = _make_describe_response(role="watch-rerun")
+    resp["input"] = '{"pipeline_role": "watch-rerun"}'
+    resp["name"] = "watch-rerun-2026-08-15-2"
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": arn, "name": "watch-rerun-2026-08-15-2"}],
+        describe_by_arn={arn: resp},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
+    assert summaries[0].run_date == "2026-08-15"
+
+
+def test_list_recent_pipeline_runs_run_date_none_on_degenerate_input():
+    """Malformed JSON, a non-dict body, a non-string or empty run_date — each
+    degrades this one field rather than failing the listing."""
+    cases = ['not json', '["a"]', '{"run_date": 20260524}', '{"run_date": ""}']
+    for i, raw in enumerate(cases):
+        arn = EXECUTION_ARN + f"-deg{i}"
+        resp = _make_describe_response(role="weekly")
+        resp["input"] = raw
+        client = _make_multi_execution_mock(
+            executions=[{"executionArn": arn, "name": "e"}],
+            describe_by_arn={arn: resp},
+        )
+        summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
+        assert summaries[0].run_date is None, raw
+
+
 def test_list_recent_pipeline_runs_empty_returns_empty_list():
     """Zero executions → empty list (NOT SFNNoExecutions). The dropdown
     just renders 'no executions yet' inline; the page-25 section banner
