@@ -624,6 +624,26 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="fleet-status",
         artifact_label="Weekly substrate health check",
     ),
+    # alpha-engine-config-I7620: RunScope runs immediately before
+    # CheckSkipReportCard and derives THIS execution's own scope — one row per
+    # gated stage, each DISABLED / ENABLED_COMPLETED / ENABLED_FAILED /
+    # NOT_REACHED, with the skip_* flag that decided it. It exists because which
+    # stages a run dispatched was never recorded anywhere a consumer could read:
+    # on 2026-08-14 the Director reported the DELIBERATE absence of pit_parity
+    # (skip_parity set on the Saturday trigger since 2026-08-13, a recorded
+    # ruling) as "the producer never ran this cycle" and withheld issue_filing +
+    # loop_verification on the strength of it. Derived from the definition plus
+    # the execution history rather than kept in a registry, so a flag flip in the
+    # CFN preset moves the pipeline, the artifact and the Director's purview
+    # together.
+    "RunScope": ArtifactReason(
+        reason="Run-scope derivation (alpha-engine-config-I7620) — writes "
+        "backtest/{date}/run_scope.json, the per-stage record of what this "
+        "execution dispatched and what an operator flag switched off. Not an "
+        "archive page of its own: it is the DENOMINATOR the Report Card and "
+        "Director render their grades against, so it surfaces there rather "
+        "than as a page nobody would open on its own.",
+    ),
     "ReportCard": ArchivePageRef(
         page="Report_Card",
         artifact_label="System Report Card",
