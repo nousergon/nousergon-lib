@@ -197,3 +197,11 @@ ignore = ["E501", "S603"]
 # an intentional module-level ordering, not an accidental one; the skip
 # must run before the guarded import is attempted.
 "tests/**" = ["S101", "S105", "S106", "S311", "E402"]
+# selftest_perturbation.py is a TEST-SUPPORT module that ships in the main
+# package (mirroring nousergon_lib.pytest_time_shift) so every consumer test
+# suite can import one proven-correct perturbation-assertion helper rather
+# than re-deriving the pattern. assert IS the point here too — it is only
+# ever called from test code (alpha-engine-config-I7262) — but it lives under
+# src/, not tests/, so it needs its own per-file-ignore rather than inheriting
+# the tests/** one above.
+"src/nousergon_lib/quant/selftest_perturbation.py" = ["S101"]

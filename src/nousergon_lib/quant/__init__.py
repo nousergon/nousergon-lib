@@ -20,6 +20,10 @@ stdlib-only modules stay importable without numpy):
   - ``transaction_cost`` — √-impact (Almgren-Chriss) cost + tradeability score (stdlib)
   - ``horizons``       — evaluation-horizon chokepoint: canonical primary vs
                           diagnostic horizons + wide-column naming (stdlib)
+  - ``selftest``       — shared known-answer self-test runner: the PASS/FAIL/
+                          UNKNOWN taxonomy, ``Case`` record, SIGALRM budget and
+                          provenance helpers every stage's own numeric battery
+                          reuses (stdlib; alpha-engine-config-I7238)
 
 Example::
 
