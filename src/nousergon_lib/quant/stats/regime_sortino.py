@@ -6,9 +6,11 @@ from stratifying signal *accuracy* by regime.
 
 Canonical-alpha conventions:
 - Alpha = ``log(1 + return) − log(1 + spy_return)`` (log domain, NOT arithmetic).
-- Headline metric: **Sortino** (downside-only deviation denominator), NOT raw
-  Sharpe. Anchored on downside-only variance — only realizations below the
-  threshold (zero alpha) enter the denominator.
+- Headline metric: **Sortino** (downside-deviation denominator), NOT raw
+  Sharpe. Only realizations below the threshold (zero alpha) contribute a
+  shortfall; the sum of squared shortfalls is divided by the **full sample n**
+  (above-target picks contribute an explicit zero), which is the Sortino (1991)
+  definition and the fleet convention pinned by alpha-engine-config-I7271.
 - Sharpe surfaced as a SECONDARY diagnostic per stratum.
 
 Pick-level (cross-sectional), not portfolio-level (time-series): each pick is an
@@ -53,8 +55,8 @@ SUPPORTED_HORIZONS: tuple[int, ...] = (10, 30)
 
 
 # Sortino spread interpretation thresholds. Different scale than Sharpe — the
-# downside-only denominator makes |spread| values typically larger for the same
-# distribution.
+# downside-deviation denominator makes |spread| values typically larger for the
+# same distribution.
 _SORTINO_USEFUL_THRESHOLD: float = 0.3
 _SORTINO_INVERTED_THRESHOLD: float = -0.3
 
@@ -118,29 +120,32 @@ def _annualized_sortino_from_log_alphas(
 
     Sortino = mean(log_alpha) / downside_std(log_alpha) × sqrt(periods/year)
 
-    Downside std uses ONLY observations below zero (threshold). Returns ``None``
-    on insufficient sample, near-zero downside std (IEEE-754 tolerance), or no
-    downside observations at all.
+    Only picks below zero (the threshold) contribute a shortfall; the sum of
+    squared shortfalls is divided by the **full sample** — the fleet convention
+    (alpha-engine-config-I7271), identical to what every other Sortino in the
+    fleet computes. Returns ``None`` on insufficient sample, and on a downside
+    deviation of zero — which covers both a pure-upside sample (no pick below
+    threshold) and a downside dispersion under the IEEE-754 tolerance. In both
+    cases the RATIO is undefined; the denominator itself is reported separately
+    by :func:`_downside_std`.
+
+    A regime-conditional Sortino has no claim on a different denominator than a
+    portfolio-level one: stratifying by regime changes WHICH observations are in
+    the sample, not how a shortfall is normalised. Dividing by the below-target
+    count instead (the pre-config-I7638 behaviour) makes the statistic a
+    function of how many losing picks a stratum happens to contain — it inflates
+    the denominator by sqrt(n / n_down) and so UNDERSTATES Sortino by that
+    factor, differently in each stratum, which is precisely the comparison a
+    bull-minus-bear spread makes.
     """
     if log_alphas.size < 2:
         return None
     mean = float(log_alphas.mean())
-    # Downside-only deviation — RMS of the negative-side observations, divided
-    # by the COUNT OF NEGATIVE PICKS (``denominator="downside"``), not by the
-    # full sample. That is not the fleet convention that
-    # ``riskstats.sortino_ratio`` uses (alpha-engine-config-I7271 pinned the
-    # n-denominator) and it understates this Sortino by sqrt(n / n_down);
-    # it is named explicitly here so the divergence is visible at the call
-    # rather than buried in a private re-implementation. Changing it moves a
-    # published number and is tracked separately — see config-I7597.
     downside_std = riskstats.downside_deviation(
         [float(x) for x in log_alphas],
         target=0.0,
-        denominator="downside",
+        denominator="full",
     )
-    # ``None`` here means a pure-upside sample: Sortino undefined but the
-    # regime is clearly favorable. Caller treats None as "insufficient
-    # downside sample".
     if downside_std is None or not np.isfinite(downside_std) or downside_std < 1e-12:
         return None
     return mean / downside_std * _annualization_factor(horizon_days)
@@ -164,21 +169,24 @@ def _annualized_sharpe_from_log_alphas(
 
 
 def _downside_std(log_alphas: np.ndarray) -> float | None:
-    """Downside-only RMS deviation — the Sortino denominator, surfaced
-    independently of the ratio.
+    """Downside deviation — the Sortino denominator, surfaced independently of
+    the ratio.
 
-    Same ``denominator="downside"`` variant as
-    ``_annualized_sortino_from_log_alphas`` — see the note there.
+    Full-sample denominator, same convention as
+    :func:`_annualized_sortino_from_log_alphas` — see the note there. A stratum
+    with no pick below threshold reports ``0.0`` (the sum of shortfalls is
+    genuinely zero under this convention), not ``None``; the ratio that divides
+    by it still reports ``None``.
     """
     if log_alphas.size == 1:
         # A one-pick stratum (reachable with min_picks_per_stratum=1) has no
         # estimable dispersion, but this has always reported |alpha| for a
         # single negative pick. Preserved verbatim: riskstats.downside_deviation
-        # declines n < 2, and config-I7597 is a de-duplication at constant
-        # behaviour.
+        # declines n < 2 outright, and the two conventions coincide at n = 1
+        # anyway (one shortfall over one observation).
         return float(abs(log_alphas[0])) if log_alphas[0] < 0.0 else None
     return riskstats.downside_deviation(
-        [float(x) for x in log_alphas], target=0.0, denominator="downside"
+        [float(x) for x in log_alphas], target=0.0, denominator="full"
     )
 
 
@@ -412,9 +420,17 @@ def assemble_t2_eval_payload(
             "alpha_definition": (
                 "log(1+return_Nd) - log(1+spy_Nd_return) per pick cross-sectional"
             ),
-            "headline_metric": "annualized_sortino (downside-only std denominator)",
+            "headline_metric": (
+                "annualized_sortino (downside-deviation denominator over the "
+                "full sample N)"
+            ),
             "secondary_diagnostic": "annualized_sharpe (full-sample std denominator)",
             "downside_threshold": "0.0 (log-alpha; below this is risk-bearing)",
+            "downside_denominator": (
+                "full sample N (alpha-engine-config-I7271; before "
+                "alpha-engine-config-I7638 this was the below-target count, "
+                "which understated every Sortino by sqrt(n / n_down))"
+            ),
             "interpretation_thresholds": {
                 "useful_above": _SORTINO_USEFUL_THRESHOLD,
                 "neutral_band": (

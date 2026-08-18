@@ -6,8 +6,8 @@ periodic returns in, annualized risk-adjusted ratios out.
 
 This module is the fleet's ONLY implementation of these statistics (config-I7597).
 A consumer that needs a variant takes it as an argument here — ``periods_per_year``
-for a non-daily or non-annualized space, ``denominator`` for the downside
-convention — rather than re-deriving the arithmetic locally, because independent
+for a non-daily or non-annualized space — rather than re-deriving the arithmetic
+locally, because independent
 copies hand-aligned to agree today are copies that drift tomorrow: config-I7271
 was a 1.83x Sortino error that survived in production because two functions
 computed "the same" statistic differently. Consumers that genuinely cannot call
@@ -58,7 +58,16 @@ def sharpe_ratio(
 
 
 _FULL = "full"
-_DOWNSIDE = "downside"
+
+# The retired non-standard variant. Kept as a named constant ONLY so the
+# rejection below can name it: the RMS of below-target shortfalls over the
+# ``n_down`` below-target observations rather than over all n. It is larger than
+# the fleet convention by sqrt(n / n_down) and so systematically UNDERSTATES the
+# resulting Sortino, by an amount that varies with how many losing periods the
+# series happens to contain. Every fleet call site was converted to ``"full"``
+# (alpha-engine-config-I7618, -I7638); the arithmetic is gone from this module
+# and passing the name now RAISES, so the convention cannot return by argument.
+_RETIRED_DOWNSIDE = "downside"
 
 
 def downside_deviation(
@@ -79,44 +88,45 @@ def downside_deviation(
     ``returns`` (0.0 = the standard MAR-of-zero). It is not de-annualized —
     contrast :func:`sortino_ratio`'s ``risk_free_rate``, which is annual.
 
-    ``denominator`` selects which observations divide the sum of squared
-    shortfalls:
+    ``denominator`` accepts exactly one value, ``"full"`` — the fleet
+    convention: the RMS of ``min(0, r - target)`` over **all n** observations,
+    above-target observations contributing an explicit zero. This is Sortino
+    (1991) / Satchell's definition and the convention pinned by
+    alpha-engine-config-I7271.
 
-    ``"full"`` (default, **the fleet convention**)
-        RMS of ``min(0, r - target)`` over **all n** observations. Above-target
-        observations contribute an explicit zero. This is Sortino (1991) /
-        Satchell's definition and the convention pinned by
-        alpha-engine-config-I7271.
-
-    ``"downside"`` (**non-standard — do not use in new code**)
-        RMS of the shortfalls over only the ``n_down`` below-target
-        observations. Larger than ``"full"`` by ``sqrt(n / n_down)``, so it
-        systematically UNDERSTATES the resulting Sortino. It exists solely so
-        the call sites that ship this convention today can stop carrying their
-        own copy of the arithmetic while their numbers stay put; each such call
-        site names the variant explicitly at the call, which is the point —
-        the divergence is now a visible argument rather than an invisible
-        re-implementation. Tracked for conversion to ``"full"``.
+    The parameter survives its own single value on purpose. ``"downside"`` (the
+    ``n_down`` denominator) was a live convention at four fleet call sites as
+    recently as alpha-engine-config-I7597; naming it here and REJECTING it makes
+    a reintroduction a loud failure at every call site in every repo at once,
+    which no per-repo source grep can promise. Removing the parameter outright
+    is tracked separately and waits until no consumer passes it at all.
 
     Returns
     -------
     float | None
-        ``None`` if fewer than two observations. Under ``"full"``, ``0.0`` when
-        no observation is below target (the sum of shortfalls is genuinely
-        zero). Under ``"downside"``, ``None`` when no observation is below
-        target (the denominator has no observations — undefined, not zero).
+        ``None`` if fewer than two observations; ``0.0`` when no observation is
+        below target (the sum of shortfalls is genuinely zero — a measured zero,
+        not an undefined one). Callers forming a RATIO out of this must still
+        treat ``0.0`` as undefined; :func:`sortino_ratio` does.
+
+    Raises
+    ------
+    ValueError
+        If ``denominator`` is anything other than ``"full"``.
     """
-    if denominator not in (_FULL, _DOWNSIDE):
+    if denominator == _RETIRED_DOWNSIDE:
         raise ValueError(
-            f"denominator must be {_FULL!r} or {_DOWNSIDE!r}, got {denominator!r}"
+            f"denominator={_RETIRED_DOWNSIDE!r} is retired: it divides the sum of "
+            "squared shortfalls by the below-target count, which understates "
+            "Sortino by sqrt(n / n_down). alpha-engine-config-I7271 pinned the "
+            "full-sample denominator for the whole fleet and -I7618/-I7638 "
+            f"converted the last call sites; pass {_FULL!r}."
         )
+    if denominator != _FULL:
+        raise ValueError(f"denominator must be {_FULL!r}, got {denominator!r}")
     if len(returns) < 2:
         return None
     shortfalls = [r - target for r in returns if r < target]
-    if denominator == _DOWNSIDE:
-        if not shortfalls:
-            return None
-        return math.sqrt(sum(d * d for d in shortfalls) / len(shortfalls))
     return math.sqrt(sum(d * d for d in shortfalls) / len(returns))
 
 
@@ -130,10 +140,11 @@ def sortino_ratio(
     """Annualized Sortino ratio — Sharpe but penalizing only downside deviation.
 
     Downside deviation is taken against the (de-annualized) risk-free target and
-    computed by :func:`downside_deviation`; see that function for what
-    ``denominator`` selects and why ``"downside"`` exists.
+    computed by :func:`downside_deviation`; ``denominator`` is passed straight
+    through and ``"full"`` is its only legal value — see that function.
 
-    None if < 2 obs or there is no downside deviation.
+    None if < 2 obs or there is no downside deviation (a zero denominator makes
+    the ratio undefined, never infinite).
     """
     if len(returns) < 2:
         return None
