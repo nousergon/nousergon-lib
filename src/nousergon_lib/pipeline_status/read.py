@@ -212,8 +212,9 @@ class PipelineExecutionSummary(BaseModel):
     in detail, at which point :func:`read_pipeline_state` returns the
     full run for the chosen ARN.
 
-    ``pipeline_role`` is parsed from the execution's input JSON via the
-    DescribeExecution call; None when the input lacks the field.
+    ``pipeline_role`` and ``run_date`` are derived from the DescribeExecution
+    call; each is None when nothing on the response carries it. Both come off
+    the SAME response — reading ``run_date`` costs no additional API call.
     """
 
     model_config = _STRICT_CONFIG
@@ -225,6 +226,18 @@ class PipelineExecutionSummary(BaseModel):
     end_utc: datetime | None = None
     duration_sec: float | None = None
     pipeline_role: str | None = None
+    #: The TRADING DAY this execution ran for — ``input.run_date``, falling
+    #: back to a date embedded in the execution NAME, per
+    #: :func:`_extract_run_date`. None when neither carries one.
+    #:
+    #: Prefer this over ``start_utc`` whenever executions are grouped into
+    #: cycles. Measured 2026-08-15: the weekly pipeline's recovery reruns for
+    #: run_date 2026-08-15 started at 20:21 US/Pacific — 2026-08-16 in UTC — so
+    #: a start-date key splits that cycle in two and the half holding the
+    #: recovery run reads as a standalone success. The INPUT wins over the
+    #: name for exactly that case: ``watch-rerun-2026-08-16-4`` is named for
+    #: the date it ran ON and carries the date it ran FOR.
+    run_date: str | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -855,6 +868,7 @@ def list_recent_pipeline_runs(
                     end_utc=end_utc,
                     duration_sec=duration,
                     pipeline_role=role,
+                    run_date=_extract_run_date(describe_resp),
                 )
             )
             if len(summaries) >= limit:
