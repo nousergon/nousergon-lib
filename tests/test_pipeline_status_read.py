@@ -807,6 +807,41 @@ def test_list_recent_pipeline_runs_run_date_none_when_input_lacks_it():
     assert summaries[0].pipeline_role == "smoke"
 
 
+def test_list_recent_pipeline_runs_input_run_date_wins_over_the_name():
+    """The 2026-08-15/16 case, exactly.
+
+    `watch-rerun-2026-08-16-4` is NAMED for the date it ran ON and carries in
+    its input the date it ran FOR. Keyed on the name — or on start_utc — that
+    execution lands in its own cycle, with no failed scheduled run beside it.
+    The input must win.
+    """
+    arn = EXECUTION_ARN + "-rerun"
+    resp = _make_describe_response(role="watch-rerun")
+    resp["input"] = '{"pipeline_role": "watch-rerun", "run_date": "2026-08-15"}'
+    resp["name"] = "watch-rerun-2026-08-16-4"
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": arn, "name": "watch-rerun-2026-08-16-4"}],
+        describe_by_arn={arn: resp},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
+    assert summaries[0].run_date == "2026-08-15"
+
+
+def test_list_recent_pipeline_runs_falls_back_to_a_date_in_the_name():
+    """Operator reruns do not always thread the field; dropping them would
+    destroy the attempts-per-cycle count, which is the whole metric."""
+    arn = EXECUTION_ARN + "-named"
+    resp = _make_describe_response(role="watch-rerun")
+    resp["input"] = '{"pipeline_role": "watch-rerun"}'
+    resp["name"] = "watch-rerun-2026-08-15-2"
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": arn, "name": "watch-rerun-2026-08-15-2"}],
+        describe_by_arn={arn: resp},
+    )
+    summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
+    assert summaries[0].run_date == "2026-08-15"
+
+
 def test_list_recent_pipeline_runs_run_date_none_on_degenerate_input():
     """Malformed JSON, a non-dict body, a non-string or empty run_date — each
     degrades this one field rather than failing the listing."""
