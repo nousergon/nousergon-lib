@@ -34,6 +34,16 @@ single source of truth for those schemas:
   hash + slot fingerprints + typed artifact link table with honest absences);
   the results renderer consumes this record, never a directory listing.
   Envelope contract, not a slot.
+- ``producer_champion_audit`` — the weekly winner-take-all champion-promotion
+  audit record, emitted by ``optimizer/champion_promotion.py``
+  (crucible-backtester) → ``config/apply_audit/producer_champion/{date}.json``
+  (+ ``latest.json`` mirror), regardless of outcome. Consumed by
+  crucible-dashboard's ``views/46_Experiments.py`` (blocked_by-slug labels,
+  ``arm_confidence`` evidence verdicts). Previously reached the dashboard's
+  contract test via a sibling-checkout filesystem walk of crucible-backtester's
+  working tree (alpha-engine-config-I7605) — moved here so producer and
+  consumer both import the SAME frozen resource, like every other contract in
+  this module. Eval-storage contract, not a slot.
 
 Producers validate a representative emitted artifact in CI; consumers validate
 the fixtures their readers are tested against; external slot implementations
@@ -88,6 +98,9 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     # consumes the record, never a directory listing).
     "experiment": "experiment.schema.json",
     "experiment_record": "experiment_record.schema.json",
+    # Weekly champion-promotion audit record (crucible-backtester) — see the
+    # module docstring bullet above. Eval-storage contract, not a slot.
+    "producer_champion_audit": "producer_champion_audit.schema.json",
 }
 
 # The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
@@ -111,6 +124,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "report_card": 1,
     "experiment": 1,
     "experiment_record": 1,
+    "producer_champion_audit": 2,  # schema_version const: 2 (winner-take-all, config-I2518)
 }
 
 
