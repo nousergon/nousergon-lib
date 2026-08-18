@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.68"
+version = "0.124.69"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
@@ -197,3 +197,11 @@ ignore = ["E501", "S603"]
 # an intentional module-level ordering, not an accidental one; the skip
 # must run before the guarded import is attempted.
 "tests/**" = ["S101", "S105", "S106", "S311", "E402"]
+# selftest_perturbation.py is a TEST-SUPPORT module that ships in the main
+# package (mirroring nousergon_lib.pytest_time_shift) so every consumer test
+# suite can import one proven-correct perturbation-assertion helper rather
+# than re-deriving the pattern. assert IS the point here too — it is only
+# ever called from test code (alpha-engine-config-I7262) — but it lives under
+# src/, not tests/, so it needs its own per-file-ignore rather than inheriting
+# the tests/** one above.
+"src/nousergon_lib/quant/selftest_perturbation.py" = ["S101"]
