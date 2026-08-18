@@ -212,8 +212,10 @@ class PipelineExecutionSummary(BaseModel):
     in detail, at which point :func:`read_pipeline_state` returns the
     full run for the chosen ARN.
 
-    ``pipeline_role`` is parsed from the execution's input JSON via the
-    DescribeExecution call; None when the input lacks the field.
+    ``pipeline_role`` and ``run_date`` are parsed from the execution's input
+    JSON via the DescribeExecution call; each is None when the input lacks that
+    field. Both come off the SAME response — reading ``run_date`` costs no
+    additional API call.
     """
 
     model_config = _STRICT_CONFIG
@@ -225,6 +227,12 @@ class PipelineExecutionSummary(BaseModel):
     end_utc: datetime | None = None
     duration_sec: float | None = None
     pipeline_role: str | None = None
+    #: ``input.run_date`` — the TRADING DAY this execution ran for. None when
+    #: the input omits it (ad-hoc launches). Prefer this over ``start_utc``
+    #: whenever executions are grouped into cycles: a recovery rerun launched
+    #: in the evening US/Pacific starts on the NEXT UTC date, so a start-date
+    #: key splits one cycle in two.
+    run_date: str | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -499,6 +507,44 @@ def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> str | None:
         return None
     role = parsed.get("pipeline_role")
     return role if isinstance(role, str) and role else None
+
+
+def _extract_run_date(describe_resp: Mapping[str, Any]) -> str | None:
+    """Parse ``input.run_date`` from a DescribeExecution response.
+
+    The TRADING DAY the execution was run FOR, which is not the same thing as
+    the UTC calendar date it started on and must never be approximated by it.
+    Measured 2026-08-15: the weekly pipeline's recovery reruns for run_date
+    ``2026-08-15`` started at 20:21 US/Pacific — ``2026-08-16`` in UTC. Any
+    consumer bucketing a cycle by ``start_utc.date()`` splits that cycle in
+    two, and the half holding the recovery run looks like a standalone success.
+
+    Same permissive posture as :func:`_extract_pipeline_role`, and for the same
+    reason: the input shape is operator-controlled, so a malformed input JSON
+    must degrade one execution's field rather than blackhole the caller. The
+    WARN there already covers the parse failure; an execution whose input
+    parses but carries no ``run_date`` is ordinary (ad-hoc launches often
+    omit it) and is not worth a log line.
+
+    Deliberately returns the RAW STRING rather than a ``date``. It is a
+    grouping key and an S3 path segment (``backtest/{run_date}/...``) at every
+    call site, and parsing it here would invite a consumer to re-format it into
+    a key that no longer matches the artifact it names.
+    """
+    raw_input = describe_resp.get("input")
+    if not raw_input or not isinstance(raw_input, str):
+        return None
+    try:
+        parsed = json.loads(raw_input)
+    except (ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not parse SF execution input JSON; run_date=None: %s", exc
+        )
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    run_date = parsed.get("run_date")
+    return run_date if isinstance(run_date, str) and run_date else None
 
 
 def _build_pipeline_run_from_execution_arn(
@@ -855,6 +901,7 @@ def list_recent_pipeline_runs(
                     end_utc=end_utc,
                     duration_sec=duration,
                     pipeline_role=role,
+                    run_date=_extract_run_date(describe_resp),
                 )
             )
             if len(summaries) >= limit:
