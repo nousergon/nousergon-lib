@@ -12,7 +12,9 @@ stdlib-only modules stay importable without numpy):
   - ``factor_risk``    — Σ=B·F·Bᵀ+D ex-ante risk + tracking error (**needs numpy**;
                           install ``nousergon-lib[quant]``)
   - ``risk_measures``  — parametric + historical VaR / CVaR (stdlib)
-  - ``riskstats``      — volatility, Sharpe, Sortino, max drawdown (stdlib)
+  - ``riskstats``      — volatility, Sharpe, Sortino, downside deviation,
+                          max drawdown (stdlib). The fleet's ONLY implementation
+                          of these — see its module docstring (config-I7597).
   - ``returns``        — XIRR (money-weighted) + time-weighted return (stdlib)
   - ``attribution``    — Brinson-Fachler decomposition + Cariño linking (stdlib)
   - ``transaction_cost`` — √-impact (Almgren-Chriss) cost + tradeability score (stdlib)

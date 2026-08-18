@@ -32,6 +32,8 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
+from nousergon_lib.quant import riskstats
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,15 +125,23 @@ def _annualized_sortino_from_log_alphas(
     if log_alphas.size < 2:
         return None
     mean = float(log_alphas.mean())
-    # Downside-only deviation — RMS of the negative-side observations. Picks with
-    # log_alpha > 0 are excluded from the denominator (upside, not risk).
-    downside = log_alphas[log_alphas < 0.0]
-    if downside.size == 0:
-        # Pure upside sample — Sortino undefined but the regime is clearly
-        # favorable. Caller treats None as "insufficient downside sample".
-        return None
-    downside_std = float(np.sqrt(np.mean(downside ** 2)))
-    if not np.isfinite(downside_std) or downside_std < 1e-12:
+    # Downside-only deviation — RMS of the negative-side observations, divided
+    # by the COUNT OF NEGATIVE PICKS (``denominator="downside"``), not by the
+    # full sample. That is not the fleet convention that
+    # ``riskstats.sortino_ratio`` uses (alpha-engine-config-I7271 pinned the
+    # n-denominator) and it understates this Sortino by sqrt(n / n_down);
+    # it is named explicitly here so the divergence is visible at the call
+    # rather than buried in a private re-implementation. Changing it moves a
+    # published number and is tracked separately — see config-I7597.
+    downside_std = riskstats.downside_deviation(
+        [float(x) for x in log_alphas],
+        target=0.0,
+        denominator="downside",
+    )
+    # ``None`` here means a pure-upside sample: Sortino undefined but the
+    # regime is clearly favorable. Caller treats None as "insufficient
+    # downside sample".
+    if downside_std is None or not np.isfinite(downside_std) or downside_std < 1e-12:
         return None
     return mean / downside_std * _annualization_factor(horizon_days)
 
@@ -155,11 +165,21 @@ def _annualized_sharpe_from_log_alphas(
 
 def _downside_std(log_alphas: np.ndarray) -> float | None:
     """Downside-only RMS deviation — the Sortino denominator, surfaced
-    independently of the ratio."""
-    downside = log_alphas[log_alphas < 0.0]
-    if downside.size == 0:
-        return None
-    return float(np.sqrt(np.mean(downside ** 2)))
+    independently of the ratio.
+
+    Same ``denominator="downside"`` variant as
+    ``_annualized_sortino_from_log_alphas`` — see the note there.
+    """
+    if log_alphas.size == 1:
+        # A one-pick stratum (reachable with min_picks_per_stratum=1) has no
+        # estimable dispersion, but this has always reported |alpha| for a
+        # single negative pick. Preserved verbatim: riskstats.downside_deviation
+        # declines n < 2, and config-I7597 is a de-duplication at constant
+        # behaviour.
+        return float(abs(log_alphas[0])) if log_alphas[0] < 0.0 else None
+    return riskstats.downside_deviation(
+        [float(x) for x in log_alphas], target=0.0, denominator="downside"
+    )
 
 
 def _stratum_metrics(
