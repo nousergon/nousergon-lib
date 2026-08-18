@@ -14,6 +14,7 @@ nobody reads is a suppression, not an observation).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 import pytest
@@ -22,12 +23,12 @@ from nousergon_lib.guard_mode import GuardMode, GuardStaging
 
 
 def _staging(mode: GuardMode = GuardMode.OBSERVE, **over) -> GuardStaging:
-    kwargs = dict(
-        name="feature_store_zero_variance",
-        mode=mode,
-        promotion_criterion="enforce after 10 clean daily runs",
-        tracked_issue="alpha-engine-config-I7539",
-    )
+    kwargs = {
+        "name": "feature_store_zero_variance",
+        "mode": mode,
+        "promotion_criterion": "enforce after 10 clean daily runs",
+        "tracked_issue": "alpha-engine-config-I7539",
+    }
     kwargs.update(over)
     return GuardStaging(**kwargs)
 
@@ -141,7 +142,7 @@ class TestSurface:
     def test_staging_is_immutable(self):
         """Mode is a deployment decision, not a runtime toggle — a guard that
         can be flipped mid-run cannot be reasoned about from its declaration."""
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             _staging().mode = GuardMode.ENFORCE  # type: ignore[misc]
 
     def test_mode_values_are_stable_strings(self):
