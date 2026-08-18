@@ -1022,3 +1022,73 @@ class TestExperimentRecordContract:
         assert "experiment_record" in contracts.CONTRACT_SCHEMAS
         assert "experiment" not in contracts.SLOT_SCHEMAS
         assert "experiment_record" not in contracts.SLOT_SCHEMAS
+
+
+def _producer_champion_audit(**overrides):
+    payload = {
+        "schema_version": 2,
+        "date": "2026-08-17",
+        "outcome": "no_contest",
+        "champion_before": "scanner_predictor_direct",
+        "champion_after": "scanner_predictor_direct",
+        "champion_score": None,
+        "challenger_score": None,
+        "blocked_by": ["leaderboard_unavailable"],
+        "freeze": False,
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestProducerChampionAuditContract:
+    """alpha-engine-config-I7605: moved here from crucible-backtester's
+    contracts/producer_champion_audit.schema.json so producer
+    (crucible-backtester) and consumer (crucible-dashboard) both import the
+    same frozen resource instead of the dashboard's contract test resolving
+    a sibling checkout of crucible-backtester's working tree."""
+
+    def test_minimal_conforming_payload(self):
+        contracts.validate("producer_champion_audit", _producer_champion_audit())
+
+    def test_is_registered_at_v2(self):
+        assert contracts.SCHEMA_VERSIONS["producer_champion_audit"] == 2
+        schema = contracts.load_schema("producer_champion_audit")
+        assert "v2" in schema["$id"]
+        assert "producer_champion_audit" not in contracts.SLOT_SCHEMAS
+
+    @pytest.mark.parametrize(
+        "missing",
+        [
+            "schema_version", "date", "outcome", "champion_before",
+            "champion_after", "champion_score", "challenger_score",
+            "blocked_by", "freeze",
+        ],
+    )
+    def test_missing_required_top_level_fails(self, missing):
+        payload = _producer_champion_audit()
+        del payload[missing]
+        errors = contracts.conformance_errors("producer_champion_audit", payload)
+        assert errors and missing in " ".join(errors)
+
+    def test_arm_confidence_is_declared_and_optional(self):
+        # The field views/46_Experiments.py::_evidence_label reads
+        # (alpha-engine-config-I7549 / I7605). Additive — not in `required` —
+        # so pre-I7549 v2 records remain valid without a version bump.
+        schema = contracts.load_schema("producer_champion_audit")
+        assert "arm_confidence" in schema["properties"]
+        assert "arm_confidence" not in schema["required"]
+        assert "object" in schema["properties"]["arm_confidence"]["type"]
+
+    def test_arm_confidence_conforms_when_present(self):
+        payload = _producer_champion_audit(
+            arm_confidence={"scanner_predictor_direct": "thin", "thinktank_coverage": "ok"}
+        )
+        contracts.validate("producer_champion_audit", payload)
+
+    def test_unknown_blocked_by_slug_rejected(self):
+        payload = _producer_champion_audit(blocked_by=["mystery_gate"])
+        assert contracts.conformance_errors("producer_champion_audit", payload)
+
+    def test_not_a_slot_boundary(self):
+        assert "producer_champion_audit" in contracts.CONTRACT_SCHEMAS
+        assert "producer_champion_audit" not in contracts.SLOT_SCHEMAS
