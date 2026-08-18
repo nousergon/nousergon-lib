@@ -15,7 +15,9 @@
     "tiles_overall_status",
     "_provenance",
     "attestation",
-    "degraded_attestation"
+    "degraded_attestation",
+    "degraded_staleness",
+    "degraded_pipeline_gates"
   ],
   "properties": {
     "schema_version": {
@@ -108,6 +110,19 @@
     "degraded_attestation": {
       "type": "boolean",
       "description": "True when the correctness guarantee is withheld this cycle (e.g. contamination check did not run). Read alongside attestation.verdict by the same three consumers."
+    },
+    "degraded_staleness": {
+      "type": "boolean",
+      "description": "True when ANY tile's inputs were stale this cycle (grading/aggregate.py, config#2885). Always emitted, so false is a measured false rather than an absence."
+    },
+    "degraded_pipeline_gates": {
+      "type": "boolean",
+      "description": "True when the run's correctness gates could not be measured. DERIVED by the producer from the gate verdict, never set directly. Always emitted."
+    },
+    "stale_tiles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Names of the tiles whose inputs were stale. Emitted ONLY when non-empty, so its absence means 'no stale tiles' and never 'not computed' — degraded_staleness is the boolean to read. Consumed by crucible-dashboard components/report_card_v2.py::render_attestation."
     }
   },
   "$defs": {

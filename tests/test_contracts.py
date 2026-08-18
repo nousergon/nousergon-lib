@@ -672,6 +672,8 @@ def _report_card(**overrides):
             },
         },
         "degraded_attestation": False,
+        "degraded_staleness": False,
+        "degraded_pipeline_gates": False,
     }
     payload.update(overrides)
     return payload
@@ -803,6 +805,28 @@ class TestReportCardContract:
     @pytest.mark.parametrize("degraded", [True, False])
     def test_degraded_attestation_bool_accepted(self, degraded):
         contracts.validate("report_card", _report_card(degraded_attestation=degraded))
+
+    @pytest.mark.parametrize("field", ["degraded_staleness", "degraded_pipeline_gates"])
+    def test_missing_degradation_flag_fails(self, field):
+        # Both are ALWAYS-EMIT on the producer side (grading/aggregate.py sets
+        # them unconditionally), so an absent flag is a producer defect, not an
+        # optional field. A card that omits one must not validate — otherwise a
+        # consumer reading `card.get(field)` cannot tell "false" from "the
+        # producer stopped emitting it".
+        payload = _report_card()
+        del payload[field]
+        assert contracts.conformance_errors("report_card", payload)
+
+    @pytest.mark.parametrize("field", ["degraded_staleness", "degraded_pipeline_gates"])
+    def test_degradation_flag_wrong_type_rejected(self, field):
+        assert contracts.conformance_errors("report_card", _report_card(**{field: "true"}))
+
+    def test_stale_tiles_optional_but_typed(self):
+        # Emitted ONLY when non-empty, so absence is legal and means "none".
+        contracts.validate("report_card", _report_card())
+        contracts.validate("report_card", _report_card(stale_tiles=["predictor", "research"]))
+        assert contracts.conformance_errors("report_card", _report_card(stale_tiles="predictor"))
+        assert contracts.conformance_errors("report_card", _report_card(stale_tiles=[1, 2]))
 
     def test_additive_tile_fields_ok(self):
         payload = _report_card()
