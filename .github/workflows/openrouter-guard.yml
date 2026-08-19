@@ -1,0 +1,79 @@
+name: OpenRouter direct-linkage guard
+
+# Reusable (workflow_call) fleet primitive: fails when the caller repo's
+# tracked code/config files contain an unallowlisted `openrouter.ai` literal,
+# `OPENROUTER_API_KEY` literal, or `provider: openrouter` config literal.
+#
+# alpha-engine-config-I6564 (I6367 epic, sub-issue 10 — Brian's 2026-08-03
+# ruling: "I NO LONGER WANT ANY AGENT DIRECTLY LINKED TO OPENROUTER"). Without
+# this the ruling reopens silently the next time someone hardcodes a base URL.
+#
+# The scan script (scripts/openrouter_guard.py) and its baseline convention
+# are documented there. Every caller needs a root `.openrouter-allowlist.yaml`
+# — even an empty `entries: []` one — because a repo with real pre-existing
+# matches and no allowlist reds on day one, and a repo genuinely clean of them
+# needs no allowlist at all (the script treats a missing file as empty).
+#
+# EXCLUDED entirely: `krepis` — the router's own repo, the one place
+# `OPENROUTER_API_KEY` may legitimately live and be read directly per the
+# ruling's stated reading (I6286 governs its own DLP scanning, not linkage).
+# krepis is not a caller of this workflow.
+#
+# Consumers: add one workflow file, pinned per the fleet convention —
+#
+#   name: OpenRouter direct-linkage guard
+#   on:
+#     pull_request:
+#       branches: [main]
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   jobs:
+#     guard:
+#       uses: nousergon/nousergon-lib/.github/workflows/openrouter-guard.yml@<commit-sha>
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: openrouter direct-linkage guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+
+      # Under workflow_call the checkout above gets the CALLER's repo. The
+      # script lives here, so fetch it separately (unpinned, matching
+      # action-pin-guard.yml: the consumer pins the SKELETON, not the script —
+      # a fix to the script should not wait on every consumer's pin bump) and
+      # leave CWD at the caller's checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: nousergon/nousergon-lib
+          path: _nousergon-lib-script
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - name: No unallowlisted direct OpenRouter linkage
+        run: python3 _nousergon-lib-script/scripts/openrouter_guard.py --repo .
