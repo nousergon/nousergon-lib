@@ -87,6 +87,14 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForPitParityWalkforward": "PitParityWalkforward",
     "WaitForParityReplay": "ParityReplay",
     "WaitForPitParityCompare": "PitParityCompare",
+    # alpha-engine-config-I7267 (2026-08-19): a trivial `aws s3api
+    # head-object` marker check, dispatched on the same instance only after
+    # PitParityLookahead/PitParityWalkforward already exited non-zero, to
+    # classify a resource-killed pass (halts the SF) distinctly from one
+    # that merely could not conclude (fail-open). Its own poll companion
+    # must roll up too.
+    "WaitForPitParityLookaheadResourceKillCheck": "PitParityLookaheadResourceKillCheck",
+    "WaitForPitParityWalkforwardResourceKillCheck": "PitParityWalkforwardResourceKillCheck",
     # alpha-engine-config-I3112 deliverable 3 (2026-08-11): the single
     # Evaluator state became EvaluatorDiagnostics -> EvaluatorOptimize, each
     # with its own dispatch/poll pair. Both companions must roll up, or each
@@ -588,6 +596,27 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     "PitParityCompare": ArchivePageRef(
         page="analysis",
         artifact_label="Pit-parity contamination report (delta + verdict)",
+    ),
+    # alpha-engine-config-I7267 (Brian's 2026-08-13 ruling, sf-pipeline-
+    # policy §3 SFP-3-resource-kill-halts-and-is-named): runs only after
+    # the pass already exited non-zero; heads a well-known S3 marker key
+    # (written by the pass's own commands when the just-published
+    # pit_stats_{pass}.json read back timed_out:true) to distinguish a
+    # RESOURCE KILL from a generic "could not conclude" — writes no run
+    # artifact of its own, and its Catch/non-Success routing falls back to
+    # the pre-existing *Degraded fail-open, so this can only ADD the
+    # RESOURCE_KILL classification, never remove existing coverage.
+    "PitParityLookaheadResourceKillCheck": ArtifactReason(
+        reason="Trivial `aws s3api head-object` check for the "
+        "RESOURCE_KILL marker written by PitParityLookahead's own commands "
+        "when the just-published pit_stats_lookahead.json read back "
+        "timed_out:true; writes no run artifact of its own."
+    ),
+    "PitParityWalkforwardResourceKillCheck": ArtifactReason(
+        reason="Trivial `aws s3api head-object` check for the "
+        "RESOURCE_KILL marker written by PitParityWalkforward's own "
+        "commands when the just-published pit_stats_walkforward.json read "
+        "back timed_out:true; writes no run artifact of its own."
     ),
     "PublishParityCompareDegraded": ArtifactReason(
         reason="WARNING-severity SNS alert fired when the PitParityCompare "
