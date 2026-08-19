@@ -303,6 +303,24 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "dedicated archive page — the leaderboard that consumes this is "
         "hosted in the eval_rolling_mean Lambda."
     ),
+    # alpha-engine-config-I7726 — the research module's §2.3a CORRECTNESS
+    # VERDICT: a known-answer battery over the DEPLOYED instrument
+    # (crucible-research scoring/self_test.py -> nousergon_lib.quant.selftest).
+    # The producer was always correct and NO LIVE TRIGGER REACHED IT — measured
+    # 2026-08-19, research/{trading_day}/self_test.json had ZERO instances in
+    # the bucket ever, since its registry row was created 2026-08-13. This state
+    # is the trigger.
+    #
+    # ArtifactReason, not ArchivePageRef: the verdict's consumer surface is the
+    # console check row (ops/checks/ae-research-self-test/latest.json) plus the
+    # freshness monitor's page on the artifact's absence, not an archive page.
+    "ResearchSelfTest": ArtifactReason(
+        reason="Research module self-test (config-I7726) — writes "
+        "research/{trading_day}/self_test.json, a known-answer battery over "
+        "the deployed scoring instrument. Surfaced on the console self-test "
+        "check row and paged by the freshness monitor when absent; no "
+        "dedicated archive page."
+    ),
     "DataPhase2": ArtifactReason(
         reason="Alt-data + fundamentals refresh; substrate-only, no per-run "
         "rendered artifact."
