@@ -1,0 +1,77 @@
+# .openrouter-allowlist.yaml — pre-cleared OpenRouter-literal matches for
+# nousergon-lib (alpha-engine-config-I6564, epic I6367 sub-issue 10).
+#
+# Schema: scripts/openrouter_guard.py::load_allowlist. Every entry needs
+# `path`, `pattern` (one of base_url / env_key / provider_literal), `reason`,
+# `expires` (YYYY-MM-DD — a past date fails CI loudly), and optionally
+# `tracking`.
+#
+# Every entry below is the guard's OWN implementation and test/workflow
+# source, which necessarily contains these literals to detect and exercise
+# them — the pattern this file exists to allowlist is the exact one the
+# guard's fixtures construct on purpose. Nothing here is a real call site.
+schema_version: 1
+entries:
+  - path: scripts/openrouter_guard.py
+    pattern: base_url
+    reason: >-
+      The guard's own regex/docstrings/comments name the literal it detects.
+      Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: scripts/openrouter_guard.py
+    pattern: env_key
+    reason: >-
+      The guard's own regex/docstrings/comments name the literal it detects.
+      Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: scripts/openrouter_guard.py
+    pattern: provider_literal
+    reason: >-
+      The guard's own regex/docstrings/comments name the literal it detects.
+      Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: tests/test_openrouter_guard.py
+    pattern: base_url
+    reason: >-
+      Test fixtures construct exactly this literal to assert the guard
+      catches it. Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: tests/test_openrouter_guard.py
+    pattern: env_key
+    reason: >-
+      Test fixtures construct exactly this literal to assert the guard
+      catches it. Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: tests/test_openrouter_guard.py
+    pattern: provider_literal
+    reason: >-
+      Test fixtures construct exactly this literal to assert the guard
+      catches it. Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: .github/workflows/openrouter-guard.yml
+    pattern: base_url
+    reason: >-
+      The reusable workflow's own header comment documents what the guard
+      looks for. Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: .github/workflows/openrouter-guard.yml
+    pattern: env_key
+    reason: >-
+      The reusable workflow's own header comment documents what the guard
+      looks for. Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
+  - path: .github/workflows/openrouter-guard.yml
+    pattern: provider_literal
+    reason: >-
+      The reusable workflow's own header comment documents what the guard
+      looks for. Not a call site.
+    expires: "2027-08-19"
+    tracking: alpha-engine-config-I6564
