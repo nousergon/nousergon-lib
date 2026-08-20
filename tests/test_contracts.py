@@ -603,6 +603,36 @@ class TestApplyAuditContract:
         payload["loops"]["scoring_weights"]["outcome"] = "vetoed"
         assert contracts.conformance_errors("apply_audit", payload)
 
+    def test_shadow_only_hold_record_conforms(self):
+        """alpha-engine-config-I2515 (Brian's 2026-08-20 ruling): a
+        shadow-only arm that outscores the champion is HELD, and the record
+        must be able to say so — the outcome, the slug, and the arm that
+        actually won. A contract that could not express this would force the
+        producer to record a shadow win as a no_contest, erasing the very
+        counterfactual shadow mode exists to measure."""
+        payload = _producer_champion_audit(
+            outcome="held_shadow_only",
+            champion_before="scanner_predictor_direct",
+            champion_after="scanner_predictor_direct",
+            champion_score=-0.00203,
+            challenger_score=0.041,
+            blocked_by=["shadow_only_arm"],
+            counterfactual_winner="thinktank_coverage",
+        )
+        contracts.validate("producer_champion_audit", payload)
+
+    def test_counterfactual_winner_is_declared_and_optional(self):
+        # Additive (alpha-engine-config-I2515) — not in `required`, so
+        # pre-I2515 v2 records remain valid without a version bump.
+        schema = contracts.load_schema("producer_champion_audit")
+        assert "counterfactual_winner" in schema["properties"]
+        assert "counterfactual_winner" not in schema["required"]
+        assert None in schema["properties"]["counterfactual_winner"]["enum"]
+
+    def test_counterfactual_winner_rejects_unknown_arm(self):
+        payload = _producer_champion_audit(counterfactual_winner="mystery_arm")
+        assert contracts.conformance_errors("producer_champion_audit", payload)
+
     def test_unknown_blocked_by_slug_rejected(self):
         payload = _apply_audit()
         payload["loops"]["executor_params"]["blocked_by"] = ["mystery_gate"]
