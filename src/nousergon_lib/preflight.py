@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import urllib.error
 import urllib.request
 import warnings
 from datetime import datetime, timezone
@@ -428,13 +430,31 @@ class BasePreflight:
             log.info("Deploy-drift: image at %s matches %s@%s ✓", baked[:12], repo, branch)
             return
 
-        if _is_ancestor(repo, base=baked, head=upstream, timeout=timeout):
+        ancestry = _is_ancestor(repo, base=baked, head=upstream, timeout=timeout)
+        if ancestry:
             log.info(
                 "Deploy-drift: image at %s is behind %s@%s (%s) but is a valid "
                 "ancestor — benign build/merge race, not drift.",
                 baked[:12], repo, branch, upstream[:12],
             )
             return
+
+        if ancestry is None:
+            # Fail closed, but say what actually happened. Asserting "is not an
+            # ancestor" here would be a claim GitHub never made — on 2026-08-20
+            # a single unretried HTTP 500 produced exactly that sentence about
+            # a SHA that WAS an ancestor, and it failed a deploy canary.
+            raise RuntimeError(
+                f"Deploy drift UNRESOLVED: image was built from {baked[:12]} and "
+                f"{repo}@{branch} is now at {upstream[:12]}, but the GitHub compare "
+                f"API could not be reached to establish whether {baked[:12]} is an "
+                f"ancestor (see the preceding warning for the transport error). "
+                f"This may be a benign build/merge race or real drift — refusing to "
+                f"guess. Re-run once GitHub is reachable; if it persists, re-run "
+                f"`.github/workflows/deploy.yml` on main (or the local deploy.sh). "
+                f"Refusing to proceed — running stale code on new signals is how "
+                f"2026-04-20 happened."
+            )
 
         raise RuntimeError(
             f"Deploy drift: image was built from {baked[:12]} but "
@@ -482,32 +502,107 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
     the consumer. ``repo`` is ``"owner/name"`` (e.g.
     ``"nousergon/crucible-predictor"``).
     """
-    # S310 fires on urllib.request.Request(...) whenever the URL argument is
-    # a variable rather than an inline literal (it cannot statically prove
-    # the scheme through the indirection) — inlining the f-string directly,
-    # same as the alpha-engine-config precedent (config#2532), keeps the
-    # scheme provably-hardcoded-https at the call site instead of needing a
-    # noqa here on top of the _safe_urlopen runtime guard below.
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/branches/{branch}",
-        headers={"Accept": "application/vnd.github+json"},
+    payload, definitive = github_get_json(
+        f"https://api.github.com/repos/{repo}/branches/{branch}", timeout=timeout,
     )
-    try:
-        with _safe_urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
-        return payload.get("commit", {}).get("sha")
-    except (OSError, json.JSONDecodeError) as exc:
-        # OSError covers urllib.error.URLError/HTTPError plus the bare
-        # TimeoutError that urlopen raises on a read-phase timeout (the
-        # 2026-05-07 weekday SF DeployDriftCheck failure: read timed out
-        # inside http.client.getresponse, which is past urllib's
-        # OSError → URLError wrap point in do_open).
-        log.warning("Deploy-drift: GitHub API unreachable (%s) — cannot compare", exc)
+    if payload is None:
+        # Both the transient-outage and the definitive-404 case land here as
+        # "cannot compare". Unlike the ancestry check below, a missing upstream
+        # SHA leaves nothing to compare against at all, so this stays
+        # warn-and-continue rather than blocking a trading-hours Lambda.
+        log.warning(
+            "Deploy-drift: no %s@%s HEAD from GitHub (definitive=%s) — cannot compare",
+            repo, branch, definitive,
+        )
         return None
+    return payload.get("commit", {}).get("sha")
 
 
-def _is_ancestor(repo: str, base: str, head: str, timeout: float = 5.0) -> bool:
-    """Return ``True`` if ``base`` is an ancestor of (or equal to) ``head``.
+#: HTTP statuses that mean "GitHub could not answer *right now*" as opposed to
+#: "GitHub answered, and the answer is no". A 5xx or a 429 says nothing about
+#: ancestry; collapsing it into a definitive verdict is what turned a transient
+#: 500 into a false "not an ancestor" deploy-drift halt on 2026-08-20.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+#: Retry schedule (seconds to sleep *before* attempts 2 and 3) for transient
+#: GitHub failures. Bounded deliberately: this runs inside a Lambda preflight,
+#: so the whole retry budget stays under ~2s of sleep on top of the per-attempt
+#: timeout rather than eating the invocation.
+_GITHUB_RETRY_BACKOFF = (0.5, 1.5)
+
+
+def _github_auth_headers() -> dict[str, str]:
+    """Bearer header from ``GITHUB_TOKEN``/``GH_TOKEN`` when one is present.
+
+    Lambda images carry no token and stay on the unauthenticated 60 req/hr
+    ceiling; CI and laptop call sites get 5000 req/hr for free by exporting
+    one. Absence is normal, never an error.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def github_get_json(
+    url: str,
+    *,
+    timeout: float = 5.0,
+    attempts: int = 3,
+    sleep: Any = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """GET *url* from the GitHub REST API, retrying transient failures.
+
+    Returns ``(payload, definitive)``:
+
+    - ``(payload, True)``  — GitHub answered; the payload is the answer.
+    - ``(None, True)``     — GitHub answered *definitively negative* (404 for
+      an unknown repo/commit, 422 for an unprocessable comparison). The caller
+      may treat this as a real finding, not as an outage.
+    - ``(None, False)``    — could not be resolved after *attempts* tries
+      (network error, timeout, 5xx, rate limit, unparseable body). The caller
+      must NOT report this as a substantive answer.
+
+    The (payload, definitive) split exists because the single-attempt
+    predecessor of this helper returned a bare ``False`` for both "GitHub says
+    no" and "GitHub did not answer", so a transient 500 rendered as a
+    confidently-worded drift halt naming an ancestry that was in fact fine.
+    """
+    if sleep is None:  # pragma: no cover - trivial default indirection
+        sleep = time.sleep
+    headers = {"Accept": "application/vnd.github+json", **_github_auth_headers()}
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            # S310: ruff cannot statically prove the scheme through a variable
+            # URL. _safe_urlopen enforces https:// at runtime and raises
+            # otherwise, which is the guarantee the rule is asking for; every
+            # caller here also builds the URL from a hardcoded https:// base.
+            req = urllib.request.Request(url, headers=headers)  # noqa: S310
+            with _safe_urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read()), True
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            if exc.code not in _TRANSIENT_HTTP_STATUSES:
+                # A definitive negative: the resource genuinely is not there /
+                # is not comparable. Retrying cannot change this answer.
+                log.warning("GitHub API %s -> HTTP %s (definitive)", url, exc.code)
+                return None, True
+        except (OSError, json.JSONDecodeError) as exc:
+            # OSError covers URLError plus the bare TimeoutError urlopen raises
+            # on a read-phase timeout (2026-05-07 weekday SF DeployDriftCheck).
+            last_exc = exc
+        if attempt < len(_GITHUB_RETRY_BACKOFF):
+            sleep(_GITHUB_RETRY_BACKOFF[attempt])
+    log.warning(
+        "GitHub API %s unresolved after %d attempts (%s) — no answer, not a negative answer",
+        url, attempts, last_exc,
+    )
+    return None, False
+
+
+def _is_ancestor(
+    repo: str, base: str, head: str, timeout: float = 5.0, *, sleep: Any = None,
+) -> bool | None:
+    """Return whether ``base`` is an ancestor of (or equal to) ``head``.
 
     Uses GitHub's compare-commits API rather than local ``git
     merge-base`` — Lambda images never bake in a ``.git`` object
@@ -520,27 +615,23 @@ def _is_ancestor(repo: str, base: str, head: str, timeout: float = 5.0) -> bool:
     ``identical``/``ahead`` count as a benign race; ``behind``/
     ``diverged`` are real drift.
 
-    Returns ``False`` — hard-fail, not warn-and-continue — on any
-    network/parse error. Unlike ``_fetch_origin_main_sha``, we already
-    know ``baked != upstream`` by the time this is called; failing to
-    resolve *why* they differ must not silently pass a possibly-real
-    drift.
+    Tri-state, deliberately:
+
+    - ``True``  — ancestor (benign build/merge race).
+    - ``False`` — GitHub answered and the answer is "not an ancestor",
+      including a definitive 404/422 (a SHA main has never heard of is
+      exactly the force-push/rewrite case this guard exists for).
+    - ``None``  — ancestry could not be resolved after retries. The
+      caller still fails closed, but must say *that*, not assert a
+      relationship GitHub never confirmed.
     """
-    # Inlined f-string (not a formatted variable) — same S310 rationale as
-    # _fetch_origin_main_sha above: keeps the https:// scheme provably
-    # hardcoded at the call site for ruff's static check.
-    req = urllib.request.Request(
+    payload, definitive = github_get_json(
         f"https://api.github.com/repos/{repo}/compare/{base}...{head}",
-        headers={"Accept": "application/vnd.github+json"},
+        timeout=timeout,
+        sleep=sleep,
     )
-    try:
-        with _safe_urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read())
-        status = payload.get("status")
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning(
-            "Deploy-drift: GitHub compare API unreachable (%s) — cannot resolve "
-            "ancestry, treating mismatch as drift", exc,
-        )
+    if not definitive:
+        return None
+    if payload is None:
         return False
-    return status in ("identical", "ahead")
+    return payload.get("status") in ("identical", "ahead")
