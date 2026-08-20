@@ -711,6 +711,45 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="director",
         artifact_label="Director weekly action plan",
     ),
+    # alpha-engine-config-I7813: the observe-only scanner champion/challenger
+    # board left the Scanner Lambda's inline post-steps and became its own
+    # weekly-SF leaf state placed AFTER ReportCard/Director — the blast-radius
+    # split sf-pipeline-policy.md §2.1 asks for. Same Lambda as "Scanner",
+    # invoked with mode=scanner_leaderboard. No archive page renders this board
+    # today; crucible-dashboard's Experiments view (views/46_Experiments.py)
+    # reads the prefix directly, so swap this for an ArchivePageRef if that
+    # view ever becomes a first-class archive page.
+    "ScannerLeaderboard": ArtifactReason(
+        reason="Observe-only scanner champion/challenger board — writes "
+        "s3://alpha-engine-research/scanner/leaderboard/{run_date}.json "
+        "(alpha-engine-config-I7813). No pipeline stage branches on it: "
+        "the dashboard Experiments view renders it and gate predicates "
+        "poll its n_dates. A failure degrades the weekly run (the run "
+        "terminates DEGRADED naming this state) but cannot reach any "
+        "stage that does not consume its output."
+    ),
+    # alpha-engine-config-I7813: mirrors PublishReportCardDegraded's shape —
+    # the named WARNING alert on the leaf's fail-open Catch, so a board that
+    # was not written can never be silent.
+    "PublishScannerLeaderboardDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when the ScannerLeaderboard "
+        "leaf fails and scanner/leaderboard/{run_date}.json is not written "
+        "(alpha-engine-config-I7813) — non-fatal for trading (nothing "
+        "branches on the board), but the scanner champion/challenger "
+        "comparison has no observation for the cycle. No persisted "
+        "artifact (the email IS the surface)."
+    ),
+    # alpha-engine-config-I7813: mirrors NotifyCompleteReportCardDegraded —
+    # the terminal notifier for a run whose ONLY degradation is the leaf, so
+    # it can never reach NotifyComplete's "All steps completed successfully"
+    # while terminating in DegradedRun (sf-pipeline-policy.md §2.3 Option A).
+    "NotifyCompleteScannerLeaderboardDegraded": ArtifactReason(
+        reason="Terminal success SNS publish for a run whose only "
+        "degradation was the observe-only ScannerLeaderboard leaf "
+        "(alpha-engine-config-I7813) — a PublishScannerLeaderboardDegraded "
+        "alert fired earlier in the run. No persisted artifact (the email "
+        "IS the surface)."
+    ),
     # config#2302: same silent-swallow class as ReportCard's pre-fix Catch —
     # WARNING-severity alert fired from Director's Catch(States.ALL).
     "PublishDirectorDegraded": ArtifactReason(
