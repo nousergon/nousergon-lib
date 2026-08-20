@@ -558,11 +558,29 @@ def test_is_ancestor_false_when_status_behind_or_diverged(status):
         assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is False
 
 
-def test_is_ancestor_false_on_url_error():
-    """Compare-API unreachable → False (hard-fail-on-mismatch default),
-    not None/True — unlike _fetch_origin_main_sha, a mismatch is already
-    known at this point, so an unresolved ancestry check must not
-    silently pass a possibly-real drift."""
+def _fake_json_response(payload):
+    resp = mock.MagicMock()
+    resp.read.return_value = json.dumps(payload).encode()
+    resp.__enter__ = mock.MagicMock(return_value=resp)
+    resp.__exit__ = mock.MagicMock(return_value=False)
+    return resp
+
+
+def _http_error(code):
+    import urllib.error
+    return urllib.error.HTTPError(
+        "https://api.github.com/x", code, "boom", hdrs=None, fp=None,
+    )
+
+
+def test_is_ancestor_none_on_url_error():
+    """Compare-API unreachable → None (UNRESOLVED), never False.
+
+    False means "GitHub answered, and base is not an ancestor". Returning
+    it for a transport failure is what produced the 2026-08-20 false halt:
+    the caller then raised a message asserting a non-ancestry that GitHub
+    had never stated. The caller still fails closed on None — but says so.
+    """
     import urllib.error
 
     from nousergon_lib.preflight import _is_ancestor
@@ -570,14 +588,111 @@ def test_is_ancestor_false_on_url_error():
         "urllib.request.urlopen",
         side_effect=urllib.error.URLError("dns failure"),
     ):
-        assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is False
+        assert _is_ancestor(
+            "nousergon/crucible-predictor", base="a" * 40, head="b" * 40,
+            sleep=lambda _s: None,
+        ) is None
 
 
-def test_is_ancestor_false_on_json_parse_error():
+def test_is_ancestor_none_on_json_parse_error():
     from nousergon_lib.preflight import _is_ancestor
     fake_resp = mock.MagicMock()
     fake_resp.read.return_value = b"not valid json{{{"
     fake_resp.__enter__ = mock.MagicMock(return_value=fake_resp)
     fake_resp.__exit__ = mock.MagicMock(return_value=False)
     with mock.patch("urllib.request.urlopen", return_value=fake_resp):
-        assert _is_ancestor("nousergon/crucible-predictor", base="a" * 40, head="b" * 40) is False
+        assert _is_ancestor(
+            "nousergon/crucible-predictor", base="a" * 40, head="b" * 40,
+            sleep=lambda _s: None,
+        ) is None
+
+
+@pytest.mark.parametrize("code", [408, 425, 429, 500, 502, 503, 504])
+def test_is_ancestor_retries_transient_http_and_succeeds(code):
+    """The exact 2026-08-20 shape: one transient 5xx followed by a good
+    answer must resolve to the good answer, not to a drift halt."""
+    from nousergon_lib.preflight import _is_ancestor
+    slept = []
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=[_http_error(code), _fake_json_response({"status": "ahead"})],
+    ):
+        assert _is_ancestor(
+            "nousergon/crucible-predictor", base="a" * 40, head="b" * 40,
+            sleep=slept.append,
+        ) is True
+    assert slept == [0.5]
+
+
+def test_is_ancestor_none_when_transient_persists_across_all_attempts():
+    from nousergon_lib.preflight import _is_ancestor
+    slept = []
+    with mock.patch(
+        "urllib.request.urlopen", side_effect=[_http_error(500)] * 3,
+    ) as urlopen:
+        assert _is_ancestor(
+            "nousergon/crucible-predictor", base="a" * 40, head="b" * 40,
+            sleep=slept.append,
+        ) is None
+    assert urlopen.call_count == 3
+    assert slept == [0.5, 1.5]
+
+
+@pytest.mark.parametrize("code", [404, 422])
+def test_is_ancestor_false_and_no_retry_on_definitive_http_error(code):
+    """404/422 is GitHub answering: the SHA is unknown or uncomparable —
+    the force-push/rewrite case this guard exists for. Answer it once."""
+    from nousergon_lib.preflight import _is_ancestor
+    with mock.patch(
+        "urllib.request.urlopen", side_effect=_http_error(code),
+    ) as urlopen:
+        assert _is_ancestor(
+            "nousergon/crucible-predictor", base="a" * 40, head="b" * 40,
+            sleep=lambda _s: None,
+        ) is False
+    assert urlopen.call_count == 1
+
+
+def test_github_get_json_sends_bearer_token_when_env_set(monkeypatch):
+    """A token lifts the caller off the unauthenticated 60 req/hr ceiling —
+    a rate-limit 403/429 is one of the transports that produced the false
+    halt, so raising the ceiling where a token exists is part of the fix."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    with mock.patch(
+        "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
+    ) as urlopen:
+        payload, definitive = github_get_json("https://api.github.com/x")
+    assert (payload, definitive) == ({"ok": True}, True)
+    sent = urlopen.call_args.args[0]
+    assert sent.get_header("Authorization") == "Bearer tok-123"
+
+
+def test_github_get_json_omits_auth_header_when_no_token(monkeypatch):
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    with mock.patch(
+        "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
+    ) as urlopen:
+        github_get_json("https://api.github.com/x")
+    assert urlopen.call_args.args[0].get_header("Authorization") is None
+
+
+def test_check_deploy_drift_unresolved_ancestry_raises_distinct_message(tmp_path):
+    """An unresolved ancestry still halts — but the message must not claim
+    a non-ancestry GitHub never confirmed."""
+    sha_file = tmp_path / "GIT_SHA.txt"
+    sha_file.write_text("aaaaaaaa" * 5 + "\n")
+
+    p = _Concrete("bkt")
+    with mock.patch(
+        "nousergon_lib.preflight._fetch_origin_main_sha",
+        return_value="bbbbbbbb" * 5,
+    ), mock.patch(
+        "nousergon_lib.preflight._is_ancestor",
+        return_value=None,
+    ):
+        with pytest.raises(RuntimeError, match="Deploy drift UNRESOLVED") as exc:
+            p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
+    assert "is not an ancestor" not in str(exc.value)
