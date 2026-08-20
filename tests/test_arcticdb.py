@@ -388,6 +388,49 @@ def test_get_universe_symbols_as_of_malformed_map_raises(monkeypatch):
 # ── load_universe_ohlcv ──────────────────────────────────────────────────────
 
 
+class _BatchReads:
+    """``read_batch`` expressed in terms of a stub's own ``read``.
+
+    The production core issues ONE ``lib.read_batch(requests)`` call
+    (alpha-engine-config-I7812), so every stub library here must serve that
+    API or it would be testing a code path that no longer exists. Real
+    ArcticDB RETURNS a ``DataError`` for a failed symbol rather than raising,
+    and returns results in request order — both reproduced faithfully, since
+    a stub that raised instead would let a "failed symbol treated as a frame"
+    regression through.
+    """
+
+    def read_batch(self, requests):
+        out = []
+        for req in requests:
+            try:
+                out.append(self.read(req.symbol, date_range=req.date_range, columns=req.columns))
+            except Exception as exc:  # noqa: BLE001 - mirrors DataError return
+                out.append(_FakeDataError(req.symbol, str(exc)))
+        return out
+
+
+class _FakeReadRequest:
+    def __init__(self, symbol=None, date_range=None, columns=None, **_kw):
+        self.symbol = symbol
+        self.date_range = date_range
+        self.columns = columns
+
+
+class _FakeDataError:
+    def __init__(self, symbol, exception_string):
+        self.symbol = symbol
+        self.exception_string = exception_string
+
+
+def _install_arctic_stub(monkeypatch, arctic_factory):
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = arctic_factory
+    mod.ReadRequest = _FakeReadRequest
+    mod.DataError = _FakeDataError
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+
+
 def _stub_arctic_with_ohlcv(monkeypatch, frames, symbols=None):
     """Install an arcticdb stub whose universe lib serves ``frames``.
 
@@ -401,7 +444,7 @@ def _stub_arctic_with_ohlcv(monkeypatch, frames, symbols=None):
         def __init__(self, data):
             self.data = data
 
-    class _Lib:
+    class _Lib(_BatchReads):
         def list_symbols(self):
             return syms
 
@@ -424,9 +467,7 @@ def _stub_arctic_with_ohlcv(monkeypatch, frames, symbols=None):
         def get_library(self, name, create_if_missing=False):
             return _Lib()
 
-    mod = types.ModuleType("arcticdb")
-    mod.Arctic = lambda uri: _Arctic()
-    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+    _install_arctic_stub(monkeypatch, lambda uri: _Arctic())
 
 
 def test_load_universe_ohlcv_returns_slim_cache_shape(monkeypatch):
@@ -485,7 +526,7 @@ def test_load_universe_ohlcv_skips_failures_partial_load(monkeypatch):
         def __init__(self, data):
             self.data = data
 
-    class _Lib:
+    class _Lib(_BatchReads):
         def list_symbols(self):
             return ["GOOD", "BAD", "EMPTY"]
 
@@ -500,9 +541,7 @@ def test_load_universe_ohlcv_skips_failures_partial_load(monkeypatch):
         def get_library(self, name, create_if_missing=False):
             return _Lib()
 
-    mod = types.ModuleType("arcticdb")
-    mod.Arctic = lambda uri: _Arctic()
-    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+    _install_arctic_stub(monkeypatch, lambda uri: _Arctic())
 
     out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
     assert list(out) == ["GOOD"]  # BAD raised, EMPTY empty -> both dropped
@@ -556,7 +595,7 @@ def test_load_macro_series_partial_load_skips_failures(monkeypatch):
         def __init__(self, data):
             self.data = data
 
-    class _Lib:
+    class _Lib(_BatchReads):
         def list_symbols(self):
             return ["GLD", "MISSING"]
 
@@ -569,9 +608,7 @@ def test_load_macro_series_partial_load_skips_failures(monkeypatch):
         def get_library(self, name, create_if_missing=False):
             return _Lib()
 
-    mod = types.ModuleType("arcticdb")
-    mod.Arctic = lambda uri: _Arctic()
-    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+    _install_arctic_stub(monkeypatch, lambda uri: _Arctic())
 
     out = ae_arctic.load_macro_series(
         "b", ["GLD", "MISSING"], lookback_days=3650, end="2025-12-31"
@@ -596,3 +633,121 @@ def test_load_macro_series_shares_normalization_with_universe(monkeypatch):
     assert df.index.is_monotonic_increasing
     assert not df.index.has_duplicates
     assert df["Close"].tolist() == [1.0, 99.0]  # keep="last" then sort
+
+
+# ── one batch read, not N per-symbol reads (alpha-engine-config-I7812) ────────
+
+
+def test_universe_read_issues_exactly_one_batch_call(monkeypatch):
+    """The whole point of I7812: 905 symbols cost ONE round of batched IO.
+
+    Pinned as a call COUNT because the regression this guards is invisible in
+    the returned data — a per-symbol loop returns byte-identical frames and
+    simply takes 5.4x longer (462.5s -> 85.6s measured live 2026-08-20 over
+    the 905-symbol universe library). Nothing about the result would fail.
+    """
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=3, freq="D")
+    frames = {s: pd.DataFrame({"Close": [1.0, 2, 3]}, index=idx) for s in ("AAA", "BBB", "CCC")}
+    calls = {"batch": 0, "single": 0}
+
+    class _Lib(_BatchReads):
+        def list_symbols(self):
+            return sorted(frames)
+
+        def read(self, sym, date_range=None, columns=None):
+            calls["single"] += 1
+
+            class _R:
+                data = frames[sym].copy()
+
+            return _R()
+
+        def read_batch(self, requests):
+            calls["batch"] += 1
+            return _BatchReads.read_batch(self, requests)
+
+    class _Arctic:
+        def get_library(self, name, create_if_missing=False):
+            return _Lib()
+
+    _install_arctic_stub(monkeypatch, lambda uri: _Arctic())
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+
+    assert set(out) == {"AAA", "BBB", "CCC"}
+    assert calls["batch"] == 1
+
+
+def test_a_returned_data_error_is_dropped_not_read_as_a_frame(monkeypatch):
+    """ArcticDB RETURNS ``DataError`` for a failed symbol; it does not raise.
+
+    A reader that only caught exceptions would hand the DataError object on as
+    if it were a frame — the partial-load contract says drop it and WARN.
+    """
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=2, freq="D")
+    good = pd.DataFrame({"Close": [1.0, 2]}, index=idx)
+
+    class _Lib:
+        def list_symbols(self):
+            return ["GOOD", "BROKEN"]
+
+        def read_batch(self, requests):
+            out = []
+            for req in requests:
+                if req.symbol == "BROKEN":
+                    out.append(_FakeDataError("BROKEN", "E_KEY_NOT_FOUND"))
+                else:
+
+                    class _R:
+                        data = good.copy()
+
+                    out.append(_R())
+            return out
+
+    class _Arctic:
+        def get_library(self, name, create_if_missing=False):
+            return _Lib()
+
+    _install_arctic_stub(monkeypatch, lambda uri: _Arctic())
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+    assert list(out) == ["GOOD"]
+
+
+def test_batch_results_are_matched_to_their_own_symbol(monkeypatch):
+    """Request order is the ONLY thing tying a result to a symbol.
+
+    A frame silently attributed to the wrong ticker is the worst outcome this
+    function can produce — every downstream return would be numerically fine
+    and about the wrong company — so the mapping is pinned with per-symbol
+    distinguishable data rather than left to the shape assertions above.
+    """
+    pd = pytest.importorskip("pandas")
+    idx = pd.date_range("2025-01-01", periods=2, freq="D")
+    frames = {
+        "AAA": pd.DataFrame({"Close": [1.0, 1.5]}, index=idx),
+        "BBB": pd.DataFrame({"Close": [2.0, 2.5]}, index=idx),
+        "CCC": pd.DataFrame({"Close": [3.0, 3.5]}, index=idx),
+    }
+
+    class _Lib(_BatchReads):
+        def list_symbols(self):
+            return sorted(frames)
+
+        def read(self, sym, date_range=None, columns=None):
+            class _R:
+                data = frames[sym].copy()
+
+            return _R()
+
+    class _Arctic:
+        def get_library(self, name, create_if_missing=False):
+            return _Lib()
+
+    _install_arctic_stub(monkeypatch, lambda uri: _Arctic())
+
+    out = ae_arctic.load_universe_ohlcv("b", lookback_days=3650, end="2025-12-31")
+    for sym, df in frames.items():
+        assert out[sym]["Close"].tolist() == df["Close"].tolist()

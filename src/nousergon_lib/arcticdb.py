@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
@@ -583,7 +583,6 @@ def _load_arctic_frames(
     lookback_days: int,
     end: pd.Timestamp | str | None,
     columns,
-    max_workers: int,
     label: str,
 ) -> dict[str, pd.DataFrame]:
     """Shared read core for the universe + macro ArcticDB readers.
@@ -597,14 +596,43 @@ def _load_arctic_frames(
     Contract (mirrors ``load_slim_cache``): individual symbol read failures
     / empty frames are logged at WARNING and dropped — the caller decides
     how to handle a partial load.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    ONE ``read_batch`` call, not N threaded ``read`` calls
+    (alpha-engine-config-I7812). ArcticDB's batch API pipelines the whole
+    request set through its own C++ IO pool, which issues the object-store
+    GETs with far more concurrency than a Python ``ThreadPoolExecutor`` of
+    per-symbol ``lib.read`` calls and pays the per-symbol index lookup once
+    per batch rather than once per thread hop. Measured 2026-08-20 against
+    the live ``alpha-engine-research`` universe library, 905 symbols,
+    ``columns=["Close"]``:
+
+    ==========================  ==========  =========
+    read shape                  569d window 65d window
+    ==========================  ==========  =========
+    ThreadPoolExecutor(20)      462.5 s     463.9 s
+    ``read_batch``               85.6 s      71.8 s
+    ==========================  ==========  =========
+
+    Note what the first row says: at 20-way Python concurrency the wall
+    clock did NOT move when the window shrank 8.7x (353,413 rows -> 40,441).
+    The cost was never the bytes; it was 905 sequential-per-thread symbol
+    reads. That is why this is fixed HERE, at the shared read chokepoint,
+    rather than by narrowing a window in one consumer — every consumer of
+    this function was paying it.
+
+    ``max_workers`` was REMOVED with this change rather than left as an
+    ignored knob: the batch API owns its own parallelism, so a thread-width
+    argument would describe nothing. No fleet call site passed it (grepped
+    2026-08-20 across all repos under ``~/Development``); the two public
+    wrappers dropped it in the same commit.
+    """
     import pandas as pd  # lazy: only needed with the [arcticdb] extra
 
     symbols = sorted(set(symbols))
     if not symbols:
         return {}
+
+    adb = _import_arcticdb()
 
     # pd.Timestamp(...)'s constructor stub includes a NaT-producing branch
     # (its generic fallback for unparseable input); `end` is documented as
@@ -618,42 +646,55 @@ def _load_arctic_frames(
         end_ts = end_ts.tz_localize(None)
     start_ts = end_ts - pd.Timedelta(days=lookback_days)
 
-    def _read(sym: str):
-        # dict[str, Any]: this dict is heterogeneous kwargs (a tuple value
-        # today, optionally a list value below) — the plain-literal
-        # inference would otherwise pin the value type to the first entry.
-        read_kwargs: dict[str, Any] = {"date_range": (start_ts, end_ts)}
-        if columns is not None:
-            read_kwargs["columns"] = list(columns)
-        df = lib.read(sym, **read_kwargs).data
+    def _normalize(df):
         if df is None or df.empty:
-            return sym, None
+            return None
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         if df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-        return sym, df
+        return df[~df.index.duplicated(keep="last")].sort_index()
+
+    requests = [
+        adb.ReadRequest(
+            symbol=sym,
+            date_range=(start_ts, end_ts),
+            columns=list(columns) if columns is not None else None,
+        )
+        for sym in symbols
+    ]
+    # read_batch returns one result per request, IN REQUEST ORDER, each
+    # either a VersionedItem or a DataError describing that symbol's
+    # failure. A DataError is returned, never raised — so it must be
+    # matched explicitly or a failed symbol would be treated as a frame.
+    # A failure of the batch CALL itself still raises and is not caught:
+    # that is the whole store being unreachable, not a partial load.
+    results = lib.read_batch(requests)
+    data_error = getattr(adb, "DataError", ())
 
     out: dict[str, pd.DataFrame] = {}
     errors = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_read, s): s for s in symbols}
-        for fut in as_completed(futures):
-            sym = futures[fut]
-            try:
-                ticker, df = fut.result()
-            except Exception as exc:  # noqa: BLE001 - partial-load contract
-                log.warning("ArcticDB %s read failed for %s: %s", label, sym, exc)
-                errors += 1
-                continue
-            if df is None:
-                log.warning(
-                    "ArcticDB %s returned empty frame for %s", label, sym
-                )
-                errors += 1
-                continue
-            out[ticker] = df
+    for sym, res in zip(symbols, results):
+        if isinstance(res, data_error):
+            log.warning(
+                "ArcticDB %s read failed for %s: %s",
+                label,
+                sym,
+                getattr(res, "exception_string", None) or res,
+            )
+            errors += 1
+            continue
+        try:
+            df = _normalize(getattr(res, "data", None))
+        except Exception as exc:  # noqa: BLE001 - partial-load contract
+            log.warning("ArcticDB %s normalize failed for %s: %s", label, sym, exc)
+            errors += 1
+            continue
+        if df is None:
+            log.warning("ArcticDB %s returned empty frame for %s", label, sym)
+            errors += 1
+            continue
+        out[sym] = df
 
     log.info(
         "%s: %d symbols OK, %d errors (window %s..%s)",
@@ -673,7 +714,6 @@ def load_universe_ohlcv(
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
     end: pd.Timestamp | str | None = None,
     columns=None,
-    max_workers: int = 20,
     region: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load a ticker -> OHLCV DataFrame dict from the ArcticDB **universe** lib.
@@ -705,7 +745,6 @@ def load_universe_ohlcv(
         end: window end (``pd.Timestamp``/str); ``None`` -> today (normalized).
         columns: columns to read; ``None`` reads the full stored frame (true
             slim-cache equivalent). Pass ``OHLCV_COLUMNS`` to narrow for perf.
-        max_workers: ThreadPool width for the per-ticker reads.
         region: AWS region override (defaults via ``arctic_uri``).
     """
     if symbols is None:
@@ -725,7 +764,6 @@ def load_universe_ohlcv(
         lookback_days=lookback_days,
         end=end,
         columns=columns,
-        max_workers=max_workers,
         label="load_universe_ohlcv",
     )
 
@@ -737,7 +775,6 @@ def load_macro_series(
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
     end: pd.Timestamp | str | None = None,
     columns=None,
-    max_workers: int = 20,
     region: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load a symbol -> OHLCV DataFrame dict from the ArcticDB **macro** lib.
@@ -765,7 +802,6 @@ def load_macro_series(
         lookback_days: window size; default matches the slim cache's ~2y tail.
         end: window end (``pd.Timestamp``/str); ``None`` -> today (normalized).
         columns: columns to read; ``None`` reads the full stored frame.
-        max_workers: ThreadPool width for the per-symbol reads.
         region: AWS region override (defaults via ``arctic_uri``).
     """
     symbols = sorted(set(symbols))
@@ -779,6 +815,5 @@ def load_macro_series(
         lookback_days=lookback_days,
         end=end,
         columns=columns,
-        max_workers=max_workers,
         label="load_macro_series",
     )
