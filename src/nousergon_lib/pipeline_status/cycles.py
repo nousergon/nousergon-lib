@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .read import PipelineExecutionSummary, RunStatus
+from .work import WorkOutcome, WorkVerdict, classify_work
 
 __all__ = [
     "AttemptOutcome",
@@ -104,10 +105,31 @@ class AttemptOutcome:
     #: the stage order does not name any state it entered. Higher is further.
     depth_index: int | None
     depth_stage: str | None
+    #: The three-way work verdict for this attempt. Never None once
+    #: :func:`build_reliability_window` builds it — the parameter carries a
+    #: default only so directly-constructed test fixtures stay short.
+    work: WorkOutcome | None = None
 
     @property
     def succeeded(self) -> bool:
+        """Did the work, not merely reported SUCCEEDED.
+
+        alpha-engine-config-I8045: on ``ne-weekly-freshness-pipeline`` the
+        scheduled cron fires THU-SAT and two of three firings terminate
+        SUCCEEDED in ~3 seconds at ``WeeklyRunDaySkip`` having entered no
+        substantive stage. Under the old ``status == SUCCEEDED`` reading,
+        every one of those incremented :attr:`ReliabilityWindow.clean_streak`
+        and reported a healthy weekly pipeline in a window where not one
+        full weekly graph completed.
+        """
+        if self.work is not None:
+            return self.work.did_work
         return self.status == RunStatus.SUCCEEDED
+
+    @property
+    def skipped(self) -> bool:
+        """Reached a DECLARED no-work terminal — correct, and not a cycle."""
+        return self.work is not None and self.work.verdict is WorkVerdict.SKIPPED
 
     @property
     def failed(self) -> bool:
@@ -140,6 +162,18 @@ class CycleReliability:
     @property
     def attempt_count(self) -> int:
         return len(self.attempts)
+
+    @property
+    def skip_only(self) -> bool:
+        """Every attempt reached a declared skip terminal.
+
+        Such a cycle is neither clean nor dirty: the pipeline was correct to
+        do nothing. Surfaces render it as SKIPPED and rate calculations leave
+        it out of the denominator — counting it as a success inflates the
+        rate, counting it as a failure pages through working-as-designed
+        behaviour, and both were live before I8045.
+        """
+        return bool(self.attempts) and all(a.skipped for a in self.attempts)
 
     @property
     def first_attempt(self) -> AttemptOutcome | None:
@@ -230,6 +264,10 @@ class ReliabilityWindow:
         for cycle in reversed(self.cycles):
             if not cycle.settled:
                 continue
+            if cycle.skip_only:
+                # Neither breaks the streak nor extends it. A THU gate-out
+                # says nothing about whether Saturday's run will be clean.
+                continue
             if cycle.first_attempt_succeeded:
                 streak += 1
             else:
@@ -251,7 +289,7 @@ class ReliabilityWindow:
         question with a confidence the data does not support.
         """
         for cycle in reversed(self.cycles):
-            if cycle.settled and cycle.attempts:
+            if cycle.settled and cycle.attempts and not cycle.skip_only:
                 return bool(cycle.repeat_causes)
         return None
 
@@ -278,6 +316,15 @@ class ReliabilityWindow:
                 if fp and not attempt.cause_is_unresolved:
                     counts[fp] += 1
         return counts
+
+
+def _sm_name_of(execution_arn: str) -> str:
+    """State-machine name out of an execution ARN.
+
+    Shape: ``arn:aws:states:<region>:<acct>:execution:<sm-name>:<exec-name>``.
+    """
+    parts = execution_arn.split(":")
+    return parts[6] if len(parts) > 6 else ""
 
 
 def _depth_of(entered_states: Iterable[str], stage_order: Sequence[str]) -> tuple[int | None, str | None]:
@@ -319,6 +366,12 @@ def build_reliability_window(
     ``summaries`` may arrive in any order; cycles are built in chronological
     order of their first attempt, because "seen in an EARLIER cycle" is only
     meaningful against a stable ordering.
+
+    ``stage_order`` may be empty, in which case the spine is taken from
+    :data:`registry.PIPELINE_STAGE_ORDER`. If neither declares one,
+    :class:`work.UndeclaredPipeline` is raised rather than a window built on
+    a status-only notion of success — a pipeline nobody has declared a spine
+    for cannot be reported clean (alpha-engine-config-I8045).
     """
     ordered = sorted(summaries, key=lambda s: s.start_utc)
 
@@ -340,7 +393,17 @@ def build_reliability_window(
         cycle = CycleReliability(cycle_key=key)
         for summary in group:
             failing_state, error = failure_of(summary) if summary.status in _FAILED_STATUSES else (None, None)
-            depth_index, depth_stage = _depth_of(entered_states_of(summary), stage_order)
+            entered = list(entered_states_of(summary))
+            depth_index, depth_stage = _depth_of(entered, stage_order)
+            work = classify_work(
+                state_machine_name=_sm_name_of(summary.execution_arn),
+                status=summary.status,
+                entered_states=entered,
+                duration_sec=summary.duration_sec,
+                execution_arn=summary.execution_arn,
+                execution_name=summary.name,
+                stage_spine=tuple(stage_order) or None,
+            )
             cycle.attempts.append(
                 AttemptOutcome(
                     name=summary.name,
@@ -352,6 +415,7 @@ def build_reliability_window(
                     error=error,
                     depth_index=depth_index,
                     depth_stage=depth_stage,
+                    work=work,
                 )
             )
 

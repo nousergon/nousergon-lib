@@ -56,11 +56,15 @@ from .read import (
 )
 from .registry import (
     PIPELINE_LABELS,
+    PIPELINE_STAGE_ORDER,
+    SKIP_TERMINALS,
     STATE_TO_ARCHIVE_PAGE,
     SUBSTANTIVE_RESOURCES,
     WAIT_GROUPING,
     ArchivePageRef,
     ArtifactReason,
+    skip_terminals_for,
+    stage_order_for,
 )
 from .roles import (
     ADHOC_ROLES,
@@ -72,6 +76,14 @@ from .roles import (
     classify,
 )
 from .templates import format_failure_message, format_success_message
+from .work import (
+    UndeclaredPipeline,
+    WorkOutcome,
+    WorkVerdict,
+    classify_work,
+    entered_states_from_history,
+    read_work_outcome,
+)
 
 __all__ = [
     "ADHOC_ROLES",
@@ -83,6 +95,11 @@ __all__ = [
     "CycleReliability",
     "EXERCISE_ROLES",
     "PIPELINE_LABELS",
+    "PIPELINE_STAGE_ORDER",
+    "SKIP_TERMINALS",
+    "UndeclaredPipeline",
+    "WorkOutcome",
+    "WorkVerdict",
     "PipelineExecutionSummary",
     "PipelineRun",
     "RECOVERY_ROLES",
@@ -98,11 +115,16 @@ __all__ = [
     "WAIT_GROUPING",
     "build_reliability_window",
     "cadence_filter",
+    "classify_work",
     "classify",
+    "entered_states_from_history",
     "fingerprint",
     "format_failure_message",
     "format_success_message",
     "list_recent_pipeline_runs",
     "read_pipeline_state",
     "read_reliability_window",
+    "read_work_outcome",
+    "skip_terminals_for",
+    "stage_order_for",
 ]

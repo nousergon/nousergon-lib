@@ -1,0 +1,196 @@
+{
+    "events": [
+        {
+            "timestamp": "2026-08-21T02:00:49.133000-07:00",
+            "type": "ExecutionStarted",
+            "id": 1,
+            "previousEventId": 0,
+            "executionStartedEventDetails": {
+                "input": "{\n  \"sns_topic_arn\": \"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\n  \"pipeline_role\": \"weekly\",\n  \"skip_parity\": true\n}\n",
+                "inputDetails": {
+                    "truncated": false
+                },
+                "roleArn": "arn:aws:iam::711398986525:role/alpha-engine-step-functions-role"
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.155000-07:00",
+            "type": "PassStateEntered",
+            "id": 2,
+            "previousEventId": 0,
+            "stateEnteredEventDetails": {
+                "name": "InitializeInput",
+                "input": "{\n  \"sns_topic_arn\": \"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\n  \"pipeline_role\": \"weekly\",\n  \"skip_parity\": true\n}\n",
+                "inputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.155000-07:00",
+            "type": "PassStateExited",
+            "id": 3,
+            "previousEventId": 2,
+            "stateExitedEventDetails": {
+                "name": "InitializeInput",
+                "output": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\"}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.155000-07:00",
+            "type": "ChoiceStateEntered",
+            "id": 4,
+            "previousEventId": 3,
+            "stateEnteredEventDetails": {
+                "name": "CheckWeeklyRunDayGate",
+                "input": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\"}",
+                "inputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.155000-07:00",
+            "type": "ChoiceStateExited",
+            "id": 5,
+            "previousEventId": 4,
+            "stateExitedEventDetails": {
+                "name": "CheckWeeklyRunDayGate",
+                "output": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\"}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.155000-07:00",
+            "type": "TaskStateEntered",
+            "id": 6,
+            "previousEventId": 5,
+            "stateEnteredEventDetails": {
+                "name": "WeeklyRunDayGate",
+                "input": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\"}",
+                "inputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.155000-07:00",
+            "type": "TaskScheduled",
+            "id": 7,
+            "previousEventId": 6,
+            "taskScheduledEventDetails": {
+                "resourceType": "lambda",
+                "resource": "invoke",
+                "region": "us-east-1",
+                "parameters": "{\"FunctionName\":\"alpha-engine-predictor-inference:live\",\"Payload\":{\"action\":\"check_weekly_run_day\"}}",
+                "timeoutInSeconds": 60
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:49.234000-07:00",
+            "type": "TaskStarted",
+            "id": 8,
+            "previousEventId": 7,
+            "taskStartedEventDetails": {
+                "resourceType": "lambda",
+                "resource": "invoke"
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.772000-07:00",
+            "type": "TaskSucceeded",
+            "id": 9,
+            "previousEventId": 8,
+            "taskSucceededEventDetails": {
+                "resourceType": "lambda",
+                "resource": "invoke",
+                "output": "{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.784000-07:00",
+            "type": "TaskStateExited",
+            "id": 10,
+            "previousEventId": 9,
+            "stateExitedEventDetails": {
+                "name": "WeeklyRunDayGate",
+                "output": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\",\"weekly_run_day_gate\":{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.784000-07:00",
+            "type": "ChoiceStateEntered",
+            "id": 11,
+            "previousEventId": 10,
+            "stateEnteredEventDetails": {
+                "name": "WeeklyRunDayGateChoice",
+                "input": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\",\"weekly_run_day_gate\":{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}}",
+                "inputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.784000-07:00",
+            "type": "ChoiceStateExited",
+            "id": 12,
+            "previousEventId": 11,
+            "stateExitedEventDetails": {
+                "name": "WeeklyRunDayGateChoice",
+                "output": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\",\"weekly_run_day_gate\":{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.784000-07:00",
+            "type": "SucceedStateEntered",
+            "id": 13,
+            "previousEventId": 12,
+            "stateEnteredEventDetails": {
+                "name": "WeeklyRunDaySkip",
+                "input": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\",\"weekly_run_day_gate\":{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}}",
+                "inputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.784000-07:00",
+            "type": "SucceedStateExited",
+            "id": 14,
+            "previousEventId": 13,
+            "stateExitedEventDetails": {
+                "name": "WeeklyRunDaySkip",
+                "output": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\",\"weekly_run_day_gate\":{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        },
+        {
+            "timestamp": "2026-08-21T02:00:54.838000-07:00",
+            "type": "ExecutionSucceeded",
+            "id": 15,
+            "previousEventId": 14,
+            "executionSucceededEventDetails": {
+                "output": "{\"substrate_relaunch_attempts\":0,\"regime_action\":\"produce\",\"research_dry\":false,\"data_phase2_dry\":false,\"gate_degraded\":false,\"pipeline_label\":\"\",\"skip_weekly_run_day_gate\":false,\"skip_parity\":true,\"research_predictor_degraded\":false,\"preflight_args\":\"\",\"health_check_degraded\":false,\"scanner_resource_kill\":false,\"pipeline_contract_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"pipeline_role\":\"weekly\",\"parity_degraded\":false,\"libpin_drift_result\":{\"Payload\":{\"status\":\"UNKNOWN\",\"reason\":\"gate_did_not_run\"}},\"sns_topic_arn\":\"arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts\",\"run_date\":\"2026-08-21\",\"weekly_run_day_gate\":{\"ExecutedVersion\":\"516\",\"Payload\":{\"check_date\":\"2026-08-21\",\"day_name\":\"Friday\",\"is_weekly_run_day\":false,\"marker\":\"NOT_WEEKLY_RUN_DAY\",\"reason\":\"2026-08-20 is not the week's last session (later session 2026-08-21)\",\"stage_coverage\":{\"stage\":\"WeeklyRunDayGate\",\"status\":\"COVERED_NO_OUTPUT\",\"stage_class\":\"infrastructure\",\"declared_output\":\"none\",\"expected\":[],\"missing\":[],\"stale\":[],\"covered\":[],\"unmeasured\":[],\"reason\":\"pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.\",\"run_date\":\"2026-08-21\",\"cycle_date\":\"2026-08-20\",\"window_start\":\"2026-08-21T09:00:54.244527+00:00\",\"recorded_at\":\"2026-08-21T09:00:54.256435+00:00\",\"enforce\":false,\"is_finding\":false}},\"SdkHttpMetadata\":{\"AllHttpHeaders\":{\"X-Amz-Executed-Version\":[\"516\"],\"x-amzn-Remapped-Content-Length\":[\"0\"],\"Connection\":[\"keep-alive\"],\"x-amzn-RequestId\":[\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"],\"Content-Length\":[\"754\"],\"Date\":[\"Fri, 21 Aug 2026 09:00:54 GMT\"],\"X-Amzn-Trace-Id\":[\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"],\"Content-Type\":[\"application/json\"]},\"HttpHeaders\":{\"Connection\":\"keep-alive\",\"Content-Length\":\"754\",\"Content-Type\":\"application/json\",\"Date\":\"Fri, 21 Aug 2026 09:00:54 GMT\",\"X-Amz-Executed-Version\":\"516\",\"x-amzn-Remapped-Content-Length\":\"0\",\"x-amzn-RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\",\"X-Amzn-Trace-Id\":\"Root=1-6a8813c1-7902203f2fb1691739decfd4;Parent=37f75d2c9925acd5;Sampled=0;Lineage=1:365bc3a5:0\"},\"HttpStatusCode\":200},\"SdkResponseMetadata\":{\"RequestId\":\"9dd75ca8-79ba-4378-913e-4dfcbeb103b0\"},\"StatusCode\":200}}",
+                "outputDetails": {
+                    "truncated": false
+                }
+            }
+        }
+    ]
+}

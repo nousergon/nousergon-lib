@@ -273,6 +273,57 @@ def _region_from_arn(state_machine_arn: str) -> str | None:
     return parts[3]
 
 
+def _sfn_client(any_sfn_arn: str) -> SFNClient:
+    """One place that builds the boto3 Step Functions client.
+
+    Region is taken from the ARN rather than the environment: SF is
+    regional and boto3 raises ``NoRegionError`` when nothing in the
+    environment declares one, while every state-machine and execution ARN
+    always carries it.
+    """
+    import boto3
+
+    # mypy-boto3-stepfunctions is a stub-only package (no runtime overloads
+    # for boto3.client's service-name dispatch), so the cast tells the type
+    # checker what boto3 actually hands back at runtime.
+    return cast("SFNClient", boto3.client("stepfunctions", region_name=_region_from_arn(any_sfn_arn)))
+
+
+def _paged_execution_history(client: SFNClient, execution_arn: str) -> list[Mapping[str, Any]]:
+    """Every history event for one execution, following ``nextToken`` to the end.
+
+    A single 1000-event page is not the history — measured 2026-08-21, the
+    scheduled ``ne-weekly-freshness-pipeline`` run of 2026-08-15 carries
+    **6715** events, so the first page ends a quarter of the way through
+    ``MorningEnrich``'s poll loop. Reading only that page understates the
+    set of states entered and names the wrong terminal state, which is the
+    same blindness alpha-engine-config-I8045 is closing at the verdict
+    layer: a real run whose history is truncated reads as a run that did
+    nothing.
+
+    There is no partial-read mode. A caller that cannot afford the pages
+    must not be making a claim about what the execution did.
+    """
+    events: list[Mapping[str, Any]] = []
+    token: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "executionArn": execution_arn,
+            "maxResults": _HISTORY_PAGE_SIZE,
+            "reverseOrder": False,
+        }
+        if token:
+            kwargs["nextToken"] = token
+        try:
+            resp = client.get_execution_history(**kwargs)
+        except Exception as exc:  # noqa: BLE001 — narrow + re-raise typed
+            _raise_for_boto_error(exc, "GetExecutionHistory")
+        events.extend(resp.get("events") or [])
+        token = resp.get("nextToken")
+        if not token:
+            return events
+
+
 def _failure_cause_from(describe_resp: Mapping[str, Any]) -> str:
     """Extract + truncate the failure cause from DescribeExecution response.
 
@@ -559,16 +610,7 @@ def _build_pipeline_run_from_execution_arn(
     )
     pipeline_role = _extract_pipeline_role(describe_resp)
 
-    try:
-        history_resp = client.get_execution_history(
-            executionArn=execution_arn,
-            maxResults=_HISTORY_PAGE_SIZE,
-            reverseOrder=False,
-        )
-    except Exception as exc:  # noqa: BLE001 — narrow + re-raise
-        _raise_for_boto_error(exc, "GetExecutionHistory")
-
-    events = history_resp.get("events") or []
+    events = _paged_execution_history(client, execution_arn)
     tasks = _materialize_tasks(events)
     failing_state = (
         _failing_state_from_history(events) if run_status == RunStatus.FAILED else None
@@ -712,15 +754,7 @@ def read_pipeline_state(
         Any other unexpected error path.
     """
     if client is None:  # pragma: no cover — production path
-        import boto3
-
-        # mypy-boto3-stepfunctions is a stub-only package (no runtime
-        # overloads for boto3.client's service-name dispatch), so the cast
-        # tells pyright what boto3 actually hands back at runtime.
-        client = cast(
-            "SFNClient",
-            boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn)),
-        )
+        client = _sfn_client(state_machine_arn)
 
     # Path 1: explicit execution_arn — fetch directly.
     if execution_arn is not None:
@@ -801,15 +835,7 @@ def list_recent_pipeline_runs(
         Optional boto3 ``stepfunctions`` client.
     """
     if client is None:  # pragma: no cover — production path
-        import boto3
-
-        # mypy-boto3-stepfunctions is a stub-only package (no runtime
-        # overloads for boto3.client's service-name dispatch), so the cast
-        # tells pyright what boto3 actually hands back at runtime.
-        client = cast(
-            "SFNClient",
-            boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn)),
-        )
+        client = _sfn_client(state_machine_arn)
 
     walk_cap = limit if role_filter is None else min(limit * 5, _DEFAULT_ROLE_SEARCH_LIMIT)
     summaries: list[PipelineExecutionSummary] = []
@@ -993,12 +1019,7 @@ def read_reliability_window(
     from .cycles import build_reliability_window
 
     if client is None:  # pragma: no cover — production path
-        import boto3
-
-        client = cast(
-            "SFNClient",
-            boto3.client("stepfunctions", region_name=_region_from_arn(state_machine_arn)),
-        )
+        client = _sfn_client(state_machine_arn)
 
     summaries = list_recent_pipeline_runs(state_machine_arn, limit=scan_limit, client=client)
 
@@ -1017,21 +1038,7 @@ def read_reliability_window(
 
     def _history(arn: str) -> list[Mapping[str, Any]]:
         if arn not in histories:
-            events: list[Mapping[str, Any]] = []
-            token: str | None = None
-            while True:
-                kwargs: dict[str, Any] = {"executionArn": arn, "includeExecutionData": False}
-                if token:
-                    kwargs["nextToken"] = token
-                try:
-                    resp = client.get_execution_history(**kwargs)
-                except Exception as exc:  # noqa: BLE001 — narrow + re-raise
-                    _raise_for_boto_error(exc, "GetExecutionHistory")
-                events.extend(resp.get("events") or [])
-                token = resp.get("nextToken")
-                if not token:
-                    break
-            histories[arn] = events
+            histories[arn] = _paged_execution_history(client, arn)
         return histories[arn]
 
     def _failure_of(summary: PipelineExecutionSummary) -> tuple[str | None, str | None]:

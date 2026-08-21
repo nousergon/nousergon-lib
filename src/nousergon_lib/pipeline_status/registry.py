@@ -1316,3 +1316,112 @@ def lookup_registry(state_name: str) -> ArchivePageRef | ArtifactReason | None:
     test failure (registry drift); it should NEVER render in production.
     """
     return STATE_TO_ARCHIVE_PAGE.get(state_name)
+
+
+# ── Work-verdict declarations (alpha-engine-config-I8045) ─────────────────
+#
+# Two declarations, and the whole three-way verdict in
+# :mod:`nousergon_lib.pipeline_status.work` rests on them. Both are
+# DECLARED rather than inferred, per ``observability-policy.md`` §8.3 —
+# a skip that has to be guessed at from a duration is a threshold wearing a
+# taxonomy's clothes, and it silently reclassifies every time the graph
+# changes shape.
+
+
+#: The substantive spine of each pipeline: the stages whose entry is what
+#: "the pipeline ran" MEANS. An execution that succeeds without entering
+#: these did not do the work, however green its status.
+#:
+#: Lifted here from ``crucible-dashboard/loaders/pipeline_status_loader.py``
+#: (``RELIABILITY_STAGE_ORDER``) on second adoption — the console adapters,
+#: the grading tiles, the watchdog Lambdas and the SF-watch scripts all need
+#: the same list, and a spine that lives in one consumer is a spine the
+#: other consumers get wrong. ``shared-code-policy.md``.
+#:
+#: Ordered deepest-last: :func:`cycles._depth_of` reads position as progress.
+#:
+#: Kept in sync with the live SF JSONs by a producer-side contract test in
+#: ``nousergon-data`` — a stage rename that is not mirrored here blinds every
+#: reader matching on the old name, and that blindness reports as the benign
+#: "that stage did not run" (the I6857 defect).
+PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
+    "ne-weekly-freshness-pipeline": (
+        "MorningEnrich",
+        "DataPhase1",
+        "RAGIngestion",
+        "Scanner",
+        "SignalsEnvelope",
+        "PredictorTraining",
+        "DataPhase2",
+        "Backtester",
+        "ParityParallel",
+        "PitParityCompare",
+        "ModelZooSelect",
+        "ModelZooTrainMap",
+        "EvaluatorDiagnostics",
+        "EvaluatorOptimize",
+        "ReportCard",
+        "Director",
+    ),
+    "ne-preopen-trading-pipeline": (
+        "StartExecutorEC2",
+        "CodeFreshnessGate",
+        "LaunchMorningEnrichSpot",
+        "LaunchMorningArcticAppendSpot",
+        "PredictorInference",
+        "CheckPredictorCoverage",
+        "RunMorningPlanner",
+        "RunDaemon",
+    ),
+    "ne-postclose-trading-pipeline": (
+        "LaunchPostMarketDataSpot",
+        "LaunchPostMarketArcticAppendSpot",
+        "CaptureSnapshot",
+        "EODReconcile",
+        "StopTradingInstance",
+    ),
+}
+
+
+#: Terminal states that end an execution SUCCEEDED having deliberately not
+#: done the work. Reaching one is CORRECT behaviour and must never page —
+#: and must never be counted as a completed cycle either.
+#:
+#: Verified against the live state-machine definitions on 2026-08-21:
+#:
+#: - ``WeeklyRunDaySkip`` (``Succeed``) — the weekly cron fires THU-SAT and
+#:   this gate self-selects the single correct day, so on a normal week 2 of
+#:   the 3 firings land here before any spend. Its own definition comment
+#:   calls it a "designed no-op ... this state produces no artifacts on
+#:   purpose". Measured: 2.7-5.7s, five states entered, zero spine stages.
+#: - ``ShellRunComplete`` (``Succeed``) — the Friday-PM preflight-only "shell
+#:   run". Green preflight, no completion marker, no artifacts.
+#: - ``NotifyHolidaySkip`` (``Task`` with ``End: true``) — the preopen
+#:   market-holiday skip. A Task, not a ``Succeed``: a reader that looks only
+#:   for ``Succeed``-typed terminals misses it, which is why this is a
+#:   declared name list rather than a walk of the definition by type.
+#:
+#: ``ne-postclose-trading-pipeline`` has no skip terminal — its market-hours
+#: gate routes to ``MarketHoursBlocked``, a ``Fail``.
+SKIP_TERMINALS: Final[dict[str, frozenset[str]]] = {
+    "ne-weekly-freshness-pipeline": frozenset({"WeeklyRunDaySkip", "ShellRunComplete"}),
+    "ne-preopen-trading-pipeline": frozenset({"NotifyHolidaySkip"}),
+    "ne-postclose-trading-pipeline": frozenset(),
+}
+
+
+def stage_order_for(state_machine: str) -> tuple[str, ...]:
+    """Declared substantive spine for a state machine ARN or bare name.
+
+    Returns ``()`` for an undeclared pipeline — callers must treat that as
+    "cannot be judged" and raise, never as "nothing was expected, so it
+    passed". :func:`work.classify_work` does exactly that.
+    """
+    name = state_machine.rsplit(":", 1)[-1] if state_machine else ""
+    return PIPELINE_STAGE_ORDER.get(name, ())
+
+
+def skip_terminals_for(state_machine: str) -> frozenset[str]:
+    """Declared no-work terminals for a state machine ARN or bare name."""
+    name = state_machine.rsplit(":", 1)[-1] if state_machine else ""
+    return SKIP_TERMINALS.get(name, frozenset())
