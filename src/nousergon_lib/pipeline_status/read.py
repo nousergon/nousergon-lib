@@ -907,6 +907,31 @@ def list_recent_pipeline_runs(
     return summaries
 
 
+_ASSUMED_ROLE_RE = re.compile(r"assumed-role/([^/\s]+)/")
+_IAM_ROLE_RE = re.compile(r":role/([^/\s]+)")
+
+
+def _denied_role_hint(exc: Exception) -> str:
+    """Best-effort extraction of the DENIED principal's role name from a
+    boto3 ``AccessDenied`` message, e.g.::
+
+        User: arn:aws:sts::711398986525:assumed-role/alpha-engine-evaluator-role/alpha-engine-evaluator
+        is not authorized to perform: states:GetExecutionHistory ...
+
+    IAM's own error text always names the calling principal — this repo
+    should never hardcode a guess at which role that is (a hardcoded
+    "dashboard EC2 role" sent every reader to the wrong role when the
+    denied principal was actually ``alpha-engine-evaluator-role``;
+    alpha-engine-config-I8080). Falls back to a role-agnostic instruction
+    when the message shape doesn't match (e.g. a mocked/synthetic error).
+    """
+    text = str(exc)
+    m = _ASSUMED_ROLE_RE.search(text) or _IAM_ROLE_RE.search(text)
+    if m:
+        return f"the calling role ({m.group(1)})"
+    return "the calling role (see the boto3 detail below for which one)"
+
+
 def _raise_for_boto_error(exc: Exception, action: str) -> NoReturn:
     """Translate a boto3 exception into a typed PipelineStatusError.
 
@@ -921,9 +946,10 @@ def _raise_for_boto_error(exc: Exception, action: str) -> NoReturn:
     code = error_dict.get("Code", "")
 
     if code in ("AccessDeniedException", "AccessDenied"):
+        role_hint = _denied_role_hint(exc)
         raise SFNAccessDenied(
-            f"states:{action} denied — add the action to the dashboard "
-            f"EC2 role's inline policy. Boto3 detail: {exc}"
+            f"states:{action} denied — add the action to {role_hint}'s "
+            f"inline policy. Boto3 detail: {exc}"
         ) from exc
     if code in ("ThrottlingException", "Throttling", "TooManyRequestsException"):
         raise SFNThrottled(
