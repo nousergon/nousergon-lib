@@ -494,7 +494,13 @@ def _safe_urlopen(req, **kwargs):
     return urllib.request.urlopen(req, **kwargs)  # noqa: S310 -- scheme validated above
 
 
-def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0) -> str | None:
+def _fetch_origin_main_sha(
+    repo: str,
+    branch: str = "main",
+    timeout: float = 5.0,
+    *,
+    stats: dict[str, Any] | None = None,
+) -> str | None:
     """Fetch HEAD SHA of ``branch`` for ``repo`` via GitHub REST API.
 
     Returns ``None`` on any network/parse error — the drift check treats a
@@ -503,7 +509,9 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
     ``"nousergon/crucible-predictor"``).
     """
     payload, definitive = github_get_json(
-        f"https://api.github.com/repos/{repo}/branches/{branch}", timeout=timeout,
+        f"https://api.github.com/repos/{repo}/branches/{branch}",
+        timeout=timeout,
+        stats=stats,
     )
     if payload is None:
         # Both the transient-outage and the definitive-404 case land here as
@@ -524,6 +532,24 @@ def _fetch_origin_main_sha(repo: str, branch: str = "main", timeout: float = 5.0
 #: 500 into a false "not an ancestor" deploy-drift halt on 2026-08-20.
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
+#: HTTP statuses that are a verdict about the CALLER'S CREDENTIAL, never about
+#: the resource. GitHub returns 401 for a token it rejects and 403 for one that
+#: is valid but not permitted (or for an exhausted rate limit). Neither says
+#: anything about whether the repo, branch or commit exists, so neither may
+#: ever be returned as ``definitive`` — the whole point of the definitive flag
+#: is "GitHub answered, and the answer is no about the THING YOU ASKED FOR".
+#:
+#: Measured 2026-08-21 (alpha-engine-config-I7924): predictor Lambda v516,
+#: deployed 01:50 UTC, was the first production execution of the auth header
+#: added the previous day. It picked up the long-expired ``GITHUB_TOKEN`` that
+#: the SSM-to-env builder injects, GitHub answered 401, this helper classified
+#: it ``definitive``, ``check_deploy_drift`` omitted ``sf_drift`` as unmeasured,
+#: and the preopen ``DeployDriftGate`` fail-closed branch halted the 12:15 UTC
+#: trading pipeline three hours later. An expired credential must never be able
+#: to halt trading: every repo this probe reads is PUBLIC and answers the same
+#: question with no credential at all.
+_GITHUB_CREDENTIAL_HTTP_STATUSES = frozenset({401, 403})
+
 #: Retry schedule (seconds to sleep *before* attempts 2 and 3) for transient
 #: GitHub failures. Bounded deliberately: this runs inside a Lambda preflight,
 #: so the whole retry budget stays under ~2s of sleep on top of the per-attempt
@@ -534,9 +560,21 @@ _GITHUB_RETRY_BACKOFF = (0.5, 1.5)
 def _github_auth_headers() -> dict[str, str]:
     """Bearer header from ``GITHUB_TOKEN``/``GH_TOKEN`` when one is present.
 
-    Lambda images carry no token and stay on the unauthenticated 60 req/hr
-    ceiling; CI and laptop call sites get 5000 req/hr for free by exporting
-    one. Absence is normal, never an error.
+    Absence is normal, never an error: every GitHub read this module performs
+    is against a PUBLIC repo, so the unauthenticated 60 req/hr ceiling is a
+    complete fallback rather than a degraded one. A token, when present, buys
+    only rate-limit headroom (5000 req/hr).
+
+    It is therefore NEVER correct for a token to make a call fail that would
+    have succeeded without it. ``github_get_json`` enforces that by retrying
+    unauthenticated on 401/403 — do not add a call site that assumes a token
+    must be present, and do not "fix" a credential rejection by making the
+    caller fail closed.
+
+    The pre-2026-08-21 docstring asserted "Lambda images carry no token". That
+    was false: the alpha-engine SSM-to-env builder injects ``GITHUB_TOKEN``
+    into the predictor Lambda, whose own CI test forbids reading it in-repo —
+    the invariant was enforced in the repo and bypassed through this library.
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     return {"Authorization": f"Bearer {token}"} if token else {}
@@ -548,6 +586,7 @@ def github_get_json(
     timeout: float = 5.0,
     attempts: int = 3,
     sleep: Any = None,
+    stats: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, bool]:
     """GET *url* from the GitHub REST API, retrying transient failures.
 
@@ -565,12 +604,32 @@ def github_get_json(
     predecessor of this helper returned a bare ``False`` for both "GitHub says
     no" and "GitHub did not answer", so a transient 500 rendered as a
     confidently-worded drift halt naming an ancestry that was in fact fine.
+
+    A 401/403 is neither of those: it is a verdict about the CALLER, and it is
+    never returned as ``definitive``. When a token was sent, the whole attempt
+    budget is retried once WITHOUT it, because every repo read through this
+    helper is public and answers identically unauthenticated. See
+    ``_GITHUB_CREDENTIAL_HTTP_STATUSES`` for the incident that made this
+    mandatory rather than merely nice.
+
+    ``stats``, when supplied, is populated in place with observability the
+    tuple has no room for — currently ``github_credential_rejected`` (bool)
+    and ``github_credential_status`` (int). A caller that surfaces a verdict to
+    an operator should pass one and render it: an expired token that no longer
+    breaks the call is still a defect that must be fixed before it breaks a
+    call that has no anonymous fallback.
     """
     if sleep is None:  # pragma: no cover - trivial default indirection
         sleep = time.sleep
-    headers = {"Accept": "application/vnd.github+json", **_github_auth_headers()}
+    auth = _github_auth_headers()
+    headers = {"Accept": "application/vnd.github+json", **auth}
     last_exc: Exception | None = None
-    for attempt in range(attempts):
+    # One unauthenticated re-attempt is allowed after a credential rejection.
+    # Consumed rather than looped so a persistently-403 anonymous caller (rate
+    # limit) still terminates on the normal attempt budget.
+    auth_fallback_available = bool(auth)
+    attempt = 0
+    while attempt < attempts:
         try:
             # S310: ruff cannot statically prove the scheme through a variable
             # URL. _safe_urlopen enforces https:// at runtime and raises
@@ -581,7 +640,36 @@ def github_get_json(
                 return json.loads(resp.read()), True
         except urllib.error.HTTPError as exc:
             last_exc = exc
-            if exc.code not in _TRANSIENT_HTTP_STATUSES:
+            if exc.code in _GITHUB_CREDENTIAL_HTTP_STATUSES:
+                if auth_fallback_available:
+                    # The credential is the problem, not the request. Drop it
+                    # and start over anonymously — every repo read here is
+                    # public. Loud at ERROR because a rejected token is a real
+                    # operational defect that must be fixed, even though it no
+                    # longer breaks this call (sf-pipeline-policy 2.3: the
+                    # degradation is visible, it is just not fatal).
+                    log.error(
+                        "GitHub API %s -> HTTP %s with GITHUB_TOKEN/GH_TOKEN "
+                        "present: the credential was REJECTED. Retrying "
+                        "unauthenticated (public repo). Rotate or remove the "
+                        "token — alpha-engine-config-I7924.",
+                        url, exc.code,
+                    )
+                    if stats is not None:
+                        stats["github_credential_rejected"] = True
+                        stats["github_credential_status"] = exc.code
+                    auth_fallback_available = False
+                    headers = {"Accept": "application/vnd.github+json"}
+                    attempt = 0
+                    continue
+                # No credential in play (or already stripped). 401/403 without
+                # a token is a rate limit or an org policy — still not a
+                # verdict about the resource, so never definitive.
+                log.warning(
+                    "GitHub API %s -> HTTP %s unauthenticated — no answer, "
+                    "not a negative answer", url, exc.code,
+                )
+            elif exc.code not in _TRANSIENT_HTTP_STATUSES:
                 # A definitive negative: the resource genuinely is not there /
                 # is not comparable. Retrying cannot change this answer.
                 log.warning("GitHub API %s -> HTTP %s (definitive)", url, exc.code)
@@ -592,6 +680,7 @@ def github_get_json(
             last_exc = exc
         if attempt < len(_GITHUB_RETRY_BACKOFF):
             sleep(_GITHUB_RETRY_BACKOFF[attempt])
+        attempt += 1
     log.warning(
         "GitHub API %s unresolved after %d attempts (%s) — no answer, not a negative answer",
         url, attempts, last_exc,
