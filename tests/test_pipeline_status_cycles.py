@@ -330,11 +330,18 @@ def test_the_2026_08_weekly_history_renders_the_story_that_took_a_day_to_find():
 
     # The streak is 0 as of the last cycle, and WAS 4 one cycle earlier.
     assert w.clean_streak == 0
+    # Re-projected without the regression cycle. `entered_states_of` must
+    # keep using each attempt's own state list: alpha-engine-config-I8045
+    # made "succeeded" mean "entered the whole declared spine", so a stub
+    # returning one stage for every attempt would report the four clean
+    # cycles as partial — the same blindness, inverted.
+    earlier_specs = [s for s in specs if s[2] != "2026-08-10"]
+    earlier_by_name = {s[0]: s for s in earlier_specs}
     earlier = build_reliability_window(
-        [_summary(s[0], s[1], minutes=s[3]) for s in specs if s[2] != "2026-08-10"],
+        [_summary(s[0], s[1], minutes=s[3]) for s in earlier_specs],
         cycle_key_of=lambda s: s.name.rsplit("-", 1)[0],
-        failure_of=lambda s: ("MorningEnrich", "E"),
-        entered_states_of=lambda s: ["MorningEnrich"],
+        failure_of=lambda s: (earlier_by_name[s.name][4], earlier_by_name[s.name][5]),
+        entered_states_of=lambda s: earlier_by_name[s.name][6],
         stage_order=_STAGES,
     )
     assert earlier.clean_streak == 4
@@ -400,7 +407,10 @@ def _make_client():
             _entered("MorningEnrich"),
             {"type": "TaskFailed", "taskFailedEventDetails": {"error": "States.TaskFailed"}},
         ],
-        "watch-rerun-2026-08-10-1": [_entered("MorningEnrich"), _entered("PredictorTraining")],
+        # A SUCCEEDED rerun must enter the whole declared spine to count as
+        # one (I8045) — a rerun that succeeded two stages in did not recover
+        # the cycle, and before I8045 it read as if it had.
+        "watch-rerun-2026-08-10-1": [_entered(name) for name in _STAGES],
     }
     return _FakeSFN(executions, inputs, histories)
 
@@ -420,7 +430,7 @@ def test_the_adapter_groups_a_scheduled_run_and_its_rerun_into_one_cycle():
     assert cycle.attempt_count == 2
     assert cycle.attempts_to_success == 2
     assert cycle.first_attempt_succeeded is False
-    assert cycle.depth_stage == "PredictorTraining"
+    assert cycle.depth_stage == _STAGES[-1]
 
 
 def test_the_adapter_reads_each_history_once():
