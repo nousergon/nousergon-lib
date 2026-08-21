@@ -11,6 +11,28 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_secret_resolution(monkeypatch):
+    """Force ``krepis.secrets.get_secret`` to resolve from ``os.environ``
+    only, and clear its per-process cache before/after each test.
+
+    ``rag/db.py``'s ``_get_url`` and ``rag/embeddings.py``'s ``_get_client``
+    now resolve ``RAG_DATABASE_URL``/``VOYAGE_API_KEY`` via ``get_secret``
+    instead of a literal ``os.environ.get`` (alpha-engine-config-I7925) —
+    that helper defaults to an SSM-first, process-cached lookup, which would
+    make ``monkeypatch.setenv(...)`` below flaky/order-dependent without
+    this. Keeps existing assertions unweakened.
+    """
+    import krepis.secrets as _secrets
+
+    monkeypatch.setenv("ALPHA_ENGINE_SECRETS_SOURCE", "env")
+    _secrets.clear_cache()
+    yield
+    _secrets.clear_cache()
+
 
 def test_top_level_imports_resolve():
     """All advertised re-exports should be importable from the top level."""

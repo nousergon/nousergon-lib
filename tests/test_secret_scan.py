@@ -26,6 +26,31 @@ from nousergon_lib.testing.secret_scan import (
 
 _PINNED = frozenset({"GITHUB_TOKEN", "POLYGON_API_KEY"})
 
+# The full pinned-secrets set consumer repos (crucible-predictor,
+# nousergon-data) enforce — mirrored here (not imported, to keep this
+# self-scan independent of any one consumer's copy) so the self-scan below
+# tests what those repos will actually see, not a narrower stand-in.
+_CONSUMER_PINNED_SECRETS = frozenset(
+    [
+        "ANTHROPIC_API_KEY",
+        "LANGCHAIN_API_KEY",
+        "LANGSMITH_API_KEY",
+        "VOYAGE_API_KEY",
+        "POLYGON_API_KEY",
+        "FMP_API_KEY",
+        "FINNHUB_API_KEY",
+        "FRED_API_KEY",
+        "GMAIL_APP_PASSWORD",
+        "GITHUB_TOKEN",
+        "RAG_DATABASE_URL",
+        "EDGAR_IDENTITY",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_CHAT_ID",
+        "EMAIL_SENDER",
+        "EMAIL_RECIPIENTS",
+    ]
+)
+
 
 def _write_fake_package(tmp_path, package_name: str, module_source: dict[str, str]):
     pkg_dir = tmp_path / package_name
@@ -143,14 +168,22 @@ def test_nousergon_lib_itself_has_no_pinned_secret_reads():
     """Self-scan: nousergon-lib's own installed tree, using the real spec
     resolution path (no monkeypatch) — the invariant applied to itself,
     per the issue's "or lift the check into a shared nousergon-lib test
-    helper that ... the library itself runs" requirement."""
-    violations, missing = scan_installed_packages(["nousergon_lib"], _PINNED)
+    helper that ... the library itself runs" requirement. Uses the FULL
+    consumer pinned-secrets set: a narrower set here previously missed two
+    real violations (rag/db.py's RAG_DATABASE_URL, rag/embeddings.py's
+    VOYAGE_API_KEY) that this same scanner, run with the real set, caught —
+    both fixed alongside preflight.py's GITHUB_TOKEN in this PR."""
+    violations, missing = scan_installed_packages(
+        ["nousergon_lib"], _CONSUMER_PINNED_SECRETS
+    )
     assert missing == []
     assert violations == [], "\n".join(str(v) for v in violations)
 
 
 def test_krepis_has_no_pinned_secret_reads_if_installed():
-    violations, missing = scan_installed_packages(["krepis"], _PINNED)
+    violations, missing = scan_installed_packages(
+        ["krepis"], _CONSUMER_PINNED_SECRETS
+    )
     if missing:
         pytest.skip(f"krepis not installed in this environment: {missing}")
     assert violations == [], "\n".join(str(v) for v in violations)
