@@ -167,10 +167,10 @@ def _to_fraction(
       here is the whole point: a future source swap must break the run, not
       quietly change what the number means.
     """
-    converted = values.astype("float64")
+    converted = cast("pd.Series", values.astype("float64"))
     if units is ReturnUnits.PERCENT:
-        converted = converted / 100.0
-    finite = converted[np.isfinite(converted)]
+        converted = cast("pd.Series", converted / 100.0)
+    finite = cast("pd.Series", converted[np.isfinite(converted.to_numpy())])
     if finite.empty:
         return converted
     lo, hi = float(finite.min()), float(finite.max())
@@ -192,7 +192,7 @@ def _to_fraction(
             f"per-pick bound of ±{_MAX_PLAUSIBLE_FRACTION:g}. The source is "
             f"most likely {likely.value!r} (alpha-engine-config-I7661)."
         )
-    median_abs = float(finite.abs().median())
+    median_abs = float(np.median(np.abs(finite.to_numpy())))
     if median_abs > _MAX_PLAUSIBLE_MEDIAN_FRACTION:
         raise ReturnUnitsError(
             f"{column}: declared units {units.value!r} but the MEDIAN absolute "
@@ -237,7 +237,9 @@ def _arithmetic_to_log_alpha(
     """
     ret = _to_fraction(arithmetic_return, units, column=return_column)
     spy = _to_fraction(arithmetic_spy_return, units, column=spy_column)
-    return np.log1p(ret) - np.log1p(spy)
+    return pd.Series(
+        np.log1p(ret.to_numpy()) - np.log1p(spy.to_numpy()), index=ret.index,
+    )
 
 
 def _annualization_factor(horizon_days: int) -> float:
@@ -641,6 +643,8 @@ def assess_input_freshness(
     try:
         newest = pd.Timestamp(window.max_score_date)
         asof = pd.Timestamp(trading_day)
+        if newest is pd.NaT or asof is pd.NaT:
+            raise ValueError("NaT")
     except ValueError:
         return (
             STATUS_UNMEASURABLE,
@@ -649,9 +653,11 @@ def assess_input_freshness(
         )
     # Trading days → calendar days at 5 per 7.
     horizon_calendar_days = math.ceil(horizon_days * 7 / 5)
-    deadline = asof - pd.Timedelta(int(horizon_calendar_days + grace_days), unit="D")
-    if newest < deadline:
-        age = (asof - newest).days
+    newest_ts = cast("pd.Timestamp", newest)
+    asof_ts = cast("pd.Timestamp", asof)
+    deadline = asof_ts - pd.Timedelta(int(horizon_calendar_days + grace_days), unit="D")
+    if newest_ts < deadline:
+        age = (asof_ts - newest_ts).days
         return (
             STATUS_UNMEASURABLE,
             f"newest measured input is {window.max_score_date} — {age} calendar "
