@@ -696,3 +696,129 @@ def test_check_deploy_drift_unresolved_ancestry_raises_distinct_message(tmp_path
         with pytest.raises(RuntimeError, match="Deploy drift UNRESOLVED") as exc:
             p.check_deploy_drift("nousergon/crucible-predictor", sha_file=sha_file)
     assert "is not an ancestor" not in str(exc.value)
+
+
+# ── alpha-engine-config-I7924: a rejected credential must never halt ─────────
+# The 2026-08-21 preopen halt in one sentence: the predictor Lambda picked up
+# an expired GITHUB_TOKEN from the SSM-to-env builder, GitHub answered 401,
+# github_get_json called that a DEFINITIVE negative, check_deploy_drift omitted
+# sf_drift as unmeasured, and DeployDriftGate's fail-closed branch stopped the
+# trading day. Every repo read here is public, so the anonymous request that
+# had worked every prior morning was still available and was never tried.
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_github_get_json_retries_unauthenticated_when_credential_rejected(
+    monkeypatch, code,
+):
+    """A rejected token is retried WITHOUT the token, and succeeds."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "expired-tok")
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=[_http_error(code), _fake_json_response({"commit": {"sha": "s"}})],
+    ) as urlopen:
+        payload, definitive = github_get_json(
+            "https://api.github.com/x", sleep=lambda _s: None,
+        )
+    assert (payload, definitive) == ({"commit": {"sha": "s"}}, True)
+    assert urlopen.call_count == 2
+    assert urlopen.call_args_list[0].args[0].get_header("Authorization") == (
+        "Bearer expired-tok"
+    )
+    # The retry carries no credential at all — not a different one.
+    assert urlopen.call_args_list[1].args[0].get_header("Authorization") is None
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_github_get_json_credential_rejection_is_never_definitive(
+    monkeypatch, code,
+):
+    """Even when the anonymous fallback also fails, the answer is UNRESOLVED.
+
+    definitive=True means "GitHub answered, and the answer is no about the
+    resource". A credential verdict says nothing about the resource, and a
+    caller that fails closed on unmeasured (check_deploy_drift) must be able
+    to tell the two apart.
+    """
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "expired-tok")
+    with mock.patch(
+        "urllib.request.urlopen", side_effect=[_http_error(code)] * 8,
+    ):
+        payload, definitive = github_get_json(
+            "https://api.github.com/x", sleep=lambda _s: None,
+        )
+    assert payload is None
+    assert definitive is False
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_github_get_json_unauthenticated_credential_error_terminates(
+    monkeypatch, code,
+):
+    """With no token to strip there is no extra budget — the attempt count
+    is the normal one, so a persistently rate-limited anonymous caller can
+    never spin."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    with mock.patch(
+        "urllib.request.urlopen", side_effect=[_http_error(code)] * 3,
+    ) as urlopen:
+        payload, definitive = github_get_json(
+            "https://api.github.com/x", sleep=lambda _s: None,
+        )
+    assert (payload, definitive) == (None, False)
+    assert urlopen.call_count == 3
+
+
+def test_github_get_json_stats_records_the_rejected_credential(monkeypatch):
+    """The token is still broken even though the call now succeeds. A caller
+    rendering a verdict to an operator must be able to SAY so — otherwise the
+    fix converts a loud halt into a silent dependence on the fallback."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "expired-tok")
+    stats: dict = {}
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=[_http_error(401), _fake_json_response({"ok": True})],
+    ):
+        github_get_json(
+            "https://api.github.com/x", sleep=lambda _s: None, stats=stats,
+        )
+    assert stats["github_credential_rejected"] is True
+    assert stats["github_credential_status"] == 401
+
+
+def test_github_get_json_stats_untouched_on_a_clean_authenticated_call(
+    monkeypatch,
+):
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "good-tok")
+    stats: dict = {}
+    with mock.patch(
+        "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
+    ):
+        github_get_json("https://api.github.com/x", stats=stats)
+    assert stats == {}
+
+
+def test_fetch_origin_main_sha_survives_an_expired_token(monkeypatch):
+    """End-to-end shape of the 2026-08-21 halt, at the function the deploy-
+    drift probe actually calls: an expired token must not turn a resolvable
+    upstream SHA into None."""
+    from nousergon_lib.preflight import _fetch_origin_main_sha
+    monkeypatch.setenv("GITHUB_TOKEN", "expired-tok")
+    stats: dict = {}
+    with mock.patch(
+        "urllib.request.urlopen",
+        side_effect=[
+            _http_error(401),
+            _fake_json_response({"commit": {"sha": "c" * 40}}),
+        ],
+    ):
+        sha = _fetch_origin_main_sha(
+            "nousergon/nousergon-data", stats=stats,
+        )
+    assert sha == "c" * 40
+    assert stats["github_credential_rejected"] is True
