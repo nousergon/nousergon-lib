@@ -233,7 +233,7 @@ def test_clean_streak_no_longer_counts_run_day_gate_outs():
     clean streak, so the console reported a 2-cycle clean run in a week
     whose only real scheduled execution failed after 3h53m.
     """
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     from nousergon_lib.pipeline_status import (
         AttemptOutcome,
@@ -257,7 +257,7 @@ def test_clean_streak_no_longer_counts_run_day_gate_outs():
             work=o,
         )
 
-    d = lambda day: datetime(2026, 8, day, tzinfo=UTC)  # noqa: E731
+    d = lambda day: datetime(2026, 8, day, tzinfo=timezone.utc)  # noqa: E731
     window = ReliabilityWindow(
         cycles=[
             CycleReliability(cycle_key="2026-08-15", attempts=[attempt(FAILED, d(15))]),
@@ -273,7 +273,7 @@ def test_clean_streak_no_longer_counts_run_day_gate_outs():
 
 
 def test_a_vacuous_success_does_not_extend_the_clean_streak_either():
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     from nousergon_lib.pipeline_status import (
         AttemptOutcome,
@@ -286,7 +286,7 @@ def test_a_vacuous_success_does_not_extend_the_clean_streak_either():
         name=rec["name"],
         execution_arn=rec["execution_arn"],
         status=RunStatus.SUCCEEDED,
-        start_utc=datetime(2026, 8, 16, tzinfo=UTC),
+        start_utc=datetime(2026, 8, 16, tzinfo=timezone.utc),
         duration_sec=rec["duration_sec"],
         failing_state=None,
         error=None,
