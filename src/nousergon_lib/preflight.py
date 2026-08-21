@@ -500,6 +500,7 @@ def _fetch_origin_main_sha(
     timeout: float = 5.0,
     *,
     stats: dict[str, Any] | None = None,
+    allow_ambient_auth: bool = False,
 ) -> str | None:
     """Fetch HEAD SHA of ``branch`` for ``repo`` via GitHub REST API.
 
@@ -512,6 +513,7 @@ def _fetch_origin_main_sha(
         f"https://api.github.com/repos/{repo}/branches/{branch}",
         timeout=timeout,
         stats=stats,
+        allow_ambient_auth=allow_ambient_auth,
     )
     if payload is None:
         # Both the transient-outage and the definitive-404 case land here as
@@ -557,7 +559,7 @@ _GITHUB_CREDENTIAL_HTTP_STATUSES = frozenset({401, 403})
 _GITHUB_RETRY_BACKOFF = (0.5, 1.5)
 
 
-def _github_auth_headers() -> dict[str, str]:
+def _github_auth_headers(*, allow_ambient: bool = False) -> dict[str, str]:
     """Bearer header from ``GITHUB_TOKEN``/``GH_TOKEN`` when one is present.
 
     Absence is normal, never an error: every GitHub read this module performs
@@ -576,15 +578,44 @@ def _github_auth_headers() -> dict[str, str]:
     into the predictor Lambda, whose own CI test forbids reading it in-repo —
     the invariant was enforced in the repo and bypassed through this library.
 
-    ``GITHUB_TOKEN`` is a pinned secret (alpha-engine-config-I7925): resolved
-    through :func:`krepis.secrets.get_secret` — the same SSM-with-env-fallback
-    path every other pinned secret in the fleet uses — rather than a direct
-    environ read of that name, which is exactly the pattern consumer repos'
-    CI forbids in their own tree and could not see inside this installed
-    library. ``GH_TOKEN`` (the GitHub CLI's own env var, not a pinned secret)
-    is read directly — it is a convenience alias for local dev, never
-    provisioned by the fleet.
+    ``GITHUB_TOKEN`` is a pinned secret (alpha-engine-config-I7925, #345):
+    resolved through :func:`krepis.secrets.get_secret` — the same
+    SSM-with-env-fallback path every other pinned secret in the fleet uses —
+    rather than a direct environ read of that name, which is exactly the
+    pattern consumer repos' CI forbids in their own tree and could not see
+    inside this installed library. ``GH_TOKEN`` (the GitHub CLI's own env var,
+    not a pinned secret) is read directly — a convenience alias for local dev,
+    never provisioned by the fleet.
+
+    **And the pickup itself is OPT-IN, off by default (I7925, #346).**
+    These two are complements, not alternatives, and both are needed:
+
+    - Routing through ``get_secret`` fixes *how* the credential is looked up,
+      so the read is visible to the fleet's secret-scan and can come from SSM.
+    - ``allow_ambient`` fixes *whether* it is looked up at all — and that is
+      the half that answers the 2026-08-21 halt. ``get_secret(required=False)``
+      still falls back to the environment, so on its own it would still have
+      **found** the dead value frozen in the predictor Lambda's environment.
+      The token was not passed to anything; it was found, by code that had no
+      idea it was there, in an environment nothing writes and therefore nothing
+      can rotate. Eleven Lambdas are in that state.
+
+    A credential must be *offered* to be used. Measured 2026-08-21, **no caller
+    of this module needs one** — every consumer (``deploy_drift``,
+    ``lib_pin_drift``, ``crucible-executor``'s preflight, ``BasePreflight``)
+    runs in a Lambda or on an EC2 box against PUBLIC repos, where the anonymous
+    ceiling is ample and cannot expire. Pass ``allow_ambient=True`` only from a
+    CI job or laptop script that genuinely needs the 5000 req/hr ceiling, and
+    only where a stale ambient value could not be silently present.
+
+    The opt-in check comes FIRST, before any lookup: a default call must not
+    reach SSM, both because the credential is not wanted and because a
+    per-invocation SSM round-trip on a preflight path is a cost nobody asked
+    for.
     """
+    if not allow_ambient:
+        return {}
+
     from krepis.secrets import get_secret
 
     token = get_secret("GITHUB_TOKEN", required=False) or os.environ.get("GH_TOKEN")
@@ -598,6 +629,7 @@ def github_get_json(
     attempts: int = 3,
     sleep: Any = None,
     stats: dict[str, Any] | None = None,
+    allow_ambient_auth: bool = False,
 ) -> tuple[dict[str, Any] | None, bool]:
     """GET *url* from the GitHub REST API, retrying transient failures.
 
@@ -623,6 +655,13 @@ def github_get_json(
     ``_GITHUB_CREDENTIAL_HTTP_STATUSES`` for the incident that made this
     mandatory rather than merely nice.
 
+    ``allow_ambient_auth`` (default ``False``) governs whether a
+    ``GITHUB_TOKEN``/``GH_TOKEN`` found in the surrounding environment is used.
+    Off by default because a credential that is *found* rather than *offered* is
+    what halted trading on 2026-08-21 — see ``_github_auth_headers``. Every repo
+    read through this helper is public, so the default costs nothing but the
+    5000 req/hr ceiling.
+
     ``stats``, when supplied, is populated in place with observability the
     tuple has no room for — currently ``github_credential_rejected`` (bool)
     and ``github_credential_status`` (int). A caller that surfaces a verdict to
@@ -632,7 +671,7 @@ def github_get_json(
     """
     if sleep is None:  # pragma: no cover - trivial default indirection
         sleep = time.sleep
-    auth = _github_auth_headers()
+    auth = _github_auth_headers(allow_ambient=allow_ambient_auth)
     headers = {"Accept": "application/vnd.github+json", **auth}
     last_exc: Exception | None = None
     # One unauthenticated re-attempt is allowed after a credential rejection.
@@ -701,6 +740,7 @@ def github_get_json(
 
 def _is_ancestor(
     repo: str, base: str, head: str, timeout: float = 5.0, *, sleep: Any = None,
+    allow_ambient_auth: bool = False,
 ) -> bool | None:
     """Return whether ``base`` is an ancestor of (or equal to) ``head``.
 
@@ -729,6 +769,7 @@ def _is_ancestor(
         f"https://api.github.com/repos/{repo}/compare/{base}...{head}",
         timeout=timeout,
         sleep=sleep,
+        allow_ambient_auth=allow_ambient_auth,
     )
     if not definitive:
         return None

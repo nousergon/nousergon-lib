@@ -684,7 +684,9 @@ def test_github_get_json_sends_bearer_token_when_env_set(monkeypatch):
     with mock.patch(
         "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
     ) as urlopen:
-        payload, definitive = github_get_json("https://api.github.com/x")
+        payload, definitive = github_get_json(
+            "https://api.github.com/x", allow_ambient_auth=True,
+        )
     assert (payload, definitive) == ({"ok": True}, True)
     sent = urlopen.call_args.args[0]
     assert sent.get_header("Authorization") == "Bearer tok-123"
@@ -741,6 +743,7 @@ def test_github_get_json_retries_unauthenticated_when_credential_rejected(
     ) as urlopen:
         payload, definitive = github_get_json(
             "https://api.github.com/x", sleep=lambda _s: None,
+            allow_ambient_auth=True,
         )
     assert (payload, definitive) == ({"commit": {"sha": "s"}}, True)
     assert urlopen.call_count == 2
@@ -769,6 +772,7 @@ def test_github_get_json_credential_rejection_is_never_definitive(
     ):
         payload, definitive = github_get_json(
             "https://api.github.com/x", sleep=lambda _s: None,
+            allow_ambient_auth=True,
         )
     assert payload is None
     assert definitive is False
@@ -807,6 +811,7 @@ def test_github_get_json_stats_records_the_rejected_credential(monkeypatch):
     ):
         github_get_json(
             "https://api.github.com/x", sleep=lambda _s: None, stats=stats,
+            allow_ambient_auth=True,
         )
     assert stats["github_credential_rejected"] is True
     assert stats["github_credential_status"] == 401
@@ -840,7 +845,90 @@ def test_fetch_origin_main_sha_survives_an_expired_token(monkeypatch):
         ],
     ):
         sha = _fetch_origin_main_sha(
-            "nousergon/nousergon-data", stats=stats,
+            "nousergon/nousergon-data", stats=stats, allow_ambient_auth=True,
         )
     assert sha == "c" * 40
     assert stats["github_credential_rejected"] is True
+
+
+# ── alpha-engine-config-I7925: a credential must be OFFERED, not FOUND ───────
+# The 2026-08-21 preopen halt happened because a token nobody passed to anything
+# was picked up out of the surrounding environment — an environment that had
+# held a dead value since 2026-06-03, in a Lambda whose own CI test forbids
+# reading it. Eleven Lambdas are in that state and none can be rotated, because
+# nothing writes those environments in the first place. Making the pickup
+# explicit fixes that at the boundary instead of chasing eleven environments.
+
+def test_ambient_token_is_ignored_by_default(monkeypatch):
+    """The whole fix, in one assertion."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "ambient-and-possibly-dead")
+    with mock.patch(
+        "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
+    ) as urlopen:
+        payload, definitive = github_get_json("https://api.github.com/x")
+    assert (payload, definitive) == ({"ok": True}, True)
+    assert urlopen.call_args.args[0].get_header("Authorization") is None
+
+
+def test_ambient_gh_token_is_also_ignored_by_default(monkeypatch):
+    """GH_TOKEN is the second name the old helper accepted; both are ambient."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "ambient-and-possibly-dead")
+    with mock.patch(
+        "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
+    ) as urlopen:
+        github_get_json("https://api.github.com/x")
+    assert urlopen.call_args.args[0].get_header("Authorization") is None
+
+
+def test_a_dead_ambient_token_cannot_cost_a_single_request(monkeypatch):
+    """The 2026-08-21 shape, at the default: a dead ambient token must not even
+    produce the rejected FIRST attempt that the fallback then has to repair.
+    One request, no credential, right answer."""
+    from nousergon_lib.preflight import _fetch_origin_main_sha
+    monkeypatch.setenv("GITHUB_TOKEN", "expired-tok")
+    with mock.patch(
+        "urllib.request.urlopen",
+        return_value=_fake_json_response({"commit": {"sha": "c" * 40}}),
+    ) as urlopen:
+        sha = _fetch_origin_main_sha("nousergon/nousergon-data")
+    assert sha == "c" * 40
+    assert urlopen.call_count == 1
+    assert urlopen.call_args.args[0].get_header("Authorization") is None
+
+
+def test_is_ancestor_ignores_an_ambient_token_by_default(monkeypatch):
+    """The other GitHub call on a halting path — code-freshness ancestry —
+    must not pick one up either."""
+    from nousergon_lib.preflight import _is_ancestor
+    monkeypatch.setenv("GITHUB_TOKEN", "expired-tok")
+    with mock.patch(
+        "urllib.request.urlopen",
+        return_value=_fake_json_response({"status": "ahead"}),
+    ) as urlopen:
+        assert _is_ancestor(
+            "nousergon/crucible-predictor", base="a" * 40, head="b" * 40,
+            sleep=lambda _s: None,
+        ) is True
+    assert urlopen.call_args.args[0].get_header("Authorization") is None
+
+
+def test_opting_in_still_works_for_a_caller_that_needs_the_ceiling(monkeypatch):
+    """Opt-in is a real capability, not a vestige: a CI job that needs the
+    5000 req/hr ceiling still gets it."""
+    from nousergon_lib.preflight import github_get_json
+    monkeypatch.setenv("GITHUB_TOKEN", "ci-tok")
+    with mock.patch(
+        "urllib.request.urlopen", return_value=_fake_json_response({"ok": True}),
+    ) as urlopen:
+        github_get_json("https://api.github.com/x", allow_ambient_auth=True)
+    assert urlopen.call_args.args[0].get_header("Authorization") == "Bearer ci-tok"
+
+
+def test_auth_headers_are_empty_without_opt_in_even_with_a_token(monkeypatch):
+    from nousergon_lib.preflight import _github_auth_headers
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert _github_auth_headers() == {}
+    assert _github_auth_headers(allow_ambient=True) == {"Authorization": "Bearer tok"}
