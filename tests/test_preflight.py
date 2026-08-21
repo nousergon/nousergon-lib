@@ -11,6 +11,28 @@ import pytest
 from nousergon_lib.preflight import BasePreflight
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_secret_resolution(monkeypatch):
+    """Force ``krepis.secrets.get_secret`` to resolve from ``os.environ``
+    only, and clear its per-process cache before/after each test.
+
+    ``_github_auth_headers`` (alpha-engine-config-I7925) now resolves
+    ``GITHUB_TOKEN`` via ``get_secret`` instead of a literal
+    ``os.environ.get`` — that helper defaults to an SSM-first lookup with
+    a process-wide cache, both of which would make the many
+    ``monkeypatch.setenv("GITHUB_TOKEN", ...)`` tests below flaky/order-
+    dependent without this. Forcing the ``env`` source and clearing the
+    cache keeps their existing behavior deterministic without weakening
+    any assertion.
+    """
+    import krepis.secrets as _secrets
+
+    monkeypatch.setenv("ALPHA_ENGINE_SECRETS_SOURCE", "env")
+    _secrets.clear_cache()
+    yield
+    _secrets.clear_cache()
+
+
 class _Concrete(BasePreflight):
     """Minimal concrete subclass for testing primitives directly."""
     def run(self) -> None:

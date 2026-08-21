@@ -9,7 +9,6 @@ Requires: RAG_DATABASE_URL environment variable (Neon pooled connection string).
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -73,7 +72,13 @@ _DATABASE_URL: str | None = None
 def _get_url() -> str:
     global _DATABASE_URL
     if _DATABASE_URL is None:
-        _DATABASE_URL = os.environ.get("RAG_DATABASE_URL")
+        from krepis.secrets import get_secret
+
+        # RAG_DATABASE_URL is a pinned secret (alpha-engine-config-I7925) —
+        # resolve through the sanctioned SSM-with-env-fallback path rather
+        # than a literal os.environ.get, which consumer repos' CI forbids
+        # in-repo but could not see inside this installed library.
+        _DATABASE_URL = get_secret("RAG_DATABASE_URL", required=False)
         if not _DATABASE_URL:
             raise RuntimeError("RAG_DATABASE_URL not set — cannot connect to vector DB")
     return _DATABASE_URL

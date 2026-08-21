@@ -14,7 +14,6 @@ Requires: VOYAGE_API_KEY environment variable.
 from __future__ import annotations
 
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,13 @@ def _get_client():
         # [dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts]), so this
         # import is unresolved there regardless of local venv state.
         import voyageai  # pyright: ignore[reportMissingImports]
-        _client = voyageai.Client(api_key=os.environ.get("VOYAGE_API_KEY"))
+        from krepis.secrets import get_secret
+
+        # VOYAGE_API_KEY is a pinned secret (alpha-engine-config-I7925) —
+        # resolve through the sanctioned SSM-with-env-fallback path rather
+        # than a literal os.environ.get, which consumer repos' CI forbids
+        # in-repo but could not see inside this installed library.
+        _client = voyageai.Client(api_key=get_secret("VOYAGE_API_KEY", required=False))
     return _client
 
 

@@ -575,8 +575,19 @@ def _github_auth_headers() -> dict[str, str]:
     was false: the alpha-engine SSM-to-env builder injects ``GITHUB_TOKEN``
     into the predictor Lambda, whose own CI test forbids reading it in-repo —
     the invariant was enforced in the repo and bypassed through this library.
+
+    ``GITHUB_TOKEN`` is a pinned secret (alpha-engine-config-I7925): resolved
+    through :func:`krepis.secrets.get_secret` — the same SSM-with-env-fallback
+    path every other pinned secret in the fleet uses — rather than a direct
+    environ read of that name, which is exactly the pattern consumer repos'
+    CI forbids in their own tree and could not see inside this installed
+    library. ``GH_TOKEN`` (the GitHub CLI's own env var, not a pinned secret)
+    is read directly — it is a convenience alias for local dev, never
+    provisioned by the fleet.
     """
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    from krepis.secrets import get_secret
+
+    token = get_secret("GITHUB_TOKEN", required=False) or os.environ.get("GH_TOKEN")
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
