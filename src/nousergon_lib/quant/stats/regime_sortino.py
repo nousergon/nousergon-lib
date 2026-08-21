@@ -5,7 +5,11 @@ answering "did the regime call enable better risk-adjusted returns?" — distinc
 from stratifying signal *accuracy* by regime.
 
 Canonical-alpha conventions:
-- Alpha = ``log(1 + return) − log(1 + spy_return)`` (log domain, NOT arithmetic).
+- Alpha = ``log(1 + return) − log(1 + spy_return)`` (log domain, NOT arithmetic),
+  where ``return`` is a DECIMAL FRACTION. The canonical ``log_alpha_{h}d`` column
+  is preferred over recomputing it: a re-derivation from the wide arithmetic
+  columns is both lossy (they are 2dp-rounded percent) and a standing units
+  hazard. See :class:`ReturnUnits` and ``alpha-engine-config-I7661``.
 - Headline metric: **Sortino** (downside-deviation denominator), NOT raw
   Sharpe. Only realizations below the threshold (zero alpha) contribute a
   shortfall; the sum of squared shortfalls is divided by the **full sample n**
@@ -29,12 +33,14 @@ import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
 from nousergon_lib.quant import riskstats
+from nousergon_lib.quant.horizons import DEFAULT_POLICY, HorizonPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +55,22 @@ _TRADING_DAYS_PER_YEAR: int = 252
 DEFAULT_MIN_PICKS_PER_STRATUM: int = 20
 
 
-# Horizons reported. Picks must have NON-NULL return + spy_return on a horizon to
-# count for that horizon.
-SUPPORTED_HORIZONS: tuple[int, ...] = (10, 30)
+# Horizons reported — RESOLVED FROM THE FLEET HorizonPolicy, never hardcoded.
+#
+# This was ``(10, 30)`` until alpha-engine-config-I7661. Both were retired by
+# config#1456 and orphaned by the config#1528 cutover: the long-format outcome
+# store carries no horizon-30 rows at all, and the legacy wide ``return_10d`` /
+# ``return_30d`` columns have had no producer since March. The metric was
+# therefore computing off 34 frozen rows dated 2026-03-04..03-13 — 30 of them
+# in the ``caution`` stratum, itself a regime label retired by the 3-class
+# taxonomy — and republishing them weekly. Four consecutive weekly artifacts
+# were identical net of run metadata, which no write-time freshness check can
+# see.
+#
+# An incomplete migration is the root cause, and the chokepoint is the fix:
+# config#1528 moved seven backtester readers onto ``HorizonPolicy`` and missed
+# this one.
+SUPPORTED_HORIZONS: tuple[int, ...] = DEFAULT_POLICY.all_horizons
 
 
 # Sortino spread interpretation thresholds. Different scale than Sharpe — the
@@ -82,9 +101,127 @@ class StratumMetrics:
     hit_rate: float | None                 # Fraction of picks where log-alpha > 0
 
 
+class ReturnUnits(str, Enum):
+    """The unit convention of an arithmetic return column.
+
+    There is no safe default. The fleet stores the SAME quantity both ways —
+    ``score_performance_outcomes`` (canonical) holds decimals, while the wide
+    ``return_{h}d`` / ``spy_{h}d_return`` columns hold ``round(decimal*100, 2)``
+    percent points — so a caller that does not state which it is holding is
+    guessing, and a wrong guess produces plausible numbers rather than an
+    error. ``alpha-engine-config-I7661``: ``log(1 + 5.55)`` is a perfectly good
+    float, and that is exactly the problem.
+    """
+
+    FRACTION = "fraction"
+    PERCENT = "percent"
+
+
+class ReturnUnitsError(ValueError):
+    """A return column's values contradict its declared units."""
+
+
+# Plausibility bound for a per-pick DECIMAL return over a <= 21-trading-day
+# horizon. +500% is far outside anything this metric legitimately sees, and a
+# percent-point column mislabelled as a fraction blows past it immediately
+# (a 5.55% move reads as +555%). Deliberately loose: this is a units tripwire,
+# not an outlier filter.
+_MAX_PLAUSIBLE_FRACTION: float = 5.0
+
+# The discriminating tripwire. A percent-point column whose values happen to
+# be small (a 5-day return of +2.4pp) sits comfortably inside the ±5 bound
+# above while meaning something 100× different — the max alone is not enough.
+# The MEDIAN separates the two conventions cleanly: per-pick decimal returns
+# over a <= 21-day horizon have a median |r| of a few hundredths, while the
+# same data in percent points has a median |r| of a few units. A typical pick
+# moving 50% is not a return distribution this metric ever legitimately sees.
+_MAX_PLAUSIBLE_MEDIAN_FRACTION: float = 0.5
+
+# The mirror direction: a DECIMAL column read as percent divides by 100 and
+# understates every alpha by two orders of magnitude — silently, since small
+# numbers trip no upper bound. A per-pick return distribution whose median
+# absolute move is under 5 basis points over a <= 21-day horizon is not a
+# return distribution. Applied only to a column with enough rows to have a
+# distribution at all.
+_MIN_PLAUSIBLE_MEDIAN_FRACTION: float = 5e-4
+_MEDIAN_CHECK_MIN_ROWS: int = 10
+
+
+def _to_fraction(
+    values: pd.Series,
+    units: ReturnUnits,
+    *,
+    column: str,
+) -> pd.Series:
+    """Coerce a declared-units arithmetic return column to decimal fractions.
+
+    Fails LOUD rather than clipping. Two conditions raise:
+
+    * a value at or below ``-1.0`` — the position went to zero or worse, so
+      ``log(1 + r)`` is genuinely undefined. The pre-I7661 code clipped
+      ``1 + r`` to ``1e-9``, which turned every such row into ``log_alpha ≈
+      -20.7``: an undefined quantity rendered as a finite number, and the
+      direct cause of the published ``mean_log_alpha`` of -6.44 (#7237's class).
+    * a value beyond ``_MAX_PLAUSIBLE_FRACTION`` after conversion — the column
+      is almost certainly not in the units it was declared to be in. Raising
+      here is the whole point: a future source swap must break the run, not
+      quietly change what the number means.
+    """
+    converted = cast("pd.Series", values.astype("float64"))
+    if units is ReturnUnits.PERCENT:
+        converted = cast("pd.Series", converted / 100.0)
+    finite = cast("pd.Series", converted[np.isfinite(converted.to_numpy())])
+    if finite.empty:
+        return converted
+    lo, hi = float(finite.min()), float(finite.max())
+    if lo <= -1.0:
+        raise ReturnUnitsError(
+            f"{column}: value {lo:.6g} (declared {units.value}) implies a "
+            f"return of -100% or worse, for which log(1 + r) is undefined. "
+            f"Exclude or resolve these rows — do not clip them into a finite "
+            f"log return (alpha-engine-config-I7661 / #7237)."
+        )
+    likely = (
+        ReturnUnits.PERCENT if units is ReturnUnits.FRACTION else ReturnUnits.FRACTION
+    )
+    extreme = max(abs(lo), abs(hi))
+    if extreme > _MAX_PLAUSIBLE_FRACTION:
+        raise ReturnUnitsError(
+            f"{column}: declared units {units.value!r} but the column spans "
+            f"[{lo:.6g}, {hi:.6g}] after conversion, beyond the plausible "
+            f"per-pick bound of ±{_MAX_PLAUSIBLE_FRACTION:g}. The source is "
+            f"most likely {likely.value!r} (alpha-engine-config-I7661)."
+        )
+    median_abs = float(np.median(np.abs(finite.to_numpy())))
+    if median_abs > _MAX_PLAUSIBLE_MEDIAN_FRACTION:
+        raise ReturnUnitsError(
+            f"{column}: declared units {units.value!r} but the MEDIAN absolute "
+            f"value is {median_abs:.6g} after conversion — a typical pick "
+            f"moving {median_abs:.0%} is not a return distribution this metric "
+            f"sees. The source is most likely {likely.value!r} "
+            f"(alpha-engine-config-I7661)."
+        )
+    if (
+        finite.size >= _MEDIAN_CHECK_MIN_ROWS
+        and 0.0 < median_abs < _MIN_PLAUSIBLE_MEDIAN_FRACTION
+    ):
+        raise ReturnUnitsError(
+            f"{column}: declared units {units.value!r} but the MEDIAN absolute "
+            f"value is {median_abs:.6g} after conversion — under "
+            f"{_MIN_PLAUSIBLE_MEDIAN_FRACTION:g} ({_MIN_PLAUSIBLE_MEDIAN_FRACTION * 1e4:.0f} bps) "
+            f"over {finite.size} rows. The source is most likely "
+            f"{likely.value!r} (alpha-engine-config-I7661)."
+        )
+    return converted
+
+
 def _arithmetic_to_log_alpha(
     arithmetic_return: pd.Series,
     arithmetic_spy_return: pd.Series,
+    *,
+    units: ReturnUnits,
+    return_column: str = "return",
+    spy_column: str = "spy_return",
 ) -> pd.Series:
     """Convert arithmetic per-pick returns to log-domain pick alpha.
 
@@ -93,13 +230,16 @@ def _arithmetic_to_log_alpha(
     Log domain is required for variance-bearing computations because log returns
     are additive in time and symmetric in sign around zero. NaN propagates; the
     caller filters those out before metric computation.
+
+    ``units`` is REQUIRED and keyword-only — see :class:`ReturnUnits`. Prefer
+    the canonical ``log_alpha_{h}d`` column where the store publishes one;
+    this path exists for horizons that do not yet carry it.
     """
-    # Guard against log(0) — a return of -1.0 means the position went to zero;
-    # log domain is undefined. Clip with a tiny epsilon so such picks emit a
-    # large negative log return rather than crashing.
-    one_plus_ret = np.maximum(1.0 + arithmetic_return, 1e-9)
-    one_plus_spy = np.maximum(1.0 + arithmetic_spy_return, 1e-9)
-    return np.log(one_plus_ret) - np.log(one_plus_spy)
+    ret = _to_fraction(arithmetic_return, units, column=return_column)
+    spy = _to_fraction(arithmetic_spy_return, units, column=spy_column)
+    return pd.Series(
+        np.log1p(ret.to_numpy()) - np.log1p(spy.to_numpy()), index=ret.index,
+    )
 
 
 def _annualization_factor(horizon_days: int) -> float:
@@ -190,61 +330,100 @@ def _downside_std(log_alphas: np.ndarray) -> float | None:
     )
 
 
+def _empty_stratum(market_regime: str, horizon_days: int, n_picks: int = 0) -> StratumMetrics:
+    return StratumMetrics(
+        market_regime=market_regime,
+        horizon_days=horizon_days,
+        n_picks=n_picks,
+        mean_log_alpha=None,
+        std_log_alpha=None,
+        downside_std_log_alpha=None,
+        annualized_sortino=None,
+        annualized_sharpe=None,
+        hit_rate=None,
+    )
+
+
+def _resolve_log_alphas(
+    populated: pd.DataFrame,
+    horizon_days: int,
+    *,
+    units: ReturnUnits,
+    policy: HorizonPolicy,
+    use_canonical: bool,
+) -> np.ndarray:
+    """Per-pick log alphas for one stratum, canonical column FIRST.
+
+    ``score_performance_outcomes`` publishes ``log_alpha`` in decimals for the
+    primary horizon, already computed by the producer that owns the definition.
+    Reading it beats re-deriving it from the wide arithmetic columns, which are
+    a 2dp-rounded PERCENT projection of the same numbers — lossy on top of the
+    units hazard that made this metric wrong (alpha-engine-config-I7661).
+
+    Horizons with no published log-alpha fall back to the arithmetic path,
+    which now demands a stated unit convention.
+    """
+    cols = policy.outcome_columns(horizon_days)
+    if use_canonical:
+        return cast("pd.Series", populated[cols.log_alpha]).astype("float64").to_numpy()
+    return _arithmetic_to_log_alpha(
+        cast("pd.Series", populated[cols.stock_return]),
+        cast("pd.Series", populated[cols.spy_return]),
+        units=units,
+        return_column=cols.stock_return,
+        spy_column=cols.spy_return,
+    ).to_numpy()
+
+
 def _stratum_metrics(
     slice_df: pd.DataFrame,
     market_regime: str,
     horizon_days: int,
     min_picks: int,
+    *,
+    units: ReturnUnits,
+    policy: HorizonPolicy = DEFAULT_POLICY,
 ) -> StratumMetrics:
     """Compute per-stratum metrics over log-domain pick alphas.
 
     Returns None-padded StratumMetrics when the stratum is below ``min_picks`` —
     the caller filters those out of the headline spread metric.
     """
-    return_col = f"return_{horizon_days}d"
-    spy_col = f"spy_{horizon_days}d_return"
-    beat_col = f"beat_spy_{horizon_days}d"
+    # Column names resolve from the HorizonPolicy chokepoint — never
+    # f-string-assembled here (config#1456's root cause, EPIC config#1483).
+    cols = policy.outcome_columns(horizon_days)
+    return_col = cols.stock_return
+    spy_col = cols.spy_return
+    beat_col = cols.beat_spy
 
     if return_col not in slice_df.columns or spy_col not in slice_df.columns:
-        return StratumMetrics(
-            market_regime=market_regime,
-            horizon_days=horizon_days,
-            n_picks=0,
-            mean_log_alpha=None,
-            std_log_alpha=None,
-            downside_std_log_alpha=None,
-            annualized_sortino=None,
-            annualized_sharpe=None,
-            hit_rate=None,
-        )
+        return _empty_stratum(market_regime, horizon_days)
 
     # Boolean-mask row selection on a DataFrame always returns a DataFrame;
     # pyright's inference widens to Series|DataFrame because
     # DataFrame.__getitem__'s stub overloads also cover scalar/list-label
     # column selection.
-    populated = cast("pd.DataFrame", slice_df[slice_df[return_col].notna() & slice_df[spy_col].notna()])
+    # Which rows can yield an alpha at all. When the canonical log-alpha
+    # column is published, ITS non-nullness is the population — otherwise a
+    # row could be counted as a pick and then have no alpha to contribute.
+    log_col = cols.log_alpha
+    use_canonical = log_col in slice_df.columns and bool(slice_df[log_col].notna().any())
+    mask = (
+        slice_df[log_col].notna()
+        if use_canonical
+        else slice_df[return_col].notna() & slice_df[spy_col].notna()
+    )
+    populated = cast("pd.DataFrame", slice_df[mask])
     n_picks = len(populated)
     if n_picks < min_picks:
-        return StratumMetrics(
-            market_regime=market_regime,
-            horizon_days=horizon_days,
-            n_picks=n_picks,
-            mean_log_alpha=None,
-            std_log_alpha=None,
-            downside_std_log_alpha=None,
-            annualized_sortino=None,
-            annualized_sharpe=None,
-            hit_rate=None,
-        )
+        return _empty_stratum(market_regime, horizon_days, n_picks)
 
-    # Convert arithmetic → log domain (canonical framework). return_col /
-    # spy_col are plain str (not literals), so pyright can't statically
-    # rule out DataFrame.__getitem__'s duplicate-column-label overload;
-    # both are single confirmed-present column names (checked above), so
-    # this is always single-column Series selection.
-    log_alphas = _arithmetic_to_log_alpha(
-        cast("pd.Series", populated[return_col]), cast("pd.Series", populated[spy_col]),
-    ).to_numpy()
+    # Canonical log-alpha where published, else an explicitly-united
+    # arithmetic conversion. Both paths raise rather than clip.
+    log_alphas = _resolve_log_alphas(
+        populated, horizon_days, units=units, policy=policy,
+        use_canonical=use_canonical,
+    )
 
     sortino = _annualized_sortino_from_log_alphas(log_alphas, horizon_days=horizon_days)
     sharpe = _annualized_sharpe_from_log_alphas(log_alphas, horizon_days=horizon_days)
@@ -270,15 +449,26 @@ def _stratum_metrics(
 def stratified_sortino_by_regime(
     df: pd.DataFrame,
     *,
+    units: ReturnUnits,
     min_picks_per_stratum: int = DEFAULT_MIN_PICKS_PER_STRATUM,
     horizons: Sequence[int] = SUPPORTED_HORIZONS,
+    policy: HorizonPolicy = DEFAULT_POLICY,
 ) -> list[StratumMetrics]:
     """Group ``df`` by ``market_regime``; compute Sortino + Sharpe + log-alpha +
     hit-rate per (regime, horizon) stratum.
 
-    ``df`` is a per-pick frame carrying ``market_regime`` plus arithmetic
-    ``return_{h}d`` / ``spy_{h}d_return`` (and optional ``beat_spy_{h}d``)
-    columns. Returns one StratumMetrics per (regime, horizon) discovered. Strata
+    ``df`` is a per-pick frame carrying ``market_regime`` plus the outcome
+    columns named by ``policy.outcome_columns(h)`` — the canonical
+    ``log_alpha_{h}d`` where it is published, otherwise arithmetic
+    ``return_{h}d`` / ``spy_{h}d_return`` (and optional ``beat_spy_{h}d``).
+
+    ``units`` is REQUIRED and declares the convention of those arithmetic
+    columns; there is no default because the fleet stores the same quantity
+    both ways and a wrong guess yields plausible numbers rather than an error
+    (alpha-engine-config-I7661). It is ignored for any horizon resolved from
+    the canonical log-alpha column, which is log-domain by definition.
+
+    Returns one StratumMetrics per (regime, horizon) discovered. Strata
     below ``min_picks_per_stratum`` have None risk-adjusted metrics; n_picks
     still reflects how many were found. Rows with NaN ``market_regime`` are
     skipped.
@@ -303,6 +493,8 @@ def stratified_sortino_by_regime(
                     market_regime=str(regime),
                     horizon_days=horizon,
                     min_picks=min_picks_per_stratum,
+                    units=units,
+                    policy=policy,
                 )
             )
     return out
@@ -310,7 +502,7 @@ def stratified_sortino_by_regime(
 
 def compute_regime_spread(
     strata: Sequence[StratumMetrics],
-    horizon_days: int = 10,
+    horizon_days: int = DEFAULT_POLICY.primary_horizon,
 ) -> dict[str, Any]:
     """Headline Sortino-spread metric: bull-Sortino minus bear-Sortino.
 
@@ -377,19 +569,136 @@ def compute_regime_spread(
     }
 
 
+@dataclass(frozen=True)
+class InputWindow:
+    """The date span of the rows a run actually measured.
+
+    A stage that publishes a fresh artifact containing five-month-old inputs is
+    indistinguishable, to every WRITE-TIME freshness check the fleet has, from
+    one that is working — which is how four consecutive weekly
+    ``regime/stratified_sortino`` artifacts came to be identical net of run
+    metadata without anything noticing (alpha-engine-config-I7661). Freshness
+    is a property of the INPUTS; recording them on the artifact is what makes it
+    checkable.
+    """
+
+    min_score_date: str | None
+    max_score_date: str | None
+    n_rows: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "min_score_date": self.min_score_date,
+            "max_score_date": self.max_score_date,
+            "n_rows": self.n_rows,
+        }
+
+
+# Slack, in calendar days, on top of the horizon itself before a run's newest
+# input counts as stale. Covers the weekly cadence plus a missed cycle.
+DEFAULT_INPUT_STALENESS_GRACE_DAYS: int = 14
+
+# Artifact status vocabulary. ``unmeasurable`` exists so a run that could not
+# measure anything fails LOUD instead of rendering as an empty success
+# (champion-challenger-policy §7.2).
+STATUS_OK: str = "ok"
+STATUS_UNMEASURABLE: str = "unmeasurable"
+
+
+def input_window(df: pd.DataFrame, *, date_col: str = "score_date") -> InputWindow:
+    """Min/max/count of ``date_col`` over the rows fed to the metric."""
+    if df is None or df.empty or date_col not in df.columns:
+        return InputWindow(min_score_date=None, max_score_date=None, n_rows=0)
+    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    if dates.empty:
+        return InputWindow(min_score_date=None, max_score_date=None, n_rows=len(df))
+    return InputWindow(
+        min_score_date=str(dates.min().date()),
+        max_score_date=str(dates.max().date()),
+        n_rows=len(df),
+    )
+
+
+def assess_input_freshness(
+    window: InputWindow,
+    *,
+    trading_day: str,
+    horizon_days: int,
+    grace_days: int = DEFAULT_INPUT_STALENESS_GRACE_DAYS,
+) -> tuple[str, str]:
+    """Is the newest measured input recent enough for this run to mean anything?
+
+    Returns ``(status, reason)``. The predicate is on INPUT dates, not the
+    artifact's write time, and it is horizon-aware: a horizon-``h`` outcome
+    cannot resolve until ``h`` trading days after the score date, so the newest
+    score date a healthy run can carry is already ``h`` behind. Comparing
+    against ``now`` without that allowance flags every correct run as stale —
+    the mirror of the defect this guards (champion-challenger-policy §7.1).
+    """
+    if window.max_score_date is None or window.n_rows == 0:
+        return (
+            STATUS_UNMEASURABLE,
+            f"no rows carried a usable {'score_date'} — nothing was measured",
+        )
+    try:
+        newest = pd.Timestamp(window.max_score_date)
+        asof = pd.Timestamp(trading_day)
+        if newest is pd.NaT or asof is pd.NaT:
+            raise ValueError("NaT")
+    except ValueError:
+        return (
+            STATUS_UNMEASURABLE,
+            f"unparseable dates (max_score_date={window.max_score_date!r}, "
+            f"trading_day={trading_day!r})",
+        )
+    # Trading days → calendar days at 5 per 7.
+    horizon_calendar_days = math.ceil(horizon_days * 7 / 5)
+    newest_ts = cast("pd.Timestamp", newest)
+    asof_ts = cast("pd.Timestamp", asof)
+    deadline = asof_ts - pd.Timedelta(int(horizon_calendar_days + grace_days), unit="D")
+    if newest_ts < deadline:
+        age = (asof_ts - newest_ts).days
+        return (
+            STATUS_UNMEASURABLE,
+            f"newest measured input is {window.max_score_date} — {age} calendar "
+            f"days before trading_day {trading_day}, past the "
+            f"{horizon_calendar_days}d horizon allowance + {grace_days}d grace. "
+            f"The producer for this horizon has stopped (alpha-engine-config-I7661).",
+        )
+    return (STATUS_OK, "")
+
+
 def assemble_t2_eval_payload(
     *,
     strata: Sequence[StratumMetrics],
-    spread_10d: Mapping[str, Any],
-    spread_30d: Mapping[str, Any],
+    spread_primary: Mapping[str, Any],
+    spread_diagnostic: Mapping[str, Any],
     run_id: str,
     calendar_date: str,
     trading_day: str,
+    window: InputWindow,
+    status: str = STATUS_OK,
+    status_reason: str = "",
+    units: ReturnUnits = ReturnUnits.FRACTION,
     min_picks_per_stratum: int = DEFAULT_MIN_PICKS_PER_STRATUM,
+    policy: HorizonPolicy = DEFAULT_POLICY,
 ) -> dict[str, Any]:
     """Assemble the canonical eval-artifact JSON payload (pure dict build; no I/O).
 
     The consumer persists this via ``nousergon_lib.eval_artifacts`` writers.
+
+    Spread keys are named from the HorizonPolicy — ``spread_21d`` /
+    ``spread_5d`` today. They were ``spread_10d`` / ``spread_30d`` until
+    alpha-engine-config-I7661; the dashboard's Regime page had ALREADY been
+    migrated to the policy-derived names (``views/15_Regime.py``, config#1456),
+    so every T2 tile on that page had been rendering an em-dash against an
+    artifact that never carried the keys it was reading. This rename repairs a
+    broken consumer rather than breaking a working one.
+
+    ``status`` / ``status_reason`` carry an explicit ``unmeasurable`` verdict
+    rather than letting a run with no usable inputs render as an empty success,
+    and ``input_window`` records the dates actually measured so freshness can be
+    checked on the INPUTS.
     """
     strata_serialized = [
         {
@@ -411,12 +720,24 @@ def assemble_t2_eval_payload(
         "run_id": run_id,
         "schema_version": 1,
         "eval_tier": "T2_downstream_stratified_sortino",
+        "status": status,
+        "status_reason": status_reason,
         "min_picks_per_stratum": min_picks_per_stratum,
-        "spread_10d": dict(spread_10d),
-        "spread_30d": dict(spread_30d),
+        "horizons": list(policy.all_horizons),
+        f"spread_{policy.primary_horizon}d": dict(spread_primary),
+        f"spread_{policy.diagnostic_horizons[0]}d": dict(spread_diagnostic),
+        "input_window": window.as_dict(),
         "strata": strata_serialized,
         "method_metadata": {
             "annualization_basis": f"{_TRADING_DAYS_PER_YEAR}_trading_days_per_year",
+            "return_units": units.value,
+            "alpha_source": (
+                "canonical log_alpha_{h}d where published, else "
+                "log1p(return) - log1p(spy_return) on returns converted from "
+                f"declared units {units.value!r}; a value implying <= -100% or "
+                "beyond the plausible bound RAISES rather than clipping "
+                "(alpha-engine-config-I7661)"
+            ),
             "alpha_definition": (
                 "log(1+return_Nd) - log(1+spy_Nd_return) per pick cross-sectional"
             ),
