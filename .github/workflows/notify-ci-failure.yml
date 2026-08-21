@@ -45,6 +45,14 @@ name: Notify CI failure
 # alpha-engine-config — repository_dispatch is a contents-write operation).
 # The step warns-and-falls-back-to-the-Telegram-alert when the secret is
 # absent so a not-yet-onboarded consumer still alerts cleanly.
+#
+# blast_radius_message (alpha-engine-config-I7800, additive/opt-in): a
+# consumer whose CI failure has a KNOWN, computable downstream consequence
+# (a scheduled pipeline that will halt on the stale deploy) can pass one
+# extra line naming it. Appended verbatim to the fallback Telegram message
+# ONLY — it never changes the dispatch step, the dedup key, or any existing
+# consumer's message shape, so every consumer that doesn't set it is
+# byte-for-byte unaffected. Empty string (the default) appends nothing.
 
 on:
   workflow_call:
@@ -54,6 +62,11 @@ on:
         required: false
         type: string
         default: "v0.89.0"
+      blast_radius_message:
+        description: "Optional extra line naming the concrete downstream consequence of this failure (e.g. which scheduled pipeline halts next and when). Appended to the fallback Telegram alert only. Empty (default) = no change to the message."
+        required: false
+        type: string
+        default: ""
     secrets:
       TELEGRAM_BOT_TOKEN:
         required: true
@@ -85,12 +98,18 @@ jobs:
           CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CI_WORKFLOW: ${{ github.workflow }}
           CI_BRANCH: ${{ github.ref_name }}
+          BLAST_RADIUS_MESSAGE: ${{ inputs.blast_radius_message }}
         run: |
           if [ -z "$DISPATCH_PAT" ]; then
             echo "::warning::SF_WATCH_DISPATCH_PAT not configured — Fleet CI Watch NOT dispatched (config#1593 operator step pending). Falling back to the Telegram alert below."
             echo "dispatched=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # alpha-engine-config-I7800: carried in client_payload (not just the
+          # fallback Telegram message below) so the dispatched agent — the
+          # COMMON path when SF_WATCH_DISPATCH_PAT is configured, which
+          # suppresses the fallback message entirely — also sees the concrete
+          # downstream consequence, not just repo/sha/workflow.
           if jq -n \
             --arg repo "$CI_REPO" \
             --arg sha "$CI_SHA" \
@@ -98,7 +117,8 @@ jobs:
             --arg run_url "$CI_RUN_URL" \
             --arg workflow "$CI_WORKFLOW" \
             --arg branch "$CI_BRANCH" \
-            '{event_type: "ci-main-failure", client_payload: {repo: $repo, sha: $sha, run_id: $run_id, run_url: $run_url, workflow: $workflow, branch: $branch}}' \
+            --arg blast_radius "$BLAST_RADIUS_MESSAGE" \
+            '{event_type: "ci-main-failure", client_payload: {repo: $repo, sha: $sha, run_id: $run_id, run_url: $run_url, workflow: $workflow, branch: $branch, blast_radius_message: $blast_radius}}' \
           | curl -sS --fail-with-body -X POST \
               -H "Authorization: token $DISPATCH_PAT" \
               -H "Accept: application/vnd.github+json" \
@@ -142,12 +162,18 @@ jobs:
           CI_REF_NAME: ${{ github.ref_name }}
           CI_SHA: ${{ github.sha }}
           CI_WORKFLOW: ${{ github.workflow }}
+          BLAST_RADIUS_MESSAGE: ${{ inputs.blast_radius_message }}
         run: |
+          MSG="🔴 CI RED on main — ${CI_REPOSITORY} @ ${CI_SHA}
+          Workflow: ${CI_WORKFLOW}
+          Run: ${RUN_URL}
+          (Fleet CI Watch was NOT dispatched — manual attention needed.)"
+          if [ -n "$BLAST_RADIUS_MESSAGE" ]; then
+            MSG="${MSG}
+          ${BLAST_RADIUS_MESSAGE}"
+          fi
           python -m krepis.alerts publish \
             --no-sns \
             --severity error \
             --source "ci:${CI_REPOSITORY}@${CI_REF_NAME}" \
-            --message "🔴 CI RED on main — ${CI_REPOSITORY} @ ${CI_SHA}
-          Workflow: ${CI_WORKFLOW}
-          Run: ${RUN_URL}
-          (Fleet CI Watch was NOT dispatched — manual attention needed.)"
+            --message "$MSG"
