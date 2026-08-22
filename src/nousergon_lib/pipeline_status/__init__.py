@@ -34,15 +34,6 @@ on first build, not after the second consumer arrives.
 
 from __future__ import annotations
 
-from .coverage import (
-    CoverageSweep,
-    RowState,
-    StageRow,
-    publish_sweep,
-    read_coverage_sweep,
-    render_rows,
-    sweep_coverage,
-)
 from .completion_marker import (
     MARKER_PREFIX,
     augment_marker,
@@ -51,6 +42,15 @@ from .completion_marker import (
     marker_verdict,
     merge_cycle_shape,
     read_marker,
+)
+from .coverage import (
+    CoverageSweep,
+    RowState,
+    StageRow,
+    publish_sweep,
+    read_coverage_sweep,
+    render_rows,
+    sweep_coverage,
 )
 from .cycle_shape import (
     CONTRIBUTING_ROLES,

@@ -76,8 +76,8 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from datetime import timezone
 from dataclasses import dataclass, field
+from datetime import timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 

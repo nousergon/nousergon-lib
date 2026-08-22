@@ -513,7 +513,6 @@ def read_coverage_sweep(
     """Read the registry, the verdicts and the cycle, and sweep them."""
     if s3_client is None:  # pragma: no cover — production path
         import boto3
-
         from krepis.aws_region import resolve_region
 
         s3_client = boto3.client("s3", region_name=resolve_region())
@@ -690,7 +689,6 @@ def _main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     import boto3
-
     from krepis.aws_region import resolve_region
 
     region = resolve_region()

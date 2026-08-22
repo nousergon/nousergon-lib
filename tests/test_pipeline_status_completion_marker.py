@@ -23,7 +23,7 @@ from nousergon_lib.pipeline_status.completion_marker import (
     merge_cycle_shape,
     read_marker,
 )
-from nousergon_lib.pipeline_status.cycle_shape import CycleVerdict, build_cycle_shape
+from nousergon_lib.pipeline_status.cycle_shape import build_cycle_shape
 from nousergon_lib.pipeline_status.read import RunStatus
 from nousergon_lib.pipeline_status.work import classify_work
 
