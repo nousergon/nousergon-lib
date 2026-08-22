@@ -227,8 +227,9 @@ class PipelineExecutionSummary(BaseModel):
     duration_sec: float | None = None
     pipeline_role: str | None = None
     #: The TRADING DAY this execution ran for — ``input.run_date``, falling
-    #: back to a date embedded in the execution NAME, per
-    #: :func:`_extract_run_date`. None when neither carries one.
+    #: back to a date embedded in the execution NAME, falling back to
+    #: ``startDate`` normalised to UTC, per :func:`_extract_run_date`. None
+    #: only when the response carries none of the three.
     #:
     #: Prefer this over ``start_utc`` whenever executions are grouped into
     #: cycles. Measured 2026-08-15: the weekly pipeline's recovery reruns for
@@ -971,17 +972,59 @@ _RUN_DATE_IN_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 def _extract_run_date(describe_resp: Mapping[str, Any]) -> str | None:
-    """The cycle key: ``input.run_date``, falling back to the execution name.
+    """The cycle key: ``input.run_date``, the execution name, then ``startDate``.
 
-    Both sources are needed. Scheduled executions carry ``run_date`` in their
-    input and have opaque UUID names; operator reruns are named
-    ``watch-rerun-2026-08-10-5`` and may or may not thread the field. Reading
-    only the input would drop every rerun into "no cycle" and destroy the
-    attempts-per-cycle count, which is the whole metric.
+    THREE sources, and the third is the one that was missing. Scheduled
+    executions carry ``run_date`` in their input ONLY when the trigger passes
+    it; operator reruns are named ``watch-rerun-2026-08-10-5`` and may or may
+    not thread the field. Reading only the input would drop every rerun into
+    "no cycle" and destroy the attempts-per-cycle count, which is the whole
+    metric.
 
-    Returns None rather than guessing when neither carries a date — the
-    caller drops such executions rather than inventing single-attempt cycles
-    for them (see ``cycles.build_reliability_window``).
+    **The third source, and why it is not a guess** (``alpha-engine-config-I8216``).
+    Measured 2026-08-22 against ``ne-weekly-freshness-pipeline``: every
+    ``pipeline_role: weekly`` execution carries ``run_date: None`` in its input
+    and an opaque UUID name, because EventBridge passes no ``run_date`` — the
+    state machine's own ``InitializeInput`` Pass state stamps it, from
+    ``$$.Execution.StartTime``::
+
+        run_date = date($$.Execution.StartTime)   # step_function.json
+
+    So the value exists in the execution's STATE, not in its input or name, and
+    a two-source reader returns None for exactly the executions that ARE the
+    cadence. On 2026-08-22 that made the cycle read as three ``watch-rerun``
+    executions at 1/16 spine stages and hid the 02:00 scheduled run that
+    reached 14/16.
+
+    Deriving it from ``startDate`` is the IDENTICAL derivation the state
+    machine performs on the IDENTICAL field, so it reproduces the value the
+    execution itself used as its artifact key. ``startDate`` is normalised to
+    UTC first, because ``States.StringSplit`` on ``$$.Execution.StartTime``
+    splits a UTC ISO string — a local-time conversion produces an off-by-one on
+    the 02:00 UTC scheduled runs specifically, which are the exact executions
+    this recovers.
+
+    Returns None only when the response carries no ``startDate`` either — a
+    ``ListExecutions``/``DescribeExecution`` response always does, so in
+    practice None now means a hand-built mapping, not a real execution.
+    """
+    explicit = _explicit_run_date(describe_resp)
+    if explicit:
+        return explicit
+    start = _parse_ts(describe_resp.get("startDate"))
+    if start is not None:
+        return start.astimezone(timezone.utc).date().isoformat()
+    return None
+
+
+def _explicit_run_date(describe_resp: Mapping[str, Any]) -> str | None:
+    """The run date the execution STATES — input field, else execution name.
+
+    Split out of :func:`_extract_run_date` so a caller can ask for the
+    declared date specifically, without the ``startDate`` derivation. The one
+    caller that needs the distinction is the reliability window's membership
+    test: an UNTAGGED execution naming its cycle is admitted, an untagged one
+    identifiable only by when it happened to start is not.
     """
     raw_input = describe_resp.get("input")
     if isinstance(raw_input, str) and raw_input:
@@ -1080,9 +1123,40 @@ def read_reliability_window(
                 break
         return state, error
 
+    def _cycle_key_of(summary: PipelineExecutionSummary) -> str | None:
+        """The cycle key, but only for executions that BELONG to a cycle.
+
+        Role filtering is explicit here for a reason
+        (``alpha-engine-config-I8216``). Before ``_extract_run_date`` learned
+        its third source, an exercise or smoke run was excluded from the
+        window by ACCIDENT — it carried no ``run_date`` and no date in its
+        name, so it resolved to None and was dropped. That is the
+        ``roles.py`` invariant being enforced by missing metadata rather than
+        by the declaration, and the moment every execution resolves to a key
+        the accident stops protecting it: a Tuesday exercise run would land
+        in the week's cycle and inflate its attempt count.
+
+        The membership rule is the one ``cycle_shape.CONTRIBUTING_ROLES``
+        already states — cadence runs ARE the cycle, recovery runs may
+        legitimately complete it, exercise and ad-hoc runs never do. An
+        UNTAGGED execution is admitted only when it carries an explicit date
+        (input or name), preserving the prior behaviour for manual runs that
+        deliberately named their cycle; an untagged run identifiable only by
+        its start time is not evidence of cadence membership.
+        """
+        from .cycle_shape import CONTRIBUTING_ROLES
+
+        describe_resp = _describe(summary.execution_arn)
+        role = _extract_pipeline_role(describe_resp)
+        if role:
+            if role not in CONTRIBUTING_ROLES:
+                return None
+            return _extract_run_date(describe_resp)
+        return _explicit_run_date(describe_resp)
+
     return build_reliability_window(
         summaries,
-        cycle_key_of=lambda s: _extract_run_date(_describe(s.execution_arn)),
+        cycle_key_of=_cycle_key_of,
         failure_of=_failure_of,
         entered_states_of=lambda s: _entered_state_names(_history(s.execution_arn)),
         stage_order=stage_order,

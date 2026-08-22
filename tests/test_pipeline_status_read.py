@@ -828,8 +828,21 @@ def test_list_recent_pipeline_runs_carries_run_date():
     assert client.describe_execution.call_count == 2
 
 
-def test_list_recent_pipeline_runs_run_date_none_when_input_lacks_it():
-    """Ad-hoc launches omit run_date. None, never a guess from start_utc."""
+def test_list_recent_pipeline_runs_falls_back_to_the_start_date(): 
+    """The third source (alpha-engine-config-I8216).
+
+    CHANGED FIXTURE — this test previously asserted `run_date is None` for an
+    execution whose input omits the field, under the heading "never a guess
+    from start_utc". That reading was measured wrong on 2026-08-22: EVERY
+    scheduled weekly execution omits the field and has an opaque UUID name,
+    because the state machine's own `InitializeInput` stamps run_date from
+    `$$.Execution.StartTime`. Deriving from startDate is not a guess — it is
+    the identical derivation on the identical field, reproducing the key the
+    execution itself used. What the old assertion protected (an exercise or
+    smoke run must not join a cadence cycle) is now enforced explicitly by
+    role, in `read_reliability_window._cycle_key_of`, rather than by the
+    accident of missing metadata.
+    """
     arn = EXECUTION_ARN + "-x"
     resp = _make_describe_response(role="smoke")
     resp["input"] = '{"pipeline_role": "smoke"}'
@@ -838,8 +851,62 @@ def test_list_recent_pipeline_runs_run_date_none_when_input_lacks_it():
         describe_by_arn={arn: resp},
     )
     summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
-    assert summaries[0].run_date is None
+    assert summaries[0].run_date == "2026-05-24"
     assert summaries[0].pipeline_role == "smoke"
+
+
+def test_list_recent_pipeline_runs_run_date_none_only_without_a_start_date():
+    """None survives as a value, for a response carrying none of the three."""
+    arn = EXECUTION_ARN + "-nostart"
+    resp = _make_describe_response(role="smoke")
+    resp["input"] = '{"pipeline_role": "smoke"}'
+    resp.pop("startDate")
+    client = _make_multi_execution_mock(
+        executions=[{"executionArn": arn, "name": "exec-nostart"}],
+        describe_by_arn={arn: resp},
+    )
+    from nousergon_lib.pipeline_status.read import _extract_run_date
+
+    assert _extract_run_date(resp) is None
+    assert client is not None
+
+
+def test_extract_run_date_derives_the_scheduled_weekly_cycle_key():
+    """The closes-when case from alpha-engine-config-I8216, verbatim.
+
+    A DescribeExecution response with `input='{"pipeline_role":"weekly"}'`,
+    an opaque name, and `startDate=2026-08-22T02:00:49Z` must resolve to
+    2026-08-22 — the execution that did 14 of 16 stages and was dropped from
+    its own cycle.
+    """
+    from nousergon_lib.pipeline_status.read import _extract_run_date
+
+    resp = {
+        "input": '{"pipeline_role": "weekly"}',
+        "name": "1ed4d68f-574b-7496-6196-cf052d7178ba_ab3ec94b",
+        "startDate": datetime(2026, 8, 22, 2, 0, 49, tzinfo=timezone.utc),
+    }
+    assert _extract_run_date(resp) == "2026-08-22"
+
+
+def test_extract_run_date_normalises_to_utc_before_taking_the_date():
+    """A local-time conversion produces an off-by-one on the 02:00 UTC
+    scheduled runs specifically — the exact executions the third source
+    recovers. `States.StringSplit` splits a UTC ISO string, so UTC is the
+    only key that matches the artifact the run itself wrote."""
+    from datetime import timedelta
+
+    from nousergon_lib.pipeline_status.read import _extract_run_date
+
+    resp = {
+        "input": "{}",
+        "name": "opaque",
+        # 2026-08-22T02:00Z rendered in US/Pacific: 2026-08-21T19:00-07:00.
+        "startDate": datetime(
+            2026, 8, 21, 19, 0, tzinfo=timezone(timedelta(hours=-7))
+        ),
+    }
+    assert _extract_run_date(resp) == "2026-08-22"
 
 
 def test_list_recent_pipeline_runs_input_run_date_wins_over_the_name():
@@ -877,9 +944,12 @@ def test_list_recent_pipeline_runs_falls_back_to_a_date_in_the_name():
     assert summaries[0].run_date == "2026-08-15"
 
 
-def test_list_recent_pipeline_runs_run_date_none_on_degenerate_input():
+def test_list_recent_pipeline_runs_degenerate_input_falls_through_to_start_date():
     """Malformed JSON, a non-dict body, a non-string or empty run_date — each
-    degrades this one field rather than failing the listing."""
+    degrades this one SOURCE rather than failing the listing, and resolution
+    continues to the name and then to startDate (I8216). Previously these
+    cases asserted None; the fixture changed because the fall-through gained
+    a third source, not because the degradation handling changed."""
     cases = ['not json', '["a"]', '{"run_date": 20260524}', '{"run_date": ""}']
     for i, raw in enumerate(cases):
         arn = EXECUTION_ARN + f"-deg{i}"
@@ -890,7 +960,7 @@ def test_list_recent_pipeline_runs_run_date_none_on_degenerate_input():
             describe_by_arn={arn: resp},
         )
         summaries = list_recent_pipeline_runs(SATURDAY_ARN, limit=1, client=client)
-        assert summaries[0].run_date is None, raw
+        assert summaries[0].run_date == "2026-05-24", raw
 
 
 def test_list_recent_pipeline_runs_empty_returns_empty_list():

@@ -449,3 +449,104 @@ def test_run_date_is_read_from_the_input_before_the_name():
     assert _extract_run_date({"input": '{"run_date":"2026-08-10"}', "name": "watch-rerun-2026-08-11-1"}) == "2026-08-10"
     assert _extract_run_date({"name": "watch-rerun-2026-08-11-1"}) == "2026-08-11"
     assert _extract_run_date({"name": "director-verify-uuid"}) is None
+
+
+_D10 = datetime(2026, 8, 10, 2, 0, tzinfo=timezone.utc)
+
+
+# ── I8216: the scheduled run rejoins its own cycle, and role membership
+#    stops being an accident of missing metadata ──────────────────────────────
+
+
+def _make_client_with(rows):
+    """rows: (name, status, input_json, entered_stages) tuples."""
+    arn = "arn:aws:states:us-east-1:1:execution:sf:"
+    executions = [
+        {
+            "executionArn": arn + name,
+            "name": name,
+            "status": status,
+            "startDate": start,
+        }
+        for name, status, _inp, _stages, start in rows
+    ]
+    inputs = {name: inp for name, _s, inp, _st, _d in rows}
+    histories = {name: [_entered(s) for s in stages] for name, _s, _i, stages, _d in rows}
+    return _FakeSFN(executions, inputs, histories)
+
+
+def test_a_scheduled_execution_with_no_run_date_joins_its_cycle():
+    """alpha-engine-config-I8216, the whole point.
+
+    An opaque-named `pipeline_role: weekly` execution carries run_date in its
+    STATE, not its input — before the third source it was dropped, so the
+    cycle contained only the operator reruns and attempts-to-success could
+    not see attempt #1.
+    """
+    from nousergon_lib.pipeline_status import read_reliability_window
+
+    client = _make_client_with(
+        [
+            ("1ed4d68f-uuid", "FAILED", '{"pipeline_role":"weekly"}', _STAGES[:1], _D10),
+            (
+                "watch-rerun-2026-08-10-1",
+                "SUCCEEDED",
+                '{"pipeline_role":"watch-rerun","run_date":"2026-08-10"}',
+                _STAGES,
+                _D10 + timedelta(hours=2),
+            ),
+        ]
+    )
+    w = read_reliability_window(
+        "arn:aws:states:us-east-1:1:stateMachine:sf", stage_order=_STAGES, client=client
+    )
+    assert [c.cycle_key for c in w.cycles] == ["2026-08-10"]
+    assert w.cycles[0].attempt_count == 2, "the scheduled attempt is attempt #1"
+    assert w.cycles[0].first_attempt_succeeded is False
+
+
+def test_an_exercise_run_never_joins_a_cadence_cycle():
+    """The roles.py invariant, now enforced by DECLARATION not by accident.
+
+    Before I8216 an exercise run fell out of the window because it carried no
+    resolvable date. Once every execution resolves to one, only the explicit
+    role filter keeps a Tuesday debugging run out of the week's cycle.
+    """
+    from nousergon_lib.pipeline_status import read_reliability_window
+
+    client = _make_client_with(
+        [
+            ("1ed4d68f-uuid", "FAILED", '{"pipeline_role":"weekly"}', _STAGES[:1], _D10),
+            (
+                "exercise-uuid",
+                "SUCCEEDED",
+                '{"pipeline_role":"exercise"}',
+                _STAGES,
+                _D10 + timedelta(hours=3),
+            ),
+        ]
+    )
+    w = read_reliability_window(
+        "arn:aws:states:us-east-1:1:stateMachine:sf", stage_order=_STAGES, client=client
+    )
+    assert [c.cycle_key for c in w.cycles] == ["2026-08-10"]
+    assert w.cycles[0].attempt_count == 1
+    assert w.cycles[0].attempts_to_success is None, (
+        "an exercise SUCCESS must not mark the cadence cycle recovered"
+    )
+
+
+def test_an_untagged_run_is_admitted_only_when_it_names_its_cycle():
+    from nousergon_lib.pipeline_status import read_reliability_window
+
+    client = _make_client_with(
+        [
+            ("manual-2026-08-10-a", "SUCCEEDED", "{}", _STAGES, _D10),
+            ("manual-opaque", "SUCCEEDED", "{}", _STAGES, _D10 + timedelta(hours=1)),
+        ]
+    )
+    w = read_reliability_window(
+        "arn:aws:states:us-east-1:1:stateMachine:sf", stage_order=_STAGES, client=client
+    )
+    assert [c.cycle_key for c in w.cycles] == ["2026-08-10"]
+    assert w.cycles[0].attempt_count == 1

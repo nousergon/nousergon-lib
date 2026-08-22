@@ -77,7 +77,6 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -126,38 +125,23 @@ DEFAULT_WALK_CAP: int = 60
 
 
 def cycle_key_for(describe_resp: Mapping[str, Any]) -> str | None:
-    """The cycle key of one execution — ``run_date``, name, or start date.
+    """The cycle key of one execution — delegates to :func:`~.read._extract_run_date`.
 
-    THREE sources, and the third is the one that matters. Measured 2026-08-22
-    against the live weekly state machine: every **scheduled** execution
-    (``pipeline_role: weekly``) carries ``run_date: None`` in its input and an
-    opaque UUID name, because ``run_date`` is not passed by EventBridge — the
-    state machine's own ``InitializeInput`` Pass state stamps it, from
-    ``$$.Execution.StartTime``::
+    THIS IS A THIN ALIAS AND MUST STAY ONE. The three-source resolution
+    (``input.run_date`` → execution name → ``startDate`` normalised to UTC)
+    lives in ``read._extract_run_date`` and nowhere else.
 
-        run_date = date($$.Execution.StartTime)   # step_function.json
-
-    So :func:`~.read._extract_run_date`, which reads only the input and the
-    name, returns ``None`` for every scheduled run of the pipeline, and any
-    cycle built from it contains only the operator reruns. On 2026-08-22 that
-    made the cycle look like three ``watch-rerun`` executions and hid the
-    02:00 scheduled run that did 14 of the 16 stages.
-
-    The third source is therefore **not a guess**: it is the identical
-    derivation the state machine performs on the identical field, so it
-    reproduces the value the execution itself used as its artifact key.
-    ``startDate`` is normalised to UTC first, because that is the timezone
-    ``States.StringSplit`` on ``$$.Execution.StartTime`` splits in.
+    It briefly lived here as a second implementation, because ``read``'s
+    resolver had only two sources and dropped every scheduled execution
+    (``alpha-engine-config-I8216``). Two resolvers for one key is how the cycle
+    surface and the reliability window start disagreeing about which
+    executions belong to which cycle — the defect one layer up from the one
+    the third source fixes. The fix was to lift the third source into
+    ``read``, not to keep a better copy beside it.
     """
     from .read import _extract_run_date  # local: avoids a cycle at import time
 
-    explicit = _extract_run_date(describe_resp)
-    if explicit:
-        return explicit
-    start = _parse_ts(describe_resp.get("startDate"))
-    if start is None:
-        return None
-    return start.astimezone(timezone.utc).date().isoformat()
+    return _extract_run_date(describe_resp)
 
 
 class CycleVerdict(str, Enum):
@@ -368,9 +352,9 @@ def read_cycle_shape(
     """Read every execution of ``run_date`` and fold them into one verdict.
 
     Walks ``ListExecutions`` newest-first up to ``walk_cap``, keeping the
-    executions whose ``run_date`` (input field, else execution name — the
-    same two sources :func:`~.read._extract_run_date` uses) equals the
-    requested cycle.
+    executions whose ``run_date`` (input field, else execution name, else
+    ``startDate`` in UTC — the three sources :func:`~.read._extract_run_date`
+    resolves) equals the requested cycle.
 
     Raises :class:`~.read.SFNAccessDenied` / :class:`~.read.SFNThrottled`
     rather than returning an empty cycle: a transport or authorization
