@@ -1,0 +1,203 @@
+{
+ "AggregateCosts": {
+  "stage": "AggregateCosts",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "llm_cost_parquet",
+   "llm_cost_capture_stream"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "llm_cost_parquet",
+   "llm_cost_capture_stream"
+  ],
+  "unmeasured": [],
+  "reason": "all 2 declared artifact(s) written in-window",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:23:03.661161+00:00",
+  "is_finding": false
+ },
+ "Counterfactual": {
+  "stage": "Counterfactual",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "product",
+  "declared_output": "variable_cardinality",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "writes `decision_artifacts/_counterfactual/{agent_id_base}/{run_id}.json` plus a per-agent `latest.json`. The latest pointer is per AGENT, and the supported-agent set is derived at runtime, so there is no single fixed key whose absence means the stage did nothing; needs `list_prefix_recent`.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T17:15:05.360630+00:00",
+  "is_finding": false
+ },
+ "EvalRollingMean": {
+  "stage": "EvalRollingMean",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "research_producer_leaderboard"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "research_producer_leaderboard"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:07:38.872323+00:00",
+  "is_finding": false
+ },
+ "LibPinDriftCheck": {
+  "stage": "LibPinDriftCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "fetches pins over GitHub raw and compares them; no S3/boto3 write call on this path.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:53:33.956753+00:00",
+  "is_finding": false
+ },
+ "PipelineContractCheck": {
+  "stage": "PipelineContractCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "GitHub-raw fetch plus local YAML validation; no S3/boto3 write call.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:53:35.333529+00:00",
+  "is_finding": false
+ },
+ "RationaleClustering": {
+  "stage": "RationaleClustering",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "product",
+  "declared_output": "variable_cardinality",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "writes `decision_artifacts/_analysis/{agent_id}/{YYYY-WW}.json` \u2014 per agent, keyed by ISO year-week rather than by date, and skipped per agent under MIN_RATIONALES_FOR_CLUSTERING. There is no fixed key and no latest pointer, so nothing here can be probed by template; needs `list_prefix_recent`.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:08:06.191594+00:00",
+  "is_finding": false
+ },
+ "RegimeRetrospectiveEval": {
+  "stage": "RegimeRetrospectiveEval",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "regime_retrospective_latest"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "regime_retrospective_latest"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:30:46.870568+00:00",
+  "is_finding": false
+ },
+ "RegimeSubstrate": {
+  "stage": "RegimeSubstrate",
+  "status": "MISSING",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "regime_state_dated",
+   "regime_state_latest"
+  ],
+  "missing": [
+   "regime_state_dated"
+  ],
+  "stale": [],
+  "covered": [
+   "regime_state_latest"
+  ],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) absent: regime_state_dated",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:02:50.113676+00:00",
+  "is_finding": true
+ },
+ "ReplayConcordance": {
+  "stage": "ReplayConcordance",
+  "status": "STALE",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "replay_concordance_summary_latest"
+  ],
+  "missing": [],
+  "stale": [
+   "replay_concordance_summary_latest"
+  ],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) predate this run's window: replay_concordance_summary_latest",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T17:15:23.486773+00:00",
+  "is_finding": false
+ },
+ "WeeklyRunDayGate": {
+  "stage": "WeeklyRunDayGate",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T09:00:54.847183+00:00",
+  "is_finding": false
+ },
+ "WeeklySubstrateHealthCheck": {
+  "stage": "WeeklySubstrateHealthCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "three read-only verifications (nousergon_lib.transparency, validators.constituents_drift_check, validators.phase_marker_sweep) that alert over SNS on failure; none contains a put_object call.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:57:32.899392+00:00",
+  "is_finding": false
+ }
+}

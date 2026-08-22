@@ -1,0 +1,44 @@
+{
+ "verdict": "incomplete",
+ "reason": "partial_cycle",
+ "execution_count": 4,
+ "stage_coverage": "14/16",
+ "stages_missing": [
+  "ParityParallel",
+  "PitParityCompare"
+ ],
+ "executions": [
+  {
+   "execution_name": "1ed4d68f-574b-7496-6196-cf052d7178ba_ab3ec94b-b6ea-10fe-bb4b-63c393d65199",
+   "pipeline_role": "weekly",
+   "status": "FAILED",
+   "verdict": "incomplete",
+   "reason": "execution_failed",
+   "stages_entered_count": 14
+  },
+  {
+   "execution_name": "watch-rerun-2026-08-22-1",
+   "pipeline_role": "watch-rerun",
+   "status": "FAILED",
+   "verdict": "incomplete",
+   "reason": "execution_failed",
+   "stages_entered_count": 1
+  },
+  {
+   "execution_name": "watch-rerun-2026-08-22-2",
+   "pipeline_role": "watch-rerun",
+   "status": "FAILED",
+   "verdict": "incomplete",
+   "reason": "execution_failed",
+   "stages_entered_count": 1
+  },
+  {
+   "execution_name": "watch-rerun-2026-08-22-3",
+   "pipeline_role": "watch-rerun",
+   "status": "SUCCEEDED",
+   "verdict": "incomplete",
+   "reason": "partial_success",
+   "stages_entered_count": 1
+  }
+ ]
+}
