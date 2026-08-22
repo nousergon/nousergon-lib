@@ -691,6 +691,28 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "Director render their grades against, so it surfaces there rather "
         "than as a page nobody would open on its own.",
     ),
+    # alpha-engine-config-I8214: the stage-coverage sweep at the tail of the
+    # weekly run, immediately after WriteCompletionMarker. The reader shipped
+    # here and nothing called it, so it detected nothing; the Lambda these two
+    # states invoke is its caller. It also augments the completion marker with
+    # the cycle's real shape — the 2026-08-22 marker was written by an
+    # execution that entered 1 of 16 declared stages and said nothing about it
+    # (alpha-engine-config-I8186).
+    "WeeklyCoverageSweep": ArtifactReason(
+        reason="Stage-coverage sweep (alpha-engine-config-I8214) — writes "
+        "_stage_coverage/_sweep/{pipeline}/{date}.json and merges the cycle's "
+        "real shape into _sf_completion/{pipeline}/{date}.json. Not an archive "
+        "page of its own: it is the VERDICT other surfaces carry, so it "
+        "surfaces on the completion marker and the Report Card rather than as "
+        "a page nobody would open on its own.",
+    ),
+    "WeeklyCoverageSweepUnavailable": ArtifactReason(
+        reason="The sweep DID NOT RUN — an SNS page, no artifact. It exists "
+        "because a sweep that never started cannot page for itself, and "
+        "'found nothing' and 'did not run' are different facts (principles.md "
+        "§2.7). Writing an artifact here would be the defect: an object whose "
+        "presence implies the surface was observed.",
+    ),
     "ReportCard": ArchivePageRef(
         page="Report_Card",
         artifact_label="System Report Card",
