@@ -34,6 +34,32 @@ on first build, not after the second consumer arrives.
 
 from __future__ import annotations
 
+from .completion_marker import (
+    MARKER_PREFIX,
+    augment_marker,
+    decode_marker,
+    marker_key,
+    marker_verdict,
+    merge_cycle_shape,
+    read_marker,
+)
+from .coverage import (
+    CoverageSweep,
+    RowState,
+    StageRow,
+    publish_sweep,
+    read_coverage_sweep,
+    render_rows,
+    sweep_coverage,
+)
+from .cycle_shape import (
+    CONTRIBUTING_ROLES,
+    CycleExecution,
+    CycleShape,
+    CycleVerdict,
+    build_cycle_shape,
+    read_cycle_shape,
+)
 from .cycles import (
     AttemptOutcome,
     CycleReliability,
@@ -87,6 +113,26 @@ from .work import (
 
 __all__ = [
     "ADHOC_ROLES",
+    "CONTRIBUTING_ROLES",
+    "MARKER_PREFIX",
+    "augment_marker",
+    "decode_marker",
+    "marker_key",
+    "marker_verdict",
+    "merge_cycle_shape",
+    "read_marker",
+    "CoverageSweep",
+    "CycleExecution",
+    "CycleShape",
+    "CycleVerdict",
+    "RowState",
+    "StageRow",
+    "build_cycle_shape",
+    "publish_sweep",
+    "read_coverage_sweep",
+    "read_cycle_shape",
+    "render_rows",
+    "sweep_coverage",
     "AttemptOutcome",
     "ALL_ROLES",
     "ArchivePageRef",

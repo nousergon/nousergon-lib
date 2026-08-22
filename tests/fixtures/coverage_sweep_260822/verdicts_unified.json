@@ -1,0 +1,668 @@
+{
+ "AggregateCosts": {
+  "stage": "AggregateCosts",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "llm_cost_parquet",
+   "llm_cost_capture_stream"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "llm_cost_parquet",
+   "llm_cost_capture_stream"
+  ],
+  "unmeasured": [],
+  "reason": "all 2 declared artifact(s) written in-window",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:23:03.661161+00:00",
+  "is_finding": false
+ },
+ "Backtester": {
+  "stage": "Backtester",
+  "status": "MISSING",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "backtest_report",
+   "backtest_metrics",
+   "backtest_numeric_attestation",
+   "backtest_attractiveness_eval",
+   "backtest_cov_estimator_sweep",
+   "backtest_gamma_sweep",
+   "backtest_optimizer_param_sweep",
+   "backtest_horizon_net_alpha",
+   "backtest_model_version_net_alpha",
+   "backtest_double_sort",
+   "backtest_sizing_shootout",
+   "backtest_sizing_ab",
+   "backtest_portfolio_excursion",
+   "health_alpha_engine_backtester"
+  ],
+  "missing": [
+   "backtest_attractiveness_eval",
+   "backtest_cov_estimator_sweep",
+   "backtest_gamma_sweep",
+   "backtest_horizon_net_alpha",
+   "backtest_model_version_net_alpha",
+   "backtest_double_sort",
+   "backtest_sizing_shootout",
+   "backtest_portfolio_excursion"
+  ],
+  "stale": [],
+  "covered": [
+   "backtest_report",
+   "backtest_metrics",
+   "backtest_numeric_attestation",
+   "backtest_optimizer_param_sweep",
+   "backtest_sizing_ab",
+   "health_alpha_engine_backtester"
+  ],
+  "unmeasured": [],
+  "reason": "8 declared artifact(s) absent: backtest_attractiveness_eval, backtest_cov_estimator_sweep, backtest_gamma_sweep, backtest_horizon_net_alpha, backtest_model_version_net_alpha, backtest_double_sort, backtest_sizing_shootout, backtest_portfolio_excursion",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:47:52.763868+00:00",
+  "is_finding": true
+ },
+ "ChallengerShadow": {
+  "stage": "ChallengerShadow",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "research_signals_shadow_no_agent",
+   "research_signals_shadow_single_agent",
+   "experiment_record_no_agent_quant",
+   "experiment_record_single_agent_quant"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "research_signals_shadow_no_agent",
+   "research_signals_shadow_single_agent",
+   "experiment_record_no_agent_quant",
+   "experiment_record_single_agent_quant"
+  ],
+  "unmeasured": [],
+  "reason": "all 4 declared artifact(s) written in-window",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:08:57.763796+00:00",
+  "is_finding": false
+ },
+ "Counterfactual": {
+  "stage": "Counterfactual",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "product",
+  "declared_output": "variable_cardinality",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "writes `decision_artifacts/_counterfactual/{agent_id_base}/{run_id}.json` plus a per-agent `latest.json`. The latest pointer is per AGENT, and the supported-agent set is derived at runtime, so there is no single fixed key whose absence means the stage did nothing; needs `list_prefix_recent`.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T17:15:05.360630+00:00",
+  "is_finding": false
+ },
+ "DataPhase1": {
+  "stage": "DataPhase1",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "weekly_collector_manifest",
+   "weekly_collector_latest_pointer",
+   "constituents_dated",
+   "macro_snapshot",
+   "short_interest_snapshot",
+   "price_cache_freshness_sentinel",
+   "macro_history",
+   "macro_release_calendar",
+   "fundamentals_snapshot",
+   "universe_classification_latest",
+   "metron_valuation_medians"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "weekly_collector_manifest",
+   "weekly_collector_latest_pointer",
+   "constituents_dated",
+   "macro_snapshot",
+   "short_interest_snapshot",
+   "price_cache_freshness_sentinel",
+   "macro_history",
+   "macro_release_calendar",
+   "fundamentals_snapshot",
+   "universe_classification_latest",
+   "metron_valuation_medians"
+  ],
+  "unmeasured": [],
+  "reason": "all 11 declared artifact(s) written in-window",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T10:59:19.759888+00:00",
+  "is_finding": false
+ },
+ "DataPhase2": {
+  "stage": "DataPhase2",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "weekly_alternative_scope_marker",
+   "weekly_alternative_manifest"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "weekly_alternative_scope_marker",
+   "weekly_alternative_manifest"
+  ],
+  "unmeasured": [],
+  "reason": "all 2 declared artifact(s) written in-window",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:06:01.652337+00:00",
+  "is_finding": false
+ },
+ "Director": {
+  "stage": "Director",
+  "status": "UNMEASURED",
+  "stage_class": "",
+  "declared_output": "",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "registry unreadable: AccessDenied: An error occurred (AccessDenied) when calling the GetObject operation: User: arn:aws:sts::711398986525:assumed-role/alpha-engine-evaluator-role/alpha-engine-evaluator-director is not authorized to perform: s3:GetObject on resource: \"arn:aws:s3:::alpha-engine-research/_freshness_monitor/ARTIFACT_REGISTRY.yaml\" because no identity-based policy allows the s3:GetObject action",
+  "run_date": "2026-08-21",
+  "cycle_date": "",
+  "recorded_at": "2026-08-22T16:07:08.211707+00:00",
+  "is_finding": false
+ },
+ "EvalRollingMean": {
+  "stage": "EvalRollingMean",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "research_producer_leaderboard"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "research_producer_leaderboard"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:07:38.872323+00:00",
+  "is_finding": false
+ },
+ "EvaluatorDeployDriftCheck": {
+  "stage": "EvaluatorDeployDriftCheck",
+  "status": "UNMEASURED",
+  "stage_class": "",
+  "declared_output": "",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "registry unreadable: AccessDenied: An error occurred (AccessDenied) when calling the GetObject operation: User: arn:aws:sts::711398986525:assumed-role/alpha-engine-evaluator-role/alpha-engine-evaluator is not authorized to perform: s3:GetObject on resource: \"arn:aws:s3:::alpha-engine-research/_freshness_monitor/ARTIFACT_REGISTRY.yaml\" because no identity-based policy allows the s3:GetObject action",
+  "run_date": "2026-08-21",
+  "cycle_date": "",
+  "recorded_at": "2026-08-22T15:53:38.631906+00:00",
+  "is_finding": false
+ },
+ "EvaluatorDiagnostics": {
+  "stage": "EvaluatorDiagnostics",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "evaluator_diagnostics_snapshot"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "evaluator_diagnostics_snapshot"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T13:55:10.203246+00:00",
+  "is_finding": false
+ },
+ "EvaluatorDirectorDeployDriftCheck": {
+  "stage": "EvaluatorDirectorDeployDriftCheck",
+  "status": "UNMEASURED",
+  "stage_class": "",
+  "declared_output": "",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "registry unreadable: AccessDenied: An error occurred (AccessDenied) when calling the GetObject operation: User: arn:aws:sts::711398986525:assumed-role/alpha-engine-evaluator-role/alpha-engine-evaluator-director is not authorized to perform: s3:GetObject on resource: \"arn:aws:s3:::alpha-engine-research/_freshness_monitor/ARTIFACT_REGISTRY.yaml\" because no identity-based policy allows the s3:GetObject action",
+  "run_date": "2026-08-21",
+  "cycle_date": "",
+  "recorded_at": "2026-08-22T15:53:41.404485+00:00",
+  "is_finding": false
+ },
+ "EvaluatorOptimize": {
+  "stage": "EvaluatorOptimize",
+  "status": "STALE",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "config_apply_audit",
+   "optimizer_run_manifest",
+   "research_producer_leaderboard_champion_gate",
+   "config_apply_audit_producer_champion",
+   "backtest_grade_history"
+  ],
+  "missing": [],
+  "stale": [
+   "backtest_grade_history"
+  ],
+  "covered": [
+   "config_apply_audit",
+   "optimizer_run_manifest",
+   "research_producer_leaderboard_champion_gate",
+   "config_apply_audit_producer_champion"
+  ],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) predate this run's window: backtest_grade_history",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T13:59:27.205379+00:00",
+  "is_finding": false
+ },
+ "LibPinDriftCheck": {
+  "stage": "LibPinDriftCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "fetches pins over GitHub raw and compares them; no S3/boto3 write call on this path.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:53:33.956753+00:00",
+  "is_finding": false
+ },
+ "ModelZooSelect": {
+  "stage": "ModelZooSelect",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "model_zoo_leaderboard_latest",
+   "model_zoo_trial_log"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "model_zoo_leaderboard_latest",
+   "model_zoo_trial_log"
+  ],
+  "unmeasured": [],
+  "reason": "all 2 declared artifact(s) written in-window",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:48:05.286088+00:00",
+  "is_finding": false
+ },
+ "MorningEnrich": {
+  "stage": "MorningEnrich",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "daily_closes_parquet"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "daily_closes_parquet"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T09:35:45.540798+00:00",
+  "is_finding": false
+ },
+ "PipelineContractCheck": {
+  "stage": "PipelineContractCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "GitHub-raw fetch plus local YAML validation; no S3/boto3 write call.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:53:35.333529+00:00",
+  "is_finding": false
+ },
+ "PortfolioOptimizerBacktest": {
+  "stage": "PortfolioOptimizerBacktest",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "backtest_optimizer_gate_dated",
+   "backtest_optimizer_gate_latest"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "backtest_optimizer_gate_dated",
+   "backtest_optimizer_gate_latest"
+  ],
+  "unmeasured": [],
+  "reason": "all 2 declared artifact(s) written in-window",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T13:41:27.283317+00:00",
+  "is_finding": false
+ },
+ "PredictorBacktest": {
+  "stage": "PredictorBacktest",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "backtest_predictor_stats",
+   "research_free_backfill"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "backtest_predictor_stats",
+   "research_free_backfill"
+  ],
+  "unmeasured": [],
+  "reason": "all 2 declared artifact(s) written in-window",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T13:17:06.253338+00:00",
+  "is_finding": false
+ },
+ "PredictorTraining": {
+  "stage": "PredictorTraining",
+  "status": "STALE",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "predictor_meta_weights_manifest",
+   "predictor_meta_champion_weights",
+   "predictor_training_summary_dated",
+   "predictor_training_summary_latest",
+   "predictor_oos_rows_dated",
+   "predictor_oos_rows_latest",
+   "predictor_risk_model_factor_matrix",
+   "predictor_risk_model_metadata"
+  ],
+  "missing": [],
+  "stale": [
+   "predictor_meta_champion_weights"
+  ],
+  "covered": [
+   "predictor_meta_weights_manifest",
+   "predictor_training_summary_dated",
+   "predictor_training_summary_latest",
+   "predictor_oos_rows_dated",
+   "predictor_oos_rows_latest",
+   "predictor_risk_model_factor_matrix",
+   "predictor_risk_model_metadata"
+  ],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) predate this run's window: predictor_meta_champion_weights",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:14:38.123674+00:00",
+  "is_finding": false
+ },
+ "RAGIngestion": {
+  "stage": "RAGIngestion",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "rag_corpus_freshness"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "rag_corpus_freshness"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:30:27.303597+00:00",
+  "is_finding": false
+ },
+ "RationaleClustering": {
+  "stage": "RationaleClustering",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "product",
+  "declared_output": "variable_cardinality",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "writes `decision_artifacts/_analysis/{agent_id}/{YYYY-WW}.json` \u2014 per agent, keyed by ISO year-week rather than by date, and skipped per agent under MIN_RATIONALES_FOR_CLUSTERING. There is no fixed key and no latest pointer, so nothing here can be probed by template; needs `list_prefix_recent`.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T12:08:06.191594+00:00",
+  "is_finding": false
+ },
+ "RegimeRetrospectiveEval": {
+  "stage": "RegimeRetrospectiveEval",
+  "status": "COVERED",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "regime_retrospective_latest"
+  ],
+  "missing": [],
+  "stale": [],
+  "covered": [
+   "regime_retrospective_latest"
+  ],
+  "unmeasured": [],
+  "reason": "all 1 declared artifact(s) written in-window",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:30:46.870568+00:00",
+  "is_finding": false
+ },
+ "RegimeSubstrate": {
+  "stage": "RegimeSubstrate",
+  "status": "MISSING",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "regime_state_dated",
+   "regime_state_latest"
+  ],
+  "missing": [
+   "regime_state_dated"
+  ],
+  "stale": [],
+  "covered": [
+   "regime_state_latest"
+  ],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) absent: regime_state_dated",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:02:50.113676+00:00",
+  "is_finding": true
+ },
+ "ReplayConcordance": {
+  "stage": "ReplayConcordance",
+  "status": "STALE",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "replay_concordance_summary_latest"
+  ],
+  "missing": [],
+  "stale": [
+   "replay_concordance_summary_latest"
+  ],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) predate this run's window: replay_concordance_summary_latest",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T17:15:23.486773+00:00",
+  "is_finding": false
+ },
+ "SaturdayHealthCheck": {
+  "stage": "SaturdayHealthCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "`health_checker.py --alert` performs head_object / list_objects_v2 READS for freshness and publishes to SNS on failure; there is no put_object call in the file.",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:56:59.315409+00:00",
+  "is_finding": false
+ },
+ "Scanner": {
+  "stage": "Scanner",
+  "status": "MISSING",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "scanner_candidates_json",
+   "universe_membership_latest",
+   "universe_board_latest",
+   "scanner_candidates_shadow_momentum_sleeve",
+   "factor_profiles_latest",
+   "factor_profiles_provenance",
+   "scanner_universe_attractiveness_history"
+  ],
+  "missing": [
+   "scanner_candidates_shadow_momentum_sleeve"
+  ],
+  "stale": [],
+  "covered": [
+   "scanner_candidates_json",
+   "universe_membership_latest",
+   "universe_board_latest",
+   "factor_profiles_latest",
+   "factor_profiles_provenance",
+   "scanner_universe_attractiveness_history"
+  ],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) absent: scanner_candidates_shadow_momentum_sleeve",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:02:42.564075+00:00",
+  "is_finding": true
+ },
+ "SignalsEnvelope": {
+  "stage": "SignalsEnvelope",
+  "status": "STALE",
+  "stage_class": "product",
+  "declared_output": "registered",
+  "expected": [
+   "research_signals",
+   "research_consolidated_morning",
+   "scanner_universe_trajectory",
+   "research_db_backup"
+  ],
+  "missing": [],
+  "stale": [
+   "research_db_backup"
+  ],
+  "covered": [
+   "research_signals",
+   "research_consolidated_morning",
+   "scanner_universe_trajectory"
+  ],
+  "unmeasured": [],
+  "reason": "1 declared artifact(s) predate this run's window: research_db_backup",
+  "run_date": "2026-08-21",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:04:32.742232+00:00",
+  "is_finding": false
+ },
+ "TrainSpecDispatch": {
+  "stage": "TrainSpecDispatch",
+  "status": "UNMEASURED",
+  "stage_class": "",
+  "declared_output": "",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "stage 'TrainSpecDispatch' has no row in pipeline_stages: \u2014 it has declared nothing, which is not the same as declaring it writes nothing",
+  "run_date": "",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T11:44:33.898868+00:00",
+  "is_finding": false
+ },
+ "WeeklyRunDayGate": {
+  "stage": "WeeklyRunDayGate",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "pure NYSE-calendar arithmetic; `inference/trading_day_gate.py` constructs no boto3 client and contains no S3/Arctic/DynamoDB reference.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T09:00:54.847183+00:00",
+  "is_finding": false
+ },
+ "WeeklySubstrateHealthCheck": {
+  "stage": "WeeklySubstrateHealthCheck",
+  "status": "COVERED_NO_OUTPUT",
+  "stage_class": "infrastructure",
+  "declared_output": "none",
+  "expected": [],
+  "missing": [],
+  "stale": [],
+  "covered": [],
+  "unmeasured": [],
+  "reason": "three read-only verifications (nousergon_lib.transparency, validators.constituents_drift_check, validators.phase_marker_sweep) that alert over SNS on failure; none contains a put_object call.",
+  "run_date": "2026-08-22",
+  "cycle_date": "2026-08-21",
+  "recorded_at": "2026-08-22T15:57:32.899392+00:00",
+  "is_finding": false
+ }
+}

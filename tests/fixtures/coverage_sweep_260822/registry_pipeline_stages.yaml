@@ -1,0 +1,254 @@
+pipeline_stages:
+- stage: MorningEnrich
+  stage_class: product
+  output: registered
+  artifacts:
+  - daily_closes_parquet
+- stage: DataPhase1
+  stage_class: product
+  output: registered
+  artifacts:
+  - weekly_collector_manifest
+  - weekly_collector_latest_pointer
+  - constituents_dated
+  - macro_snapshot
+  - short_interest_snapshot
+  - price_cache_freshness_sentinel
+  - macro_history
+  - macro_release_calendar
+  - fundamentals_snapshot
+  - universe_classification_latest
+  - metron_valuation_medians
+- stage: DataPhase2
+  stage_class: product
+  output: registered
+  artifacts:
+  - weekly_alternative_scope_marker
+  - weekly_alternative_manifest
+- stage: Scanner
+  stage_class: product
+  output: registered
+  artifacts:
+  - scanner_candidates_json
+  - universe_membership_latest
+  - universe_board_latest
+  - factor_profiles_latest
+  - factor_profiles_provenance
+  - scanner_universe_attractiveness_history
+- stage: ScannerLeaderboard
+  stage_class: product
+  output: registered
+  artifacts:
+  - scanner_leaderboard
+- stage: ProbeUniverseMembershipPointer
+  stage_class: infrastructure
+  output: none
+- stage: SignalsEnvelope
+  stage_class: product
+  output: registered
+  artifacts:
+  - research_signals
+  - research_consolidated_morning
+  - scanner_universe_trajectory
+  - research_db_backup
+- stage: ChallengerShadow
+  stage_class: product
+  output: registered
+  artifacts:
+  - research_signals_shadow_no_agent
+  - research_signals_shadow_single_agent
+  - experiment_record_no_agent_quant
+  - experiment_record_single_agent_quant
+- stage: RAGIngestion
+  stage_class: product
+  output: registered
+  artifacts:
+  - rag_corpus_freshness
+- stage: RegimeSubstrate
+  stage_class: product
+  output: registered
+  artifacts:
+  - regime_state_latest
+- stage: RegimeRetrospectiveEval
+  stage_class: product
+  output: registered
+  artifacts:
+  - regime_retrospective_latest
+- stage: PredictorTraining
+  stage_class: product
+  output: registered
+  artifacts:
+  - predictor_meta_weights_manifest
+  - predictor_meta_champion_weights
+  - predictor_training_summary_dated
+  - predictor_training_summary_latest
+  - predictor_oos_rows_dated
+  - predictor_oos_rows_latest
+  - predictor_risk_model_factor_matrix
+  - predictor_risk_model_metadata
+- stage: ResolveZooSpecs
+  stage_class: product
+  output: none
+- stage: TrainSpecDispatch
+  stage_class: product
+  output: variable_cardinality
+- stage: ModelZooSelect
+  stage_class: product
+  output: registered
+  artifacts:
+  - model_zoo_leaderboard_latest
+  - model_zoo_trial_log
+- stage: Backtester
+  stage_class: product
+  output: registered
+  artifacts:
+  - backtest_report
+  - backtest_metrics
+  - backtest_numeric_attestation
+  - backtest_sizing_ab
+  - health_alpha_engine_backtester
+- stage: PredictorBacktest
+  stage_class: product
+  output: registered
+  artifacts:
+  - backtest_predictor_stats
+  - research_free_backfill
+- stage: PortfolioOptimizerBacktest
+  stage_class: product
+  output: registered
+  artifacts:
+  - backtest_optimizer_gate_dated
+  - backtest_optimizer_gate_latest
+- stage: PitParityLookahead
+  stage_class: product
+  output: registered
+  artifacts:
+  - parity_pit_stats_lookahead
+- stage: PitParityWalkforward
+  stage_class: product
+  output: registered
+  artifacts:
+  - parity_pit_stats_walkforward
+- stage: PitParityCompare
+  stage_class: product
+  output: registered
+  artifacts:
+  - backtest_pit_parity
+- stage: ParityReplay
+  stage_class: product
+  output: registered
+  artifacts:
+  - backtest_parity_report
+- stage: EvalJudgeSubmitWeekly
+  stage_class: product
+  output: variable_cardinality
+- stage: EvalJudgeSubmitFirstSaturday
+  stage_class: product
+  output: variable_cardinality
+- stage: EvalJudgePoll
+  stage_class: product
+  output: none
+- stage: EvalJudgeProcess
+  stage_class: product
+  output: registered
+  artifacts:
+  - eval_artifact_latest
+- stage: EvalRollingMean
+  stage_class: product
+  output: registered
+  artifacts:
+  - research_producer_leaderboard
+- stage: RationaleClustering
+  stage_class: product
+  output: variable_cardinality
+- stage: ReplayConcordance
+  stage_class: product
+  output: registered
+  artifacts:
+  - replay_concordance_summary_latest
+- stage: Counterfactual
+  stage_class: product
+  output: variable_cardinality
+- stage: EvaluatorDiagnostics
+  stage_class: product
+  output: registered
+  artifacts:
+  - evaluator_diagnostics_snapshot
+- stage: EvaluatorOptimize
+  stage_class: product
+  output: registered
+  artifacts:
+  - config_apply_audit
+  - optimizer_run_manifest
+  - research_producer_leaderboard_champion_gate
+  - config_apply_audit_producer_champion
+  - backtest_grade_history
+  - backtest_attractiveness_eval
+  - backtest_portfolio_excursion
+- stage: ReportCard
+  stage_class: product
+  output: registered
+  artifacts:
+  - evaluator_report_card
+  - experiment_record_reference
+- stage: Director
+  stage_class: product
+  output: registered
+  artifacts:
+  - director_action_plan
+  - director_carryover_ledger
+- stage: AggregateCosts
+  stage_class: product
+  output: registered
+  artifacts:
+  - llm_cost_parquet
+  - llm_cost_capture_stream
+- stage: WeeklyRunDayGate
+  stage_class: infrastructure
+  output: none
+- stage: LibPinDriftCheck
+  stage_class: infrastructure
+  output: none
+- stage: PipelineContractCheck
+  stage_class: infrastructure
+  output: none
+- stage: EvaluatorDeployDriftCheck
+  stage_class: infrastructure
+  output: none
+- stage: EvaluatorDirectorDeployDriftCheck
+  stage_class: infrastructure
+  output: none
+- stage: WeeklyPreflight
+  stage_class: infrastructure
+  output: none
+- stage: DispatchWeeklyFreshnessSpot
+  stage_class: infrastructure
+  output: variable_cardinality
+- stage: RelaunchWeeklyFreshnessSpot
+  stage_class: infrastructure
+  output: variable_cardinality
+- stage: SubstrateHealthGate
+  stage_class: infrastructure
+  output: none
+- stage: SaturdayHealthCheck
+  stage_class: infrastructure
+  output: none
+- stage: ResearchSelfTest
+  stage_class: product
+  output: registered
+  artifacts:
+  - research_self_test
+- stage: RunScope
+  stage_class: product
+  output: registered
+  artifacts:
+  - weekly_run_scope
+- stage: WeeklySubstrateHealthCheck
+  stage_class: infrastructure
+  output: none
+- stage: PitParityLookaheadResourceKillCheck
+  stage_class: infrastructure
+  output: none
+- stage: PitParityWalkforwardResourceKillCheck
+  stage_class: infrastructure
+  output: none
