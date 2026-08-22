@@ -96,10 +96,10 @@ def _make_sfn_mock(
     return client
 
 
-def _boto_client_error(code: str) -> Exception:
+def _boto_client_error(code: str, message: str = "test") -> Exception:
     """Build an exception shaped like botocore.exceptions.ClientError."""
-    exc = Exception(f"boto3 simulated {code}")
-    exc.response = {"Error": {"Code": code, "Message": "test"}}  # type: ignore[attr-defined]
+    exc = Exception(f"boto3 simulated {code}: {message}")
+    exc.response = {"Error": {"Code": code, "Message": message}}  # type: ignore[attr-defined]
     return exc
 
 
@@ -382,6 +382,41 @@ def test_read_pipeline_state_history_access_denied_raises_typed():
     with pytest.raises(SFNAccessDenied) as exc_info:
         read_pipeline_state(SATURDAY_ARN, client=client)
     assert "GetExecutionHistory" in str(exc_info.value)
+
+
+def test_access_denied_names_the_actual_denied_role_not_a_hardcoded_one():
+    """alpha-engine-config-I8080: the remedy text used to hardcode "the
+    dashboard EC2 role" regardless of which role was actually denied — on
+    2026-08-21 the real denied principal was ``alpha-engine-evaluator-role``,
+    and the message sent the reader to the wrong role every time it fired.
+    The remedy must name whatever role IAM's own error text names.
+    """
+    denied_message = (
+        "User: arn:aws:sts::711398986525:assumed-role/alpha-engine-evaluator-role/"
+        "alpha-engine-evaluator is not authorized to perform: "
+        "states:GetExecutionHistory on resource: "
+        "execution:ne-postclose-trading-pipeline:eod-2026-08-21-1787342451"
+    )
+    exc = _boto_client_error("AccessDeniedException", message=denied_message)
+    client = _make_sfn_mock(history_exc=exc)
+    with pytest.raises(SFNAccessDenied) as exc_info:
+        read_pipeline_state(SATURDAY_ARN, client=client)
+    text = str(exc_info.value)
+    assert "alpha-engine-evaluator-role" in text
+    assert "dashboard EC2 role" not in text
+
+
+def test_access_denied_falls_back_gracefully_when_role_is_unparseable():
+    """A synthetic/mocked AccessDenied with no `assumed-role/...` shape must
+    not crash the remedy-text builder — it degrades to a role-agnostic
+    instruction rather than raising a second, unrelated exception."""
+    exc = _boto_client_error("AccessDeniedException", message="access denied, no principal given")
+    client = _make_sfn_mock(list_exc=exc)
+    with pytest.raises(SFNAccessDenied) as exc_info:
+        read_pipeline_state(SATURDAY_ARN, client=client)
+    text = str(exc_info.value)
+    assert "dashboard EC2 role" not in text
+    assert "the calling role" in text
 
 
 def test_read_pipeline_state_unknown_boto_error_raises_pipeline_status_error():
