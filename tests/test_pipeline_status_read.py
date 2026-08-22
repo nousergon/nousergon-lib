@@ -828,7 +828,7 @@ def test_list_recent_pipeline_runs_carries_run_date():
     assert client.describe_execution.call_count == 2
 
 
-def test_list_recent_pipeline_runs_falls_back_to_the_start_date(): 
+def test_list_recent_pipeline_runs_falls_back_to_the_start_date():
     """The third source (alpha-engine-config-I8216).
 
     CHANGED FIXTURE — this test previously asserted `run_date is None` for an
