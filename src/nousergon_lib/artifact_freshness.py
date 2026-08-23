@@ -712,10 +712,18 @@ def _format_key(template: str, cycle_label: str, cycle_tick: datetime) -> str:
     Supported placeholders:
 
     - ``{date}``: ISO date of the cycle (Saturday for saturday_sf;
-      trading day for weekday_sf / eod_sf; bucket-start date for
-      continuous).
-    - ``{trading_day}``: alias for ``{date}`` (registry convention —
-      semantic name for date-keyed trading-day artifacts).
+      calendar/bucket-start date for continuous; the SF firing date for
+      weekday_sf / eod_sf when the template itself keys on calendar).
+    - ``{trading_day}``: ``last_closed_trading_day(cycle_tick)`` — the
+      NYSE session the artifact's *data* refers to, per the fleet
+      ``now_dual()`` convention. Must NOT be aliased to ``{date}``: a
+      continuous 7-day producer (Think Tank events) partitions weekend
+      writes onto Friday's trading-day key, and a Sunday probe that
+      expected ``…/2026-08-23.jsonl`` while the freshest instance was
+      ``…/2026-08-21.jsonl`` is exactly the false canonical_key that
+      landed in freshness page ``01a02e7f51225b4da307617c4008``
+      (alpha-engine-config-I8240). Age classification still walks the
+      prefix; the key must still name the object the producer writes.
     - ``{cycle_label}``: the raw cycle label (e.g. ``"2026-W22"``).
 
     Templates without placeholders pass through unchanged (the
@@ -723,9 +731,10 @@ def _format_key(template: str, cycle_label: str, cycle_tick: datetime) -> str:
     from ``last_modified``).
     """
     iso = cycle_tick.date().isoformat()
+    trading_day = last_closed_trading_day(cycle_tick).isoformat()
     return template.format(
         date=iso,
-        trading_day=iso,
+        trading_day=trading_day,
         cycle_label=cycle_label,
     )
 

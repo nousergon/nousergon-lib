@@ -54,6 +54,8 @@ from nousergon_lib.artifact_freshness import (
     resolve_current_cycle,
     resolve_dedup_key,
 )
+from nousergon_lib.artifact_freshness import _format_key  # noqa: PLC2701 — unit-test the key axis split
+from nousergon_lib.trading_calendar import last_closed_trading_day
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -330,6 +332,49 @@ class TestResolveCurrentCycle:
         now_naive = datetime(2026, 5, 30, 18, 0)
         assert resolve_current_cycle(_spec(), now_aware) == \
             resolve_current_cycle(_spec(), now_naive)
+
+
+# ── _format_key trading_day axis (alpha-engine-config-I8240) ────────────────
+
+
+class TestFormatKeyTradingDayAxis:
+    """``{trading_day}`` must follow last_closed_trading_day, not the
+    calendar/bucket date. Think Tank events write
+    ``thinktank/events/{trading_day}.jsonl`` 7 days/week onto the last
+    closed NYSE session; a Sunday probe that named ``…/2026-08-23.jsonl``
+    while the producer wrote Friday's key is the defect I8240 closes.
+    """
+
+    def test_continuous_sunday_trading_day_is_last_closed_session(self):
+        # Sun 2026-08-23 12:00 UTC — continuous bucket tick is Sunday;
+        # last closed NYSE session is Fri 2026-08-21.
+        tick = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        key = _format_key(
+            "thinktank/events/{trading_day}.jsonl",
+            "continuous_1440m_0",
+            tick,
+        )
+        assert key == "thinktank/events/2026-08-21.jsonl"
+        assert last_closed_trading_day(tick) == date(2026, 8, 21)
+
+    def test_date_placeholder_stays_on_calendar_axis(self):
+        tick = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+        key = _format_key(
+            "path/{date}/file.json",
+            "continuous_1440m_0",
+            tick,
+        )
+        assert key == "path/2026-08-23/file.json"
+
+    def test_saturday_sf_trading_day_is_prior_friday(self):
+        # Sat 2026-08-22 09:00 UTC Saturday-SF tick → trading_day Fri 08-21.
+        tick = datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc)
+        key = _format_key(
+            "signals/{trading_day}/signals.json",
+            "2026-W34",
+            tick,
+        )
+        assert key == "signals/2026-08-21/signals.json"
 
 
 # ── resolve_dedup_key ───────────────────────────────────────────────────────
