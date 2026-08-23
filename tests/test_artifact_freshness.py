@@ -45,6 +45,7 @@ from nousergon_lib.artifact_freshness import (
     CompletenessCheck,
     CycleCompletion,
     DependencyGraph,
+    _format_key,  # noqa: PLC2701 — unit-test the key axis split
     build_dependency_graph,
     check_completeness,
     check_freshness,
@@ -54,7 +55,6 @@ from nousergon_lib.artifact_freshness import (
     resolve_current_cycle,
     resolve_dedup_key,
 )
-from nousergon_lib.artifact_freshness import _format_key  # noqa: PLC2701 — unit-test the key axis split
 from nousergon_lib.trading_calendar import last_closed_trading_day
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
