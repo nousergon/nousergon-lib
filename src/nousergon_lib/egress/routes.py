@@ -73,7 +73,9 @@ class UnsupportedContractVersion(RuntimeError):
 def _read(name: str) -> dict[str, Any]:
     if _files is None:  # pragma: no cover
         raise RuntimeError("importlib.resources.files is unavailable")
-    return json.loads(_files(__package__).joinpath(name).read_text(encoding="utf-8"))
+    # The package name as a literal, not ``__package__``: that is typed
+    # ``str | None`` and pyright rejects it as an ``anchor`` argument.
+    return json.loads(_files("nousergon_lib.egress").joinpath(name).read_text(encoding="utf-8"))
 
 
 def load_contract() -> dict[str, Any]:
