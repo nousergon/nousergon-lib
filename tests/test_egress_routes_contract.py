@@ -60,8 +60,9 @@ def test_an_unknown_table_raises_rather_than_reading_as_empty():
 
 def test_hosts_are_returned_as_a_set_of_names():
     box = routes.box_upstream_hosts()
-    assert "api.deepseek.com" in box
+    assert box, "an empty table would make every consumer check pass vacuously"
     assert all(isinstance(h, str) and h for h in box)
+    assert box == {r["upstream_host"] for r in routes.table("box")}
 
 
 def test_the_contract_carries_no_credential_material():
