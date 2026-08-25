@@ -110,7 +110,7 @@ where = ["src"]
 "nousergon_lib" = ["transparency_inventory.yaml", "py.typed"]
 "nousergon_lib.contracts" = ["*.schema.json"]
 "nousergon_lib.rag" = ["schema.sql", "migrations/*.sql"]
-"nousergon_lib.egress" = ["gitleaks-egress.toml", "gitleaks-custom.toml"]
+"nousergon_lib.egress" = ["gitleaks-egress.toml", "gitleaks-custom.toml", "routes.v1.json", "routes.schema.v1.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

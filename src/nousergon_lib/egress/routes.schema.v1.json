@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nousergon/nousergon-lib/blob/main/src/nousergon_lib/egress/routes.schema.v1.json",
+  "title": "LLM egress proxy route contract, v1",
+  "description": "The set of upstream hosts a multi-tenant LLM egress proxy deployment serves, and how each is authenticated. Produced from the proxy's own launcher; a consumer reads this artifact and never restates it. Carries no credential, no key-environment name, no listen port, and no host of ours.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "produced_by", "produced_from", "consumer_note", "tables"],
+  "properties": {
+    "schema_version": {
+      "description": "Bumped only for a breaking shape change. Consumers must refuse a version they do not understand rather than reading it partially.",
+      "type": "integer",
+      "const": 1
+    },
+    "produced_by": {
+      "description": "Repo-relative path of the generator that derives this file. Its --check mode fails the producer's CI when the launchers and this file diverge.",
+      "type": "string",
+      "minLength": 1
+    },
+    "produced_from": {
+      "description": "Table name to the repo-relative launcher it was derived from, in the private producer repo.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "consumer_note": {"type": "string", "minLength": 1},
+    "tables": {
+      "description": "One entry per proxy DEPLOYMENT. Deployments are never unioned: a host served by one is not thereby served by another.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["description", "routes"],
+        "properties": {
+          "description": {"type": "string", "minLength": 1},
+          "routes": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["upstream_host", "auth_mode", "path_prefix"],
+              "properties": {
+                "upstream_host": {
+                  "description": "Third-party provider endpoint the proxy will forward to when a request carries this value in X-Upstream-Host. A host absent here is refused with `unknown upstream host`.",
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._-]+$"
+                },
+                "auth_mode": {
+                  "description": "keyed: the proxy substitutes a credential it holds. passthrough: the client's own credential is forwarded unchanged.",
+                  "type": "string",
+                  "enum": ["keyed", "passthrough"]
+                },
+                "path_prefix": {
+                  "description": "The upstream's API path root, prepended by the proxy. null when the upstream is addressed at its bare root.",
+                  "type": ["string", "null"],
+                  "pattern": "^/"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
