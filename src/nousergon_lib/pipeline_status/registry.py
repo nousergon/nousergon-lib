@@ -369,6 +369,21 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="host_cost_usage?tab=API",
         artifact_label="LLM cost telemetry (daily aggregate)",
     ),
+    # alpha-engine-config-I8336: the named WARNING alert on AggregateCosts'
+    # fail-open Catch, mirroring PublishScannerLeaderboardDegraded's shape.
+    # sf-pipeline-policy.md §5 lets the cost-aggregation stage fail open (it is
+    # secondary observability; the primary deliverable survives) — but a
+    # fail-open that only surfaces in the terminal email is silent for the
+    # whole run. This is what makes it loud at the moment it fires.
+    "PublishAggregateCostsDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when AggregateCosts fails "
+        "and the cycle's LLM cost record (cost.parquet) is not written "
+        "(alpha-engine-config-I8336) — non-fatal, no trading or research "
+        "artifact depends on it, but the cycle has no cost attribution and "
+        "the run terminates DEGRADED. Reached both by a Lambda failure and "
+        "by a fan-in coverage breach, which the alert deliberately does not "
+        "try to tell apart. No persisted artifact (the email IS the surface)."
+    ),
     "PredictorTraining": ArchivePageRef(
         page="host_predictor?tab=Archives",
         artifact_label="Predictor training summary",
