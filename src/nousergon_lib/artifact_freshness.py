@@ -177,7 +177,9 @@ CompletenessState = Literal["complete", "incomplete", "probe_failed"]
 #   be justified — it is wrong for any producer that skips weekends.
 # - ``market_hours`` — producer runs only within the NYSE session window on
 #   session days; requires ``active_hours_utc``. Idle outside the window
-#   (overnight / weekends / holidays); inside, the rolling floor applies so
+#   (overnight / weekends / holidays) AND for one ``interval + sla`` after
+#   the window opens, where the rolling floor still reaches back before the
+#   window existed (config-I8681). Past that, the rolling floor applies so
 #   a mid-session death is still caught.
 RunCalendarSymbol = Literal["trading_days", "all_days", "market_hours"]
 
@@ -301,9 +303,13 @@ class ArtifactSpec:
             session window). When set, the check short-circuits to
             ``state="fresh"`` outside ``[start, end)`` UTC — the producer
             is idle by design (e.g. the executor daemon writing
-            ``open_orders`` only during the NYSE session). Inside the
-            window the normal recency floor still applies, so a producer
-            that dies mid-window is still caught.
+            ``open_orders`` only during the NYSE session) — and for the
+            first ``interval_minutes + sla_minutes_after_cron`` minutes
+            AFTER ``start``, during which the recency floor still precedes
+            the window opening and no compliant producer could satisfy it
+            (config-I8681). Past that point the normal recency floor
+            applies, so a producer that never starts, or dies mid-window,
+            is still caught.
         produces: Optional lineage edge — the ``artifact_id``s this
             artifact's producer *stage* also emits. Advisory metadata for
             the dashboard/stage grouping; the DAG walk keys off
@@ -1078,10 +1084,13 @@ def _continuous_idle_reason(spec: ArtifactSpec, now_utc: datetime) -> str | None
     - ``market_hours``: idle on non-session days AND outside the
       ``active_hours_utc`` ``[start, end)`` UTC window.
 
-    This gate only suppresses the structural off-window false positive
-    (a market-hours-only daemon judged against the 24/7 ``now - interval -
-    sla`` floor). INSIDE the window the normal recency floor still applies,
-    so a producer that dies mid-window is caught as ``stale``.
+    This gate suppresses BOTH structural false positives of a market-hours
+    producer judged against a wall-clock floor: the off-window case (a
+    daemon idle overnight, on weekends and on holidays) and — via
+    :func:`_window_leading_edge_reason` — the window-OPENING case, where the
+    floor still reaches back before the window exists. Past one interval
+    + SLA into the window the normal recency floor applies unmodified, so a
+    producer that never starts, or dies mid-window, is caught as ``stale``.
     """
     rc = _resolve_run_calendar(spec)
     if rc == "all_days":
@@ -1099,6 +1108,73 @@ def _continuous_idle_reason(spec: ArtifactSpec, now_utc: datetime) -> str | None
                 f"[{start:02d}:00,{end:02d}:00) UTC — producer idle, "
                 "absence is correct"
             )
+        leading_edge = _window_leading_edge_reason(spec, now_utc, start)
+        if leading_edge is not None:
+            return leading_edge
+    return None
+
+
+def _window_leading_edge_reason(
+    spec: ArtifactSpec, now_utc: datetime, start_hour: int,
+) -> str | None:
+    """The window-OPENING half of the structural false positive.
+
+    ``_continuous_idle_reason`` above removed the *off-window* case: a
+    market-hours daemon judged against the 24/7 floor overnight. It left the
+    leading edge, and the leading edge is not a corner case — it is a
+    guaranteed daily false ``stale``.
+
+    The arithmetic, for ``open_orders_latest`` (interval 30, sla 15, window
+    ``[14,21)`` UTC) against its own sweep cron
+    ``cron(0/30 14-21 ? * MON-FRI *)``:
+
+    * the first sweep of every trading day fires at **14:00**, the same
+      minute the window opens;
+    * the continuous floor is wall-clock ``now - (interval + sla)`` =
+      **13:15**, forty-five minutes BEFORE the window exists;
+    * the newest write any compliant producer could have made inside the
+      window is ~14:00, and the previous session's last write (20:00) is
+      eighteen hours behind that floor.
+
+    So the row is stale by construction on the 14:00 sweep, every trading
+    day, no matter how healthy the daemon is. Measured live 2026-08-26:
+    a CRITICAL page citing ``sla_violated_by_minutes=1035``
+    (alpha-engine-config-I8681).
+
+    The condition is DERIVED, not a tuned grace constant. "No compliant
+    producer can satisfy the floor" is exactly ``floor < window_open``:
+
+        now - (interval + sla) < window_open
+        now < window_open + (interval + sla)
+
+    which is what this returns a reason for. One interval plus its SLA after
+    the open, the normal floor has risen above the window opening and the
+    ordinary recency check takes over unmodified — so a daemon that never
+    starts, or dies mid-session, is still caught, just from the first moment
+    that verdict can be true rather than before it.
+
+    Deliberately NOT fixed by clamping the floor to ``max(floor,
+    window_open)``: that moves the floor UP, making the check *stricter* at
+    exactly the moment the producer has had no chance to write. It would
+    convert the false positive into a worse one.
+    """
+    assert spec.interval_minutes is not None  # noqa: S101 -- continuous-only path, validated in __post_init__
+    window_open = now_utc.replace(
+        hour=start_hour, minute=0, second=0, microsecond=0,
+    )
+    settle = timedelta(
+        minutes=spec.interval_minutes + spec.sla_minutes_after_cron,
+    )
+    if now_utc < window_open + settle:
+        elapsed_min = int((now_utc - window_open).total_seconds() // 60)
+        return (
+            f"{elapsed_min}min into the active production window "
+            f"(opened {window_open.isoformat()}) — less than one interval "
+            f"+ SLA ({spec.interval_minutes}+{spec.sla_minutes_after_cron}"
+            f"={int(settle.total_seconds() // 60)}min), so the recency floor "
+            f"still precedes the window opening and no compliant producer "
+            f"could satisfy it; absence is correct"
+        )
     return None
 
 
@@ -1219,9 +1295,13 @@ def check_freshness(
     # overnight, on weekends, and on holidays. Judging it against the 24/7
     # continuous floor (now - interval - sla) false-alarms every interval
     # outside that window (the 2026-06-26 open_orders overnight alert storm).
-    # Short-circuit to fresh when the producer is idle by design; inside the
-    # window the floor below still applies, so a daemon that dies mid-session
-    # is still caught.
+    # The same wall-clock floor false-alarms again at the window's LEADING
+    # EDGE, where it reaches back before the window opened (config-I8681 —
+    # the 14:00 UTC sweep and the 14:00 UTC window open on the same minute
+    # against a 13:15 floor). Both cases are one gate.
+    # Short-circuit to fresh when the producer is idle by design or has not
+    # yet had one interval inside the window; past that point the floor
+    # below applies, so a daemon that dies mid-session is still caught.
     if spec.cadence == "continuous":
         idle_reason = _continuous_idle_reason(spec, now_utc)
         if idle_reason is not None:
