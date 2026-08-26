@@ -976,6 +976,107 @@ class TestContinuousActiveWindow:
         assert "non-trading day" in result.reason
 
 
+
+class TestActiveWindowLeadingEdge:
+    """config-I8681 — the window-OPENING half of the same structural false
+    positive ``TestContinuousActiveWindow`` covers the off-window half of.
+
+    Measured live 2026-08-26: the freshness sweep cron
+    ``cron(0/30 14-21 ? * MON-FRI *)`` fires its first sweep of every trading
+    day at 14:00 UTC — the same minute ``open_orders_latest``'s
+    ``active_hours_utc: [14, 21]`` window opens — against a wall-clock floor
+    of ``now - (30 + 15)min`` = 13:15, forty-five minutes before the window
+    exists. The previous session's last write (20:00) sits eighteen hours
+    behind that floor, so the row was reported
+    ``stale sla_violated_by_minutes=1035`` with a perfectly healthy producer.
+    Guaranteed daily, not a race.
+    """
+
+    # 2026-08-26 is a Wednesday (NYSE session day) — the live incident date.
+    OPEN = datetime(2026, 8, 26, 14, 0, tzinfo=timezone.utc)
+    # The last write of the PREVIOUS session, which is all a healthy producer
+    # can possibly have on disk at the moment the window opens.
+    PRIOR_SESSION_WRITE = datetime(2026, 8, 25, 20, 0, 4, tzinfo=timezone.utc)
+
+    def _s3_with_prior_session_write(self):
+        return _fake_s3(head_returns={
+            "trades/open_orders/latest.json": {
+                "LastModified": self.PRIOR_SESSION_WRITE,
+            },
+        })
+
+    def test_sweep_at_window_open_is_not_stale(self):
+        # The live reproduction: 14:00:48 UTC, 48 seconds into the window.
+        now = datetime(2026, 8, 26, 14, 0, 48, tzinfo=timezone.utc)
+        result = check_freshness(
+            self._s3_with_prior_session_write(), _open_orders_spec(), now,
+        )
+        assert result.state == "fresh"
+        assert "into the active production window" in result.reason
+
+    def test_leading_edge_absence_is_not_missing(self):
+        # No object at all at the leading edge is equally uninformative — the
+        # gate must short-circuit BEFORE the probe classifies it `missing`.
+        now = datetime(2026, 8, 26, 14, 0, 48, tzinfo=timezone.utc)
+        result = check_freshness(_fake_s3(), _open_orders_spec(), now)
+        assert result.state == "fresh"
+        assert "into the active production window" in result.reason
+
+    def test_boundary_is_exclusive_and_rearms_the_floor(self):
+        # Exactly interval + sla (45min) after the open, the floor has risen
+        # to the window opening instant and the ordinary check takes over.
+        # A producer that never wrote this session is stale from that moment.
+        now = self.OPEN + timedelta(minutes=45)
+        result = check_freshness(
+            self._s3_with_prior_session_write(), _open_orders_spec(), now,
+        )
+        assert result.state == "stale"
+
+    def test_one_minute_before_the_boundary_still_suppressed(self):
+        now = self.OPEN + timedelta(minutes=44)
+        result = check_freshness(
+            self._s3_with_prior_session_write(), _open_orders_spec(), now,
+        )
+        assert result.state == "fresh"
+
+    def test_mid_session_death_still_caught(self):
+        # The signal the gate must NOT swallow: the daemon wrote at the open
+        # and then died. 15:30 is well past the leading edge, floor 14:45.
+        now = datetime(2026, 8, 26, 15, 30, tzinfo=timezone.utc)
+        s3 = _fake_s3(head_returns={
+            "trades/open_orders/latest.json": {
+                "LastModified": datetime(2026, 8, 26, 14, 0, tzinfo=timezone.utc),
+            },
+        })
+        result = check_freshness(s3, _open_orders_spec(), now)
+        assert result.state == "stale"
+
+    def test_settle_window_is_derived_from_the_spec_not_a_constant(self):
+        # A row with a different interval gets a different leading edge —
+        # the suppression is `interval + sla`, never a tuned grace value.
+        # interval 120 + sla 15 = 135min, so 100min in is still suppressed
+        # where the 30+15 row above is judged from 45min.
+        spec = _open_orders_spec(interval_minutes=120)
+        now = self.OPEN + timedelta(minutes=100)
+        result = check_freshness(
+            self._s3_with_prior_session_write(), spec, now,
+        )
+        assert result.state == "fresh"
+        assert "120+15=135min" in result.reason
+
+    def test_all_days_producer_is_unaffected(self):
+        # The clause is market_hours-only: a genuine 24/7 continuous producer
+        # has no window, so nothing is suppressed and 18h of silence is stale.
+        spec = _open_orders_spec(
+            run_calendar="all_days", active_hours_utc=None,
+        )
+        now = datetime(2026, 8, 26, 14, 0, 48, tzinfo=timezone.utc)
+        result = check_freshness(
+            self._s3_with_prior_session_write(), spec, now,
+        )
+        assert result.state == "stale"
+
+
 class TestActiveWindowValidation:
 
     def test_active_hours_list_coerced_to_tuple(self):
