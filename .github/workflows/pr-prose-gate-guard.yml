@@ -1,0 +1,149 @@
+name: PR Prose Gate Guard
+
+# Reusable (workflow_call) fleet primitive, sibling to gate-label-guard:
+# fail a NON-DRAFT, UNGATED pull request whose BODY says it must not merge.
+#
+# WHY: alpha-engine-config-I8683 — crucible-predictor-PR328 was merged
+# 2026-08-26 while its body said "Do not merge until that real-cohort run
+# reports". It passed every machine-readable gate in auto-merge-policy.md
+# §2 Gate A (not a draft, ZERO labels, CLEAN, 12/12 green, no CodeQL review
+# threads). The blocking condition existed only in prose, and no evaluator
+# reads the body.
+#
+# NOT AN EXTENSION OF gate-label-guard, DELIBERATELY. That guard is ADVISORY
+# by design and auto-merge-policy §2 requires it be EXCLUDED from any "is
+# this PR red?" evaluation, because it fails whenever any gate:* label is
+# present. This one must be REQUIRED, so it is a separate workflow with a
+# separate check context. Folding the logic into gate-label-guard would make
+# it inherit that exclusion and enforce nothing.
+#
+# The predicate itself lives in a script with unit tests rather than in this
+# YAML — .github/scripts/pr_prose_gate_predicate.py, tested by
+# tests/test_pr_prose_gate_predicate.py. Shell embedded in a workflow is the
+# one place fleet logic cannot be tested before it runs against a real PR.
+#
+# Consumers: call from a workflow triggered by
+#   pull_request: {types: [opened, reopened, edited, labeled, unlabeled,
+#                          ready_for_review, synchronize]}
+# and, for any repo enforcing merges through a GitHub merge queue,
+#   merge_group: {types: [checks_requested]}
+# with a top-level job id of `pr-prose-gate-guard`, and add the resulting
+# check context ("pr-prose-gate-guard / pr-prose-gate-guard") to the repo's
+# required status checks.
+#
+# `edited` is load-bearing and easy to omit: the BODY is the thing under
+# check, so a body edited after opening must re-run it. Without it an author
+# can add blocking prose to an already-green PR and the check never re-fires.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    name: pr-prose-gate-guard
+    runs-on: ubuntu-latest
+    steps:
+      # nousergon-lib is public, so the caller's GITHUB_TOKEN can read it.
+      #
+      # `github.job_workflow_sha` is the commit of THIS reusable workflow
+      # file — i.e. exactly the SHA the caller pinned in its `uses:` line. It
+      # is used rather than a hard-coded SHA because a hard-coded one cannot
+      # be correct: the pin would have to name the commit that introduces the
+      # predicate, which does not exist until this file is merged. Self-
+      # reference also makes the workflow and the script it runs impossible
+      # to skew — a caller pinned to an old SHA gets that SHA's predicate,
+      # not today's.
+      # Fetched as ONE FILE rather than checked out, and the SHA travels
+      # through `env:` rather than being interpolated into the script.
+      #
+      # Both are CodeQL findings this workflow earned on its first run and
+      # they were right to raise them, even though neither was exploitable
+      # here (alert 57: "checkout of untrusted code in a non-privileged
+      # context"; alert 58: "code injection in the job_workflow_sha expression").
+      # A guard whose own job is to make a merge safe should not ship with two
+      # open scanner findings on the argument that they are false positives.
+      #
+      # A raw fetch is also the better design: one file instead of a whole
+      # repository, no checkout action, and the URL carries the commit SHA, so
+      # the content is immutable exactly as a pinned ref would be.
+      # `job_workflow_sha` is the commit of THIS reusable workflow -- the SHA
+      # the caller pinned in its `uses:` line -- so the predicate can never
+      # skew from the workflow that runs it, and a hard-coded pin could not
+      # have worked anyway: it would have to name the commit that introduces
+      # the predicate, which does not exist until this file merges.
+      - name: Fetch the predicate
+        env:
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          set -euo pipefail
+          # Fail CLOSED at every step. An empty SHA, a moved script or a failed
+          # fetch must BLOCK the merge, never pass it: this check can only ever
+          # block, so refusing to run leaves the PR exactly as blocked as an
+          # outright failure would.
+          if [ -z "${JOB_WORKFLOW_SHA:-}" ]; then
+            echo "::error::github.job_workflow_sha is empty, so the predicate cannot be pinned. Failing closed."
+            exit 1
+          fi
+          case "$JOB_WORKFLOW_SHA" in
+            *[!0-9a-f]* | "")
+              echo "::error::github.job_workflow_sha is not a hex commit id. Failing closed."
+              exit 1 ;;
+          esac
+          URL="https://raw.githubusercontent.com/nousergon/nousergon-lib/${JOB_WORKFLOW_SHA}/.github/scripts/pr_prose_gate_predicate.py"
+          if ! curl -sSfL -o /tmp/pr_prose_gate_predicate.py "$URL"; then
+            echo "::error::could not fetch the predicate from $URL. Failing closed."
+            exit 1
+          fi
+          if [ ! -s /tmp/pr_prose_gate_predicate.py ]; then
+            echo "::error::the fetched predicate is empty. Failing closed."
+            exit 1
+          fi
+
+      - name: Resolve the PR body, labels and draft state
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Read the payload from GITHUB_EVENT_PATH, never via
+          # toJson(github.event) in env: — a large pull_request payload
+          # exceeds expression-eval limits and yields startup_failure with
+          # zero log output (2026-07-23 incident, gate-label-guard).
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            PR_NUM=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
+            jq '{body: .pull_request.body, labels: .pull_request.labels, isDraft: .pull_request.draft}' \
+              "$GITHUB_EVENT_PATH" > /tmp/pr.json
+            echo "Resolved PR #$PR_NUM from the pull_request event payload."
+
+          elif [ "$EVENT_NAME" = 'merge_group' ]; then
+            # A merge_group payload carries NO pull_request object. GitHub
+            # names each entry's integration branch
+            # refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>, one entry
+            # per PR, so the number is parsed from head_ref and the PR is
+            # re-fetched live. Extraction failure fails CLOSED.
+            HEAD_REF=$(jq -r '.merge_group.head_ref' "$GITHUB_EVENT_PATH")
+            echo "merge_group.head_ref: $HEAD_REF"
+            PR_NUM=$(printf '%s' "$HEAD_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
+            if [ -z "$PR_NUM" ]; then
+              echo "::error::Could not extract a PR number from merge_group.head_ref ('$HEAD_REF') — expected refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>. Failing closed: cannot read the body, so this check cannot pass."
+              exit 1
+            fi
+            if ! gh pr view "$PR_NUM" --repo "$REPO" --json body,labels,isDraft > /tmp/pr.json; then
+              echo "::error::Failed to fetch PR #$PR_NUM via 'gh pr view' — failing closed."
+              exit 1
+            fi
+            echo "Resolved merge_group entry to PR #$PR_NUM."
+
+          else
+            echo "::error::Unsupported event_name='$EVENT_NAME' — pr-prose-gate-guard only handles pull_request and merge_group. Failing closed."
+            exit 1
+          fi
+
+      - name: Fail if blocking prose stands without a gate label
+        run: python3 /tmp/pr_prose_gate_predicate.py /tmp/pr.json
