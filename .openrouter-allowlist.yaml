@@ -75,3 +75,16 @@ entries:
       looks for. Not a call site.
     expires: "2027-08-19"
     tracking: alpha-engine-config-I6564
+  - path: src/nousergon_lib/egress/routes.v1.json
+    pattern: base_url
+    reason: >-
+      The published egress-proxy route contract declares which upstream hosts
+      the proxy will FORWARD to, openrouter.ai among them, as a keyed route —
+      the proxy substitutes the fleet's single credential, so no caller holds
+      one. That is the router-managed shape the epic ruling asks for, stated
+      as data; it is the opposite of a call site holding its own key. The file
+      is generated from the proxy launchers by
+      claude-code-config/llm-routing/publish_egress_routes.py and is never
+      hand-edited (alpha-engine-config-I8337).
+    expires: "2027-08-25"
+    tracking: alpha-engine-config-I8337

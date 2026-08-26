@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "produced_by": "claude-code-config/llm-routing/publish_egress_routes.py",
+  "produced_from": {
+    "box": "llm-routing/dashboard-box/egress-proxy-start.sh",
+    "laptop": "llm-routing/launchd/egress-proxy-multi-tenant-shim.sh"
+  },
+  "consumer_note": "Read this artifact; never restate it. alpha-engine-config's scripts/egress_proxy_routes.py is the reference consumer (alpha-engine-config-I8337).",
+  "tables": {
+    "box": {
+      "description": "The dashboard box's multi-tenant egress proxy. This is the table that decides servability for anything routed through the LiteLLM router, because the router process runs on that box and every model-group fallback chain is walked there regardless of where the caller runs.",
+      "routes": [
+        {
+          "upstream_host": "api.deepseek.com",
+          "auth_mode": "keyed",
+          "path_prefix": null
+        },
+        {
+          "upstream_host": "api.moonshot.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/v1"
+        },
+        {
+          "upstream_host": "api.x.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/v1"
+        },
+        {
+          "upstream_host": "api.z.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/api/paas/v4"
+        },
+        {
+          "upstream_host": "generativelanguage.googleapis.com",
+          "auth_mode": "keyed",
+          "path_prefix": "/v1beta/openai"
+        },
+        {
+          "upstream_host": "openrouter.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/api/v1"
+        }
+      ]
+    },
+    "laptop": {
+      "description": "The developer laptop's launchd shim. Decides servability only for a laptop-local caller addressing the proxy directly. Wider than the box table; never union the two.",
+      "routes": [
+        {
+          "upstream_host": "api.anthropic.com",
+          "auth_mode": "passthrough",
+          "path_prefix": null
+        },
+        {
+          "upstream_host": "api.deepseek.com",
+          "auth_mode": "keyed",
+          "path_prefix": null
+        },
+        {
+          "upstream_host": "api.moonshot.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/v1"
+        },
+        {
+          "upstream_host": "api.x.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/v1"
+        },
+        {
+          "upstream_host": "api.z.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/api/paas/v4"
+        },
+        {
+          "upstream_host": "generativelanguage.googleapis.com",
+          "auth_mode": "keyed",
+          "path_prefix": "/v1beta/openai"
+        },
+        {
+          "upstream_host": "openrouter.ai",
+          "auth_mode": "keyed",
+          "path_prefix": "/api/v1"
+        }
+      ]
+    }
+  }
+}
