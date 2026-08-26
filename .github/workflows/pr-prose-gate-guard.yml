@@ -57,24 +57,49 @@ jobs:
       # reference also makes the workflow and the script it runs impossible
       # to skew — a caller pinned to an old SHA gets that SHA's predicate,
       # not today's.
-      - name: Check out the predicate
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          repository: nousergon/nousergon-lib
-          ref: ${{ github.job_workflow_sha }}
-          path: _prose_gate
-          persist-credentials: false
-
-      - name: Verify the predicate was checked out
+      # Fetched as ONE FILE rather than checked out, and the SHA travels
+      # through `env:` rather than being interpolated into the script.
+      #
+      # Both are CodeQL findings this workflow earned on its first run and
+      # they were right to raise them, even though neither was exploitable
+      # here (alert 57: "checkout of untrusted code in a non-privileged
+      # context"; alert 58: "code injection in the job_workflow_sha expression").
+      # A guard whose own job is to make a merge safe should not ship with two
+      # open scanner findings on the argument that they are false positives.
+      #
+      # A raw fetch is also the better design: one file instead of a whole
+      # repository, no checkout action, and the URL carries the commit SHA, so
+      # the content is immutable exactly as a pinned ref would be.
+      # `job_workflow_sha` is the commit of THIS reusable workflow -- the SHA
+      # the caller pinned in its `uses:` line -- so the predicate can never
+      # skew from the workflow that runs it, and a hard-coded pin could not
+      # have worked anyway: it would have to name the commit that introduces
+      # the predicate, which does not exist until this file merges.
+      - name: Fetch the predicate
+        env:
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
         run: |
           set -euo pipefail
-          # Fail CLOSED. An empty job_workflow_sha, a moved script or a
-          # partial checkout must block the merge, never pass it: this check
-          # can only ever BLOCK, so refusing to run leaves the PR exactly as
-          # blocked as an outright failure would.
-          SCRIPT=_prose_gate/.github/scripts/pr_prose_gate_predicate.py
-          if [ ! -f "$SCRIPT" ]; then
-            echo "::error::$SCRIPT is absent after checkout (job_workflow_sha='${{ github.job_workflow_sha }}'). Failing closed."
+          # Fail CLOSED at every step. An empty SHA, a moved script or a failed
+          # fetch must BLOCK the merge, never pass it: this check can only ever
+          # block, so refusing to run leaves the PR exactly as blocked as an
+          # outright failure would.
+          if [ -z "${JOB_WORKFLOW_SHA:-}" ]; then
+            echo "::error::github.job_workflow_sha is empty, so the predicate cannot be pinned. Failing closed."
+            exit 1
+          fi
+          case "$JOB_WORKFLOW_SHA" in
+            *[!0-9a-f]* | "")
+              echo "::error::github.job_workflow_sha is not a hex commit id. Failing closed."
+              exit 1 ;;
+          esac
+          URL="https://raw.githubusercontent.com/nousergon/nousergon-lib/${JOB_WORKFLOW_SHA}/.github/scripts/pr_prose_gate_predicate.py"
+          if ! curl -sSfL -o /tmp/pr_prose_gate_predicate.py "$URL"; then
+            echo "::error::could not fetch the predicate from $URL. Failing closed."
+            exit 1
+          fi
+          if [ ! -s /tmp/pr_prose_gate_predicate.py ]; then
+            echo "::error::the fetched predicate is empty. Failing closed."
             exit 1
           fi
 
@@ -121,4 +146,4 @@ jobs:
           fi
 
       - name: Fail if blocking prose stands without a gate label
-        run: python3 _prose_gate/.github/scripts/pr_prose_gate_predicate.py /tmp/pr.json
+        run: python3 /tmp/pr_prose_gate_predicate.py /tmp/pr.json
