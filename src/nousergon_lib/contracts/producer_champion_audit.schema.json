@@ -47,6 +47,7 @@
         "agentic",
         "scanner_predictor_direct",
         "thinktank_coverage",
+        "scanner_top20_predictor",
         null
       ],
       "description": "The pointer's champion value read at the start of this evaluation (or the base-case default 'scanner_predictor_direct' when no pointer has ever been written). 'agentic' is READ-TOLERATED for historical continuity (the 2026-07-13 bootstrap's own audit record carries champion_before='agentic') but is WRITE-FORBIDDEN going forward \u2014 see contracts/producer_champion.schema.json. Null only on outcome='error' when evaluation aborted before the pointer could even be read."
@@ -56,6 +57,7 @@
         "agentic",
         "scanner_predictor_direct",
         "thinktank_coverage",
+        "scanner_top20_predictor",
         null
       ],
       "description": "The pointer's champion value at the end of this evaluation. Equal to champion_before on every no_contest/unchanged_winner_already_champion/error outcome, and on a frozen promotion (blocked_by=['frozen']) \u2014 this artifact records a held week without ever mutating config/producer_champion.json. Null only alongside a null champion_before (outcome='error', pointer never read)."
@@ -116,9 +118,11 @@
       "enum": [
         "agentic",
         "scanner_predictor_direct",
-        "thinktank_coverage"
+        "thinktank_coverage",
+        "scanner_top20_predictor",
+        null
       ],
-      "description": "Which arm was evaluated as the challenger this run (the complement of champion_before under the current two-arm VALID_CHAMPIONS set). 'agentic' is read-tolerated for historical v1 records only."
+      "description": "The BEST-SCORING challenger this run \u2014 the only arm that could have taken the seat. Was 'the complement of champion_before' under the two-arm set; alpha-engine-config-I8756 (Brian's 2026-08-27 ruling) made the slot N-arm, so the complement is no longer a single value. null when no challenger was scored this week, which is a no-contest. 'agentic' is read-tolerated for historical v1 records only."
     },
     "freeze": {
       "type": "boolean",
@@ -147,6 +151,7 @@
         "agentic",
         "scanner_predictor_direct",
         "thinktank_coverage",
+        "scanner_top20_predictor",
         null
       ],
       "description": "ADDITIVE (alpha-engine-config-I2515, 2026-08-20). The arm with the strictly higher realized weekly score \u2014 who WOULD have taken the live pointer on score alone \u2014 or null when no comparison was possible (outcome=no_contest, or outcome=error where evaluation aborted before scoring). Equals `champion_after` on an ordinary promotion and `champion_before` on a defended incumbency; the case this field exists for is outcome=held_shadow_only, where it names the SHADOW-ONLY arm that won and was deliberately NOT promoted. Without it a held_shadow_only record could not express \"the shadow arm would have won\", and a shadow arm whose wins stop being visible in the durable record defeats the purpose of shadow mode (champion-challenger-policy.md \u00a73: measurement is unconditional and is not what promotion governs). Optional (not in `required`) so pre-I2515 v2 records remain valid without a version bump \u2014 per this schema's additive-only policy."
@@ -160,6 +165,19 @@
         "type": "string"
       },
       "description": "ADDITIVE (alpha-engine-config-I3165, 2026-07-23). The `champion_after` arm's declared upstream live-trade feed artifact_id(s) \u2014 e.g. `[\"research_free_backfill\"]` for `scanner_predictor_direct` \u2014 read from optimizer/champion_promotion.py::ARM_FEED_DEPENDENCIES, the static arm\u2192feed source of truth this same change introduces. Each named id is an ARTIFACT_REGISTRY.yaml artifact_id (alpha-engine-config/private-docs/ARTIFACT_REGISTRY.yaml) whose producer this gate probed for liveness at promotion time before allowing a flip onto that arm (see `blocked_by`'s `feed_producer_dead` slug) \u2014 the promotion-time complement to the config-I3086 `critical_while_champion_arm` ongoing-monitoring mechanism, closing the config#3053 gap where nothing checked the feed chain AT the moment of promotion. Null/empty when `champion_after` declares no feed dependency (e.g. `thinktank_coverage`, whose evidence chain is the producer leaderboard already gated by `leaderboard_date_used`/`leaderboard_stale_gt_8d` above, not a live-trade feed artifact), or when `champion_after` itself is null (outcome=error, evaluation aborted before a champion could even be read). Optional (not in `required`) precisely so pre-I3165 v2 records remain valid without a version bump \u2014 per this schema's additive-only policy."
+    },
+    "arm_scores": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Every registered arm's score this week, keyed by arm name \u2014 the N-arm view (alpha-engine-config-I8756). `champion_score` and `challenger_score` remain the incumbent and the best challenger, so a two-arm reader is unaffected; this field is what makes a three-way week legible rather than collapsed into the pair that happened to matter. A null VALUE means that arm produced no comparable evidence this week.",
+      "additionalProperties": {
+        "type": [
+          "number",
+          "null"
+        ]
+      }
     }
   }
 }

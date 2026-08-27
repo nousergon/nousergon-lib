@@ -1122,3 +1122,95 @@ class TestProducerChampionAuditContract:
     def test_not_a_slot_boundary(self):
         assert "producer_champion_audit" in contracts.CONTRACT_SCHEMAS
         assert "producer_champion_audit" not in contracts.SLOT_SCHEMAS
+
+
+# ── producer_champion_audit: the slot is N-arm (alpha-engine-config-I8756) ──
+
+
+def test_producer_champion_audit_admits_the_scanner_top20_arm():
+    """Brian's ruling 2026-08-27 put a third arm in the entry-selection slot:
+    the scanner's weekly attractiveness top-20, passed to the predictor. The
+    audit artifact is a FROZEN contract, so the arm cannot be written until the
+    enums admit it — a producer that emits an unlisted value fails validation
+    at the write, which is the correct place for it to fail."""
+    from nousergon_lib.contracts import load_schema
+
+    schema = load_schema("producer_champion_audit")
+    for key in ("champion_before", "champion_after", "challenger", "counterfactual_winner"):
+        assert "scanner_top20_predictor" in schema["properties"][key]["enum"], key
+
+
+def test_the_challenger_field_admits_null():
+    """With N arms, `challenger` is the BEST-SCORING challenger rather than
+    "the other one" — and on a week where no challenger was scored there is no
+    best. That is a no-contest, and it must be expressible."""
+    from nousergon_lib.contracts import load_schema
+
+    assert None in load_schema("producer_champion_audit")["properties"]["challenger"]["enum"]
+
+
+def test_arm_scores_carries_the_whole_field():
+    """`champion_score` / `challenger_score` collapse an N-way week into the
+    pair that happened to matter. `arm_scores` is what keeps the rest legible;
+    a null VALUE means that arm produced no comparable evidence."""
+    from nousergon_lib.contracts import load_schema
+
+    prop = load_schema("producer_champion_audit")["properties"]["arm_scores"]
+    assert prop["type"] == ["object", "null"]
+    assert prop["additionalProperties"]["type"] == ["number", "null"]
+
+
+def test_a_three_arm_audit_record_validates():
+    import jsonschema
+
+    from nousergon_lib.contracts import load_schema
+
+    record = {
+        "schema_version": 2,
+        "date": "2026-08-28",
+        "generated_at": "2026-08-28T13:00:00+00:00",
+        "outcome": "promoted",
+        "champion_before": "scanner_predictor_direct",
+        "champion_after": "scanner_top20_predictor",
+        "challenger": "scanner_top20_predictor",
+        "champion_score": 0.0019,
+        "challenger_score": 0.0042,
+        "arm_scores": {
+            "scanner_top20_predictor": 0.0042,
+            "scanner_predictor_direct": 0.0019,
+            "thinktank_coverage": None,
+        },
+        "blocked_by": None,
+        "freeze": False,
+        "counterfactual_winner": "scanner_top20_predictor",
+    }
+
+    jsonschema.validate(instance=record, schema=load_schema("producer_champion_audit"))
+
+
+def test_a_no_contest_record_with_no_scored_challenger_validates():
+    import jsonschema
+
+    from nousergon_lib.contracts import load_schema
+
+    record = {
+        "schema_version": 2,
+        "date": "2026-08-28",
+        "generated_at": "2026-08-28T13:00:00+00:00",
+        "outcome": "no_contest",
+        "champion_before": "scanner_predictor_direct",
+        "champion_after": "scanner_predictor_direct",
+        "challenger": None,
+        "champion_score": 0.0019,
+        "challenger_score": None,
+        "arm_scores": {
+            "scanner_top20_predictor": None,
+            "scanner_predictor_direct": 0.0019,
+            "thinktank_coverage": None,
+        },
+        "blocked_by": ["arm_score_unavailable"],
+        "freeze": False,
+        "counterfactual_winner": None,
+    }
+
+    jsonschema.validate(instance=record, schema=load_schema("producer_champion_audit"))
