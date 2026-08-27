@@ -107,7 +107,10 @@
               "thinktank_coverage_confidence_unknown",
               "scanner_predictor_direct_thin_evidence",
               "scanner_predictor_direct_confidence_unknown",
-              "leaderboard_horizon_mismatch"
+              "leaderboard_horizon_mismatch",
+              "scanner_top20_predictor_counterfactual_unavailable",
+              "scanner_top20_predictor_thin_evidence",
+              "scanner_top20_predictor_confidence_unknown"
             ]
           }
         }
