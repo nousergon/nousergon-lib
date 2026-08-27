@@ -1214,3 +1214,76 @@ def test_a_no_contest_record_with_no_scored_challenger_validates():
     }
 
     jsonschema.validate(instance=record, schema=load_schema("producer_champion_audit"))
+
+
+def test_blocked_by_admits_the_scanner_top20_arms_slugs():
+    """alpha-engine-config-I8756. `blocked_by` is an ENUM, so an arm whose
+    slugs are absent cannot report why it did not score — the audit write fails
+    validation and the whole weekly record is lost, taking the OTHER arms'
+    evidence with it.
+
+    Per-arm slugs rather than one shared "thin" value because the operator
+    response differs: a thin top-20 arm is waiting on the 21-day maturation of
+    a cut that only began 2026-07-30, which is time, not a defect to chase.
+    """
+    from nousergon_lib.contracts import load_schema
+
+    schema = load_schema("producer_champion_audit")
+
+    def _find_enum(node):
+        if isinstance(node, dict):
+            if "enum" in node and isinstance(node["enum"], list) \
+                    and "leaderboard_unavailable" in node["enum"]:
+                return node["enum"]
+            for value in node.values():
+                found = _find_enum(value)
+                if found is not None:
+                    return found
+        if isinstance(node, list):
+            for value in node:
+                found = _find_enum(value)
+                if found is not None:
+                    return found
+        return None
+
+    enum = _find_enum(schema["properties"]["blocked_by"])
+    assert enum is not None
+    for slug in (
+        "scanner_top20_predictor_counterfactual_unavailable",
+        "scanner_top20_predictor_thin_evidence",
+        "scanner_top20_predictor_confidence_unknown",
+    ):
+        assert slug in enum, slug
+
+
+def test_a_no_contest_naming_two_unscored_arms_validates():
+    """With N arms, `blocked_by` names EVERY unscored arm — "the challenger had
+    no score" no longer identifies which challenger."""
+    import jsonschema
+
+    from nousergon_lib.contracts import load_schema
+
+    record = {
+        "schema_version": 2,
+        "date": "2026-08-28",
+        "generated_at": "2026-08-28T13:00:00+00:00",
+        "outcome": "no_contest",
+        "champion_before": "scanner_predictor_direct",
+        "champion_after": "scanner_predictor_direct",
+        "challenger": None,
+        "champion_score": 0.0019,
+        "challenger_score": None,
+        "arm_scores": {
+            "scanner_top20_predictor": None,
+            "scanner_predictor_direct": 0.0019,
+            "thinktank_coverage": None,
+        },
+        "blocked_by": [
+            "scanner_top20_predictor_thin_evidence",
+            "thinktank_coverage_not_in_leaderboard",
+        ],
+        "freeze": False,
+        "counterfactual_winner": None,
+    }
+
+    jsonschema.validate(instance=record, schema=load_schema("producer_champion_audit"))
