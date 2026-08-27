@@ -76,6 +76,7 @@ ships the freshness-monitor Lambda that wires the two together.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -90,6 +91,7 @@ from nousergon_lib.trading_calendar import (
     is_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
     last_closed_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
     previous_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
+    subtract_trading_days,  # pyright: ignore[reportAttributeAccessIssue]
 )
 
 # ── Cadence symbols ──────────────────────────────────────────────────────────
@@ -1003,14 +1005,24 @@ def _freshness_floor(
       * ``all_days`` — wall-clock ``now - (interval + sla)``. Correct only
         for a producer that genuinely runs every calendar day.
       * ``trading_days`` / ``market_hours`` with a daily-or-longer interval
-        (``>= 1440`` min) — the TRADING-DAY floor ``previous_trading_day(
-        last_closed_trading_day(now))`` (same as ``weekday_sf``). This is
+        (``>= 1440`` min) — the TRADING-DAY floor, counted back
+        ``ceil(interval_minutes / 1440)`` trading days from
+        ``last_closed_trading_day(now)`` via
+        :func:`~nousergon_lib.trading_calendar.subtract_trading_days`. For
+        ``interval_minutes == 1440`` this is exactly one trading day back —
+        byte-identical to the prior hardcoded ``previous_trading_day(
+        last_closed_trading_day(now))`` (same as ``weekday_sf``) — which is
         what fixes the Monday-morning false positive: the wall-clock
         ``now - 1440 - sla`` window reaches back across the weekend and
         flags Friday/Saturday writes stale before Monday's run; the
         trading-day floor counts only session days, so the weekend gap
-        isn't held against the producer. The non-trading-day case is
-        already short-circuited to ``fresh`` upstream by the idle gate.
+        isn't held against the producer. For a longer interval (e.g. a
+        weekly producer, ``interval_minutes == 10080``) the SAME hardcoded
+        one-trading-day floor was a guaranteed false ``stale`` from Monday
+        of every week (alpha-engine-config-I8694) — the lookback now scales
+        with the declared interval instead of silently ignoring it. The
+        non-trading-day case is already short-circuited to ``fresh``
+        upstream by the idle gate.
       * ``trading_days`` / ``market_hours`` with a SUB-daily interval
         (``< 1440`` min) — the rolling ``now - (interval + sla)`` window.
         A sub-day lookback inside the active window never spans a
@@ -1031,8 +1043,17 @@ def _freshness_floor(
         if rc != "all_days" and spec.interval_minutes >= 1440:
             # Daily-or-longer trading-day producer: count the lookback in
             # trading days, not wall-clock, so a weekend/holiday gap before
-            # the current session is not counted against the producer.
-            floor_day = previous_trading_day(last_closed_trading_day(now_utc))
+            # the current session is not counted against the producer. The
+            # lookback SCALES with the declared interval — a weekly producer
+            # (interval_minutes=10080) gets a ~7-trading-day floor, not the
+            # same ~1-trading-day floor as a daily one (config-I8694): a
+            # floor that ignores interval_minutes for anything longer than a
+            # day is stale-by-construction for every producer slower than
+            # daily. ceil(1440/1440) == 1, so the daily case is unchanged.
+            trading_days_back = math.ceil(spec.interval_minutes / 1440)
+            floor_day = subtract_trading_days(
+                last_closed_trading_day(now_utc), trading_days_back,
+            )
             return datetime(
                 floor_day.year, floor_day.month, floor_day.day,
                 tzinfo=timezone.utc,

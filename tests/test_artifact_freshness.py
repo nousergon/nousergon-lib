@@ -1212,6 +1212,78 @@ class TestRunCalendarResolutionAndValidation:
             _daily_health_spec(run_calendar="weekly")
 
 
+# ── config-I8694: a WEEKLY interval must scale the trading-day floor ──────────
+#
+# Before this fix, any ``interval_minutes >= 1440`` — daily OR weekly OR
+# anything longer — got the SAME hardcoded one-trading-day-back floor. A
+# weekly producer (interval_minutes=10080) was stale-by-construction from
+# Monday of every week: its Saturday write is ~5 trading days old by
+# Wednesday, well past a floor that only tolerates ~1 trading day.
+
+
+def _weekly_predictor_spec(**overrides) -> ArtifactSpec:
+    """Models ``predictor_self_test`` — written weekly (Saturday), checked on
+    trading days. interval_minutes=10080 (7 calendar days)."""
+    defaults = {
+        "artifact_id": "predictor_self_test",
+        "s3_bucket": "bkt",
+        "s3_key_template": "predictor/self_test.json",
+        "cadence": "continuous",
+        "interval_minutes": 10080,
+        "sla_minutes_after_cron": 60,
+        "severity": "warning",
+        "owner_repo": "crucible-predictor",
+        "created_at": date(2025, 1, 1),
+        "run_calendar": "trading_days",
+    }
+    defaults.update(overrides)
+    return ArtifactSpec(**defaults)
+
+
+def _predictor_s3(last_modified: datetime):
+    return _fake_s3(head_returns={
+        "predictor/self_test.json": {"LastModified": last_modified},
+    })
+
+
+class TestWeeklyIntervalScalesTradingDayFloor:
+    """config-I8694 — the floor must scale with the declared interval, not
+    hardcode a single trading day regardless of cadence."""
+
+    def test_five_days_old_is_fresh(self):
+        # Wed 2026-08-26 20:00 UTC (post-close). Newest write Fri 2026-08-21
+        # (5 calendar days back) — well inside a ~7-trading-day weekly floor.
+        now = datetime(2026, 8, 26, 20, 0, tzinfo=timezone.utc)
+        write = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)
+        result = check_freshness(_predictor_s3(write), _weekly_predictor_spec(), now)
+        assert result.state == "fresh"
+
+    def test_fifteen_days_old_is_still_stale(self):
+        # Same "now"; newest write 2026-08-11 (15 calendar days back) — a
+        # genuinely dead weekly producer must still be caught.
+        now = datetime(2026, 8, 26, 20, 0, tzinfo=timezone.utc)
+        write = datetime(2026, 8, 11, 9, 0, tzinfo=timezone.utc)
+        result = check_freshness(_predictor_s3(write), _weekly_predictor_spec(), now)
+        assert result.state == "stale"
+
+    def test_monday_after_saturday_write_is_fresh(self):
+        # The exact Monday-of-every-week shape from the issue: Mon 2026-08-24
+        # 12:00 UTC, newest write is the prior Saturday 2026-08-22.
+        now = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+        write = datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc)
+        result = check_freshness(_predictor_s3(write), _weekly_predictor_spec(), now)
+        assert result.state == "fresh"
+
+    def test_daily_interval_floor_unchanged(self):
+        # Control: interval_minutes=1440 (daily) must be byte-for-byte what
+        # it was before this change — ceil(1440/1440) == 1 trading day back,
+        # identical to the prior hardcoded previous_trading_day(...).
+        sat_write = datetime(2026, 6, 27, 9, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 6, 29, 10, 0, tzinfo=timezone.utc)
+        result = check_freshness(_health_s3(sat_write), _daily_health_spec(), now)
+        assert result.state == "fresh"
+
+
 # ── Phase 2: dependency DAG + root-cause localization ─────────────────────────
 
 
