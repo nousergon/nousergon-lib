@@ -8,14 +8,30 @@ rather than reaching OpenRouter (if at all) as a router-managed fallback
 member behind ``krepis``. Without a guard, a future PR can silently
 reintroduce that linkage and nobody notices until the next manual sweep.
 
-**Three patterns**, matched line-by-line over the caller repo's tracked
+**Five patterns**, matched line-by-line over the caller repo's tracked
 code/config files (docs and markdown are excluded by default — this fleet's
 policy prose discusses OpenRouter constantly, and that discussion is not
 linkage):
 
   1. ``openrouter.ai`` as a literal (a base URL)
   2. ``OPENROUTER_API_KEY`` as a literal (an env-var name being read)
-  3. ``provider: openrouter`` / ``provider = "openrouter"`` style config literals
+  3. ``provider: openrouter`` / ``provider = "openrouter"`` style config
+     literals — an ASSIGNMENT
+  4. ``openrouter_api_key`` (any case OTHER than the all-caps literal
+     pattern 2 already covers) as an attribute/variable name being read
+  5. a runtime EQUALITY comparison against the literal ``"openrouter"`` /
+     ``'openrouter'`` (``==`` or ``!=``) — a DIFFERENT token shape than
+     pattern 3's assignment, and the one that let
+     ``vires/api/services/coach/agent.py``'s
+     ``spec.provider == "openrouter"`` ship undetected (alpha-engine-config#
+     9092): the call site read the lowercase attribute
+     ``settings.openrouter_api_key`` (missed by pattern 2's case-sensitive
+     env-var literal) and compared it at runtime rather than assigning it
+     (missed by pattern 3's assignment-shaped regex). Patterns 4 and 5 close
+     that blind spot — not by loosening 2 or 3 case-insensitively (that would
+     also start matching every ``OPENROUTER_API_KEY`` env-var read case
+     variance the fleet already allowlists under pattern 2), but by adding
+     the two token shapes that were actually missing.
 
 **Baseline, not a blank ban.** Measured 2026-08-19 across the fleet: the
 literal ``openrouter.ai`` / ``OPENROUTER_API_KEY`` strings already appear
@@ -62,6 +78,8 @@ import yaml
 PATTERN_BASE_URL = "base_url"
 PATTERN_ENV_KEY = "env_key"
 PATTERN_PROVIDER_LITERAL = "provider_literal"
+PATTERN_ATTR_KEY = "attr_key"
+PATTERN_PROVIDER_COMPARISON = "provider_comparison"
 
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (PATTERN_BASE_URL, re.compile(r"openrouter\.ai", re.IGNORECASE)),
@@ -70,8 +88,31 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         PATTERN_PROVIDER_LITERAL,
         re.compile(r"""provider["']?\s*[:=]\s*["']?openrouter["']?\b""", re.IGNORECASE),
     ),
+    # Case-insensitive attribute/variable name — e.g. `settings.openrouter_api_key`,
+    # `self.openrouter_api_key`. Deliberately NOT the same regex as PATTERN_ENV_KEY
+    # widened with re.IGNORECASE: that would double-flag every already-allowlisted
+    # all-caps `OPENROUTER_API_KEY` env-var read under a second pattern class. The
+    # exact all-caps literal is excluded here in `scan()` and left to PATTERN_ENV_KEY.
+    (PATTERN_ATTR_KEY, re.compile(r"openrouter_api_key", re.IGNORECASE)),
+    # A runtime equality/inequality comparison against the literal, e.g.
+    # `spec.provider == "openrouter"` / `route_name != 'openrouter'` — a different
+    # token shape than PATTERN_PROVIDER_LITERAL's assignment (`provider: openrouter`,
+    # `provider="openrouter"`). This is the shape a `_reject_direct_openrouter`-style
+    # guard function ITSELF uses, so a repo adopting one needs an allowlist entry for
+    # its own defensive check, same as PATTERN_PROVIDER_LITERAL's guard-source entries.
+    (
+        PATTERN_PROVIDER_COMPARISON,
+        re.compile(r"""[!=]=\s*["']openrouter["']"""),
+    ),
 )
 ALL_PATTERN_CLASSES = frozenset(p for p, _ in _PATTERNS)
+
+# PATTERN_ATTR_KEY's regex is deliberately case-insensitive and therefore matches
+# the all-caps literal too; a line matching this exact case is already the
+# PATTERN_ENV_KEY finding and must not be flagged a second time under a second
+# pattern class (which would need a redundant allowlist entry for every existing
+# env_key entry in the fleet).
+_ATTR_KEY_ENV_LITERAL = "OPENROUTER_API_KEY"
 
 # Code/config extensions scanned by default. Deliberately excludes markdown,
 # rst and plain text: this fleet's own policy library and issue trackers
@@ -151,8 +192,12 @@ def scan(repo: Path, extensions: frozenset[str], skip: frozenset[str] = frozense
         rel = str(fp.relative_to(repo))
         for lineno, line in enumerate(text.splitlines(), 1):
             for pattern_class, regex in _PATTERNS:
-                if regex.search(line):
-                    matches.append(Match(rel, lineno, pattern_class, line.strip()))
+                m = regex.search(line)
+                if not m:
+                    continue
+                if pattern_class == PATTERN_ATTR_KEY and m.group() == _ATTR_KEY_ENV_LITERAL:
+                    continue  # the exact all-caps literal is PATTERN_ENV_KEY's finding
+                matches.append(Match(rel, lineno, pattern_class, line.strip()))
     return matches
 
 
