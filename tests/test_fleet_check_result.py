@@ -91,6 +91,23 @@ def test_nonpositive_cadence_is_rejected(bad):
         _ok(cadence_minutes=bad)
 
 
+# --- event-driven cadence (alpha-engine-config-I9033) -----------------------
+
+
+def test_cadence_minutes_none_is_accepted_and_written_as_null():
+    """An event-driven producer — merge-triggered, no clock — declares no
+    cadence rather than a manufactured one. The key still appears (`null`),
+    matching the always-present consumer contract, and the checks-envelope
+    adapter treats a missing cadence as no freshness input, never MISSED."""
+    e = _ok(cadence_minutes=None)
+    assert "cadence_minutes" in e
+    assert e["cadence_minutes"] is None
+
+
+def test_cadence_minutes_none_is_json_serialisable():
+    json.dumps(_ok(cadence_minutes=None))
+
+
 # --- emission --------------------------------------------------------------
 
 def test_key_is_derived_from_check_id():
