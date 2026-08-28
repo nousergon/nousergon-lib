@@ -33,8 +33,18 @@ linkage):
      variance the fleet already allowlists under pattern 2), but by adding
      the two token shapes that were actually missing.
 
-**Pattern 5 is test-path-exempt (alpha-engine-config#9092-followup, landed
-2026-08-28 same day as pattern 5 itself).** An ``==``/``!=`` comparison
+**Pattern 5 fires only on a comparison that GUARDS A CONSTRUCTION
+(alpha-engine-config#9111).** The regex alone matched any equality against the
+string, which is data handling in 37 of the 38 places the fleet does it — a
+registry row, a config value, an expense-table cell, a routing decision the
+router itself already made. It reddened seven repos' PRs the evening it
+shipped. What is banned is a call site SHAPED AROUND OpenRouter, so the finding
+is now decided by ``_linkage_comparison_lines()``: the comparison must be the
+test of a branch (not a value being asserted, filtered or assigned) AND the
+branch it guards must name a credential, base URL, headers, HTTP client or
+model-spec constructor in its CODE (never in a string or a comment). Python
+only — every measured instance is Python and there is no honest AST for the
+rest. Pattern 5 also stays test-path-exempt, below. An ``==``/``!=`` comparison
 against the literal ``"openrouter"`` is the exact shape a test asserts a
 value equals a fixture's chosen string — e.g. a table-row assertion like
 ``row["Provider"] == "openrouter"`` in a display test, which constructs no
@@ -79,6 +89,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as _dt
 import re
 import shutil
@@ -113,9 +124,15 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # A runtime equality/inequality comparison against the literal, e.g.
     # `spec.provider == "openrouter"` / `route_name != 'openrouter'` — a different
     # token shape than PATTERN_PROVIDER_LITERAL's assignment (`provider: openrouter`,
-    # `provider="openrouter"`). This is the shape a `_reject_direct_openrouter`-style
-    # guard function ITSELF uses, so a repo adopting one needs an allowlist entry for
-    # its own defensive check, same as PATTERN_PROVIDER_LITERAL's guard-source entries.
+    # `provider="openrouter"`).
+    #
+    # THE REGEX ALONE OVER-MATCHES AND MUST NOT BE USED ALONE (I9111). Comparing a
+    # provider NAME THAT ARRIVED AS DATA — a registry row, a config value, a
+    # dataframe cell, a function parameter — is not linkage; it is data handling,
+    # and it is what 37 of the 38 fleet-wide instances of this shape do. A match is
+    # promoted to a finding only by `_linkage_comparison_lines()` below, which
+    # decides on what the comparison GUARDS, not on the literal. See the block
+    # comment there for the discriminator.
     (
         PATTERN_PROVIDER_COMPARISON,
         re.compile(r"""[!=]=\s*["']openrouter["']"""),
@@ -203,6 +220,202 @@ def _is_test_path(rel: str) -> bool:
     return bool(_TEST_PATH_RE.search(rel))
 
 
+# ── the scanner never scans itself (alpha-engine-config-I9111) ───────────────
+#
+# A guard that flags its own source is a defect in its own right: every pattern
+# this module detects is necessarily WRITTEN OUT in this module and in the tests
+# that exercise it, so self-scanning generates one allowlist entry per pattern
+# class forever and each new pattern silently adds two more. Handled as a
+# PROPERTY rather than as allowlist lines: the scanner skips its own file and any
+# file that loads it. Both signals are structural — a production call site cannot
+# acquire them without literally importing the guard, which is visible in a diff.
+_SCANNER_SELF_RE = re.compile(
+    r"""(?:^|\s)(?:from|import)\s+openrouter_guard\b"""
+    r"""|spec_from_file_location\(\s*["']openrouter_guard["']"""
+    r"""|["'][^"']*openrouter_guard\.py["']""",
+    re.MULTILINE,
+)
+_SELF_PATH = Path(__file__).resolve()
+
+
+def _is_scanner_source(fp: Path, text: str) -> bool:
+    """This module, or a file whose subject is this module (its tests).
+
+    The basename test is deliberate and is what makes the behaviour identical
+    whether the caller runs the checked-out copy of this script or the one
+    inside the repo being scanned (the reusable workflow does the former, a
+    local  in nousergon-lib the latter — path identity alone
+    disagreed between those two). A file named  IS a
+    guard implementation; it is not a call site.
+    """
+    try:
+        if fp.resolve() == _SELF_PATH:
+            return True
+    except OSError:  # pragma: no cover - resolve() on a broken symlink
+        pass
+    if fp.name == _SELF_PATH.name:
+        return True
+    return bool(_SCANNER_SELF_RE.search(text))
+
+
+# ── provider_comparison: data handling vs. linkage ───────────────────────────
+#
+# THE DISCRIMINATOR (alpha-engine-config-I9111). The banned thing (Brian's
+# 2026-08-03 ruling, I6367; principle 8) is a call site SHAPED AROUND OpenRouter
+# — one that constructs a provider-specific outbound path. An `==` against the
+# string "openrouter" is not that by itself. So a comparison is a finding only
+# when BOTH hold:
+#
+#   1. it is the TEST of a branch (`if` / `elif` / conditional expression /
+#      `while`) rather than a value being computed. A comparison used as a value
+#      — an assertion, a comprehension filter over rows, a dict entry, a boolean
+#      assigned to a name — decides nothing about how a request is built; and
+#   2. the branch it guards CONSTRUCTS: its code (identifiers only — never a
+#      string literal or a comment, which is how a scan turns a file's own
+#      rationale into a violation) names a credential, a base URL, request
+#      headers, an HTTP client, or a model-spec constructor/mutator.
+#
+# Measured on the 2026-08-28 fleet population (38 instances, 7 repos): this
+# promotes exactly one — `vires/api/services/coach/agent.py:373`, the linkage
+# I9092 was filed about, whose guarded branch mutates the request spec via
+# `replace(spec, reasoning=...)`. Every other instance is a test assertion, a
+# registry/router lookup returning data, or the fleet's own defensive guard
+# source. What this still catches that no other pattern does: a branch that
+# builds an OpenRouter-specific request from values that are never spelled out
+# as a literal on the line (a base URL or key held in a variable), which is
+# precisely the dynamic, config-driven variant I9092 recorded as the guard's
+# blind spot.
+#
+# Applied to PYTHON only. Every one of the 38 measured instances is Python, the
+# `spec.provider == "openrouter"` shape the rule exists for is Python, and there
+# is no honest AST for the other extensions — a line-scoped guess over YAML or
+# TypeScript would reintroduce exactly the over-match this replaces. The other
+# four patterns remain in force on every extension, including in tests.
+
+_CONSTRUCTION_IDENT_RE = re.compile(
+    r"base_url|api_base|api_key|apikey|auth|header|credential|token|secret"
+    r"|endpoint|httpx|requests|urllib",
+    re.IGNORECASE,
+)
+# Bare-callable constructors/mutators of a request or a model spec. Deliberately
+# call-position and case-exact: `x.replace("-", "_")` is a string method, while
+# `replace(spec, ...)` is `dataclasses.replace` on a resolved ModelSpec.
+_CONSTRUCTION_CALLS = frozenset({
+    "replace", "ModelSpec", "OpenAI", "AsyncOpenAI", "Anthropic",
+    "AsyncAnthropic", "Client", "AsyncClient", "urlopen",
+})
+
+_OPENROUTER_LITERAL = "openrouter"
+
+
+def _compares_openrouter(test: ast.AST) -> tuple[bool, bool]:
+    """``(has_eq, has_noteq)`` for comparisons against the literal in ``test``."""
+    has_eq = has_noteq = False
+    for node in ast.walk(test):
+        if not isinstance(node, ast.Compare):
+            continue
+        operands = [node.left, *node.comparators]
+        names_literal = any(
+            isinstance(o, ast.Constant)
+            and isinstance(o.value, str)
+            and o.value == _OPENROUTER_LITERAL
+            for o in operands
+        )
+        if not names_literal:
+            continue
+        for op in node.ops:
+            if isinstance(op, ast.Eq):
+                has_eq = True
+            elif isinstance(op, ast.NotEq):
+                has_noteq = True
+    return has_eq, has_noteq
+
+
+def _constructs(body: list[ast.AST]) -> bool:
+    """Does this branch build a provider-specific outbound path?
+
+    Identifiers only. String literals and comments are excluded on purpose:
+    a message that NAMES the thing being rejected is documentation, not
+    construction, and scanning prose is how a guard flags its own rationale.
+    """
+    for stmt in body:
+        for node in ast.walk(stmt):
+            name = None
+            if isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.Attribute):
+                name = node.attr
+            elif isinstance(node, ast.keyword):
+                name = node.arg
+            elif isinstance(node, ast.arg):
+                name = node.arg
+            if name and _CONSTRUCTION_IDENT_RE.search(name):
+                return True
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in _CONSTRUCTION_CALLS
+            ):
+                return True
+    return False
+
+
+def _linkage_comparison_lines(source: str) -> frozenset[int] | None:
+    """Lines carrying a provider comparison that GUARDS a construction.
+
+    ``None`` means the file could not be parsed — the strict fallback, in which
+    every regex match is reported rather than silently dropped.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.IfExp)):
+            test = node.test
+            eq_body: list[ast.AST] = (
+                list(node.body) if isinstance(node, ast.If) else [node.body]
+            )
+            noteq_body: list[ast.AST] = (
+                list(node.orelse) if isinstance(node, ast.If) else [node.orelse]
+            )
+        elif isinstance(node, ast.While):
+            test, eq_body, noteq_body = node.test, list(node.body), []
+        else:
+            continue
+
+        has_eq, has_noteq = _compares_openrouter(test)
+        if not (has_eq or has_noteq):
+            continue
+        # An `==` puts the provider-specific work in the branch body; a `!=`
+        # puts it in the else (`if provider != "openrouter": return` is an
+        # early-out guard, and its empty else constructs nothing).
+        if not ((has_eq and _constructs(eq_body)) or (has_noteq and _constructs(noteq_body))):
+            continue
+        for sub in ast.walk(test):
+            if isinstance(sub, ast.Compare):
+                lines.add(sub.lineno)
+    return frozenset(lines)
+
+
+def _reportable_comparison_lines(rel: str, text: str) -> frozenset[int] | None:
+    """Which lines may carry a provider_comparison FINDING in this file.
+
+    ``None`` = no restriction (report every regex match), the strict fallback.
+    """
+    if _is_test_path(rel):
+        # I9111: a comparison in a test asserts a fixture value; it constructs
+        # no outbound linkage. The other four patterns stay test-covered — an
+        # `openrouter.ai` URL or an `OPENROUTER_API_KEY` read in a test is a
+        # real linkage if that test is ever exercised for real.
+        return frozenset()
+    if not rel.endswith(".py"):
+        return frozenset()
+    return _linkage_comparison_lines(text)
+
+
 def scan(repo: Path, extensions: frozenset[str], skip: frozenset[str] = frozenset()) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
@@ -221,15 +434,17 @@ def scan(repo: Path, extensions: frozenset[str], skip: frozenset[str] = frozense
             print(f"::warning::could not read {fp}: {exc}", file=sys.stderr)
             continue
         rel = str(fp.relative_to(repo))
-        in_test_path = _is_test_path(rel)
+        if _is_scanner_source(fp, text):
+            continue
+        comparison_lines = _reportable_comparison_lines(rel, text)
         for lineno, line in enumerate(text.splitlines(), 1):
             for pattern_class, regex in _PATTERNS:
-                if pattern_class == PATTERN_PROVIDER_COMPARISON and in_test_path:
-                    # I9111: an `==`/`!=` comparison against the literal is the
-                    # exact shape a test asserts a fixture value equals — it
-                    # constructs no outbound linkage. The other four patterns
-                    # stay test-covered; only this comparison shape is exempt.
-                    continue
+                if (
+                    pattern_class == PATTERN_PROVIDER_COMPARISON
+                    and comparison_lines is not None
+                    and lineno not in comparison_lines
+                ):
+                    continue  # data handling, not linkage — see the discriminator
                 m = regex.search(line)
                 if not m:
                     continue
