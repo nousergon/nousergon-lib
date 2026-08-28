@@ -94,21 +94,36 @@ def build(
     label: str,
     status: str,
     summary: str,
-    cadence_minutes: int,
+    cadence_minutes: int | None,
     findings: list[dict] | None = None,
     deep_link: str | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """The envelope. Pure — every producer's tests assert against this."""
+    """The envelope. Pure — every producer's tests assert against this.
+
+    `cadence_minutes=None` is the honest declaration for an EVENT-DRIVEN
+    producer — one with no clock, only a trigger (a merge, a queue message,
+    an EventBridge event pattern) — and is not a default anyone falls into by
+    omission: every existing call site names a number
+    (`alpha-engine-config-I9033`). The console's `checks-envelope` adapter
+    already treats a missing `cadence_minutes` as "no freshness input" and
+    skips staleness entirely rather than computing one against a manufactured
+    number — the alternative, flooring an unscheduled workflow's cadence to
+    this publisher's own 4-hour observation interval, downgrades it to
+    `MISSED` a few hours after every legitimate merge-triggered run, which is
+    the false positive this parameter exists to prevent. `None` still writes
+    the key (`"cadence_minutes": null`) rather than omitting it — the
+    consumer contract enumerates the field as always-present.
+    """
     if status not in _VALID:
         raise ValueError(f"status must be one of {_VALID}, got {status!r}")
     if not check_id or "/" in check_id:
         raise ValueError(f"check_id must be a single path segment, got {check_id!r}")
-    if cadence_minutes <= 0:
+    if cadence_minutes is not None and cadence_minutes <= 0:
         raise ValueError(
-            f"cadence_minutes must be positive, got {cadence_minutes!r} — the "
-            f"console derives its staleness threshold from it, and a zero or "
-            f"negative cadence makes every publish instantly stale"
+            f"cadence_minutes must be positive or None, got {cadence_minutes!r} "
+            f"— the console derives its staleness threshold from it, and a "
+            f"zero or negative cadence makes every publish instantly stale"
         )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -161,7 +176,7 @@ def emit_result(
     label: str,
     status: str,
     summary: str,
-    cadence_minutes: int,
+    cadence_minutes: int | None,
     findings: list[dict] | None = None,
     deep_link: str | None = None,
     dry_run: bool = False,
