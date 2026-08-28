@@ -6,54 +6,16 @@
 # `expires` (YYYY-MM-DD — a past date fails CI loudly), and optionally
 # `tracking`.
 #
-# Every entry below is the guard's OWN implementation and test/workflow
-# source, which necessarily contains these literals to detect and exercise
-# them — the pattern this file exists to allowlist is the exact one the
-# guard's fixtures construct on purpose. Nothing here is a real call site.
+# The guard's own source (scripts/openrouter_guard.py) and the tests that
+# load it are no longer listed here: the scanner excludes them BY
+# CONSTRUCTION (alpha-engine-config-I9111, openrouter_guard.py::
+# _is_scanner_source). One allowlist entry per pattern class per guard file,
+# growing by two every time a pattern is added, was maintenance this file
+# should never have carried. What remains is the reusable workflow's own
+# header prose and the published egress route contract — neither is a call
+# site.
 schema_version: 1
 entries:
-  - path: scripts/openrouter_guard.py
-    pattern: base_url
-    reason: >-
-      The guard's own regex/docstrings/comments name the literal it detects.
-      Not a call site.
-    expires: "2027-08-19"
-    tracking: alpha-engine-config-I6564
-  - path: scripts/openrouter_guard.py
-    pattern: env_key
-    reason: >-
-      The guard's own regex/docstrings/comments name the literal it detects.
-      Not a call site.
-    expires: "2027-08-19"
-    tracking: alpha-engine-config-I6564
-  - path: scripts/openrouter_guard.py
-    pattern: provider_literal
-    reason: >-
-      The guard's own regex/docstrings/comments name the literal it detects.
-      Not a call site.
-    expires: "2027-08-19"
-    tracking: alpha-engine-config-I6564
-  - path: tests/test_openrouter_guard.py
-    pattern: base_url
-    reason: >-
-      Test fixtures construct exactly this literal to assert the guard
-      catches it. Not a call site.
-    expires: "2027-08-19"
-    tracking: alpha-engine-config-I6564
-  - path: tests/test_openrouter_guard.py
-    pattern: env_key
-    reason: >-
-      Test fixtures construct exactly this literal to assert the guard
-      catches it. Not a call site.
-    expires: "2027-08-19"
-    tracking: alpha-engine-config-I6564
-  - path: tests/test_openrouter_guard.py
-    pattern: provider_literal
-    reason: >-
-      Test fixtures construct exactly this literal to assert the guard
-      catches it. Not a call site.
-    expires: "2027-08-19"
-    tracking: alpha-engine-config-I6564
   - path: .github/workflows/openrouter-guard.yml
     pattern: base_url
     reason: >-
@@ -75,27 +37,6 @@ entries:
       looks for. Not a call site.
     expires: "2027-08-19"
     tracking: alpha-engine-config-I6564
-  - path: scripts/openrouter_guard.py
-    pattern: attr_key
-    reason: >-
-      The guard's own regex/docstrings/comments name the literal it detects
-      (widened alpha-engine-config-I9092). Not a call site.
-    expires: "2027-08-28"
-    tracking: alpha-engine-config-I9092
-  - path: scripts/openrouter_guard.py
-    pattern: provider_comparison
-    reason: >-
-      The guard's own regex/docstrings/comments name the literal it detects
-      (widened alpha-engine-config-I9092). Not a call site.
-    expires: "2027-08-28"
-    tracking: alpha-engine-config-I9092
-  - path: tests/test_openrouter_guard.py
-    pattern: attr_key
-    reason: >-
-      Test fixtures (including the vires-I9092 regression fixture) construct
-      exactly this literal to assert the guard catches it. Not a call site.
-    expires: "2027-08-28"
-    tracking: alpha-engine-config-I9092
   - path: src/nousergon_lib/egress/routes.v1.json
     pattern: base_url
     reason: >-

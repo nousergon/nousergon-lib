@@ -360,12 +360,18 @@ def test_attr_key_does_not_double_count_the_all_caps_env_var(tmp_path):
 
 
 def test_provider_comparison_matches_equality_and_inequality(tmp_path):
+    """Both `==` and `!=` are in scope — but only where they GUARD a
+    construction (alpha-engine-config-I9111). The `!=` form is the early-out
+    guard shape, whose provider-specific work sits in the `else`."""
     repo = _git_repo(tmp_path)
     _add(
         repo, "src/router_check.py",
         "if spec.provider == \"openrouter\":\n"
-        "    pass\n"
-        "assert client.spec.provider != 'openrouter'\n",
+        "    client = AsyncClient(base_url=url)\n"
+        "if spec.provider != 'openrouter':\n"
+        "    return None\n"
+        "else:\n"
+        "    headers = build(url)\n",
     )
     _commit(repo)
 
@@ -423,7 +429,8 @@ def test_i9111_the_same_comparison_still_fires_outside_a_test_path(tmp_path):
     _add(
         repo,
         "api/services/coach/agent.py",
-        'if spec.provider == "openrouter" and spec.reasoning is None:\n    pass\n',
+        'if spec.provider == "openrouter" and spec.reasoning is None:\n'
+        '    spec = replace(spec, reasoning={"exclude": True})\n',
     )
     _commit(repo)
 
@@ -460,3 +467,257 @@ def test_i9111_is_test_path_recognizes_fleet_conventions(rel):
 def test_i9111_is_test_path_does_not_flag_production_code():
     assert not og._is_test_path("api/services/coach/agent.py")
     assert not og._is_test_path("src/latest_tests_report.py")
+
+
+# --------------------------------------------------------------------------- #
+# alpha-engine-config-I9111 — the construction discriminator.
+#
+# The regex alone (I9092, commit 812837e) matched ANY equality against the
+# literal: 38 instances across 7 repos, of which exactly one is a linkage. The
+# fixtures below are the real classified shapes from that measured population.
+# Each `_pop_` test names the site it was taken from, so a future change to the
+# discriminator is graded against the field, not against a reconstruction.
+# --------------------------------------------------------------------------- #
+
+
+def _classes(repo):
+    return {m.pattern_class for m in og.scan(repo, og.DEFAULT_EXTENSIONS)}
+
+
+def _fires(tmp_path, rel, source):
+    repo = _git_repo(tmp_path)
+    _add(repo, rel, source)
+    _commit(repo)
+    return og.PATTERN_PROVIDER_COMPARISON in _classes(repo)
+
+
+# --- MUST FIRE: the one real linkage in the measured population ------------- #
+
+
+def test_i9111_pop_vires_coach_agent_is_still_a_finding(tmp_path):
+    """vires/api/services/coach/agent.py:373 — the linkage I9092 was filed
+    about. The comparison guards a branch that MUTATES THE REQUEST SPEC for
+    OpenRouter specifically. Narrowing the pattern must not disarm it."""
+    assert _fires(
+        tmp_path, "api/services/coach/agent.py",
+        'if spec.provider == "openrouter" and spec.reasoning is None:\n'
+        '    spec = replace(spec, reasoning={"exclude": True})\n',
+    )
+
+
+def test_i9111_seeded_violation_in_a_fresh_file_is_a_finding(tmp_path):
+    """A NEW call site building an OpenRouter-specific client from values held
+    in variables — no `openrouter.ai` literal, no all-caps env-var literal, no
+    assignment shape, so patterns 1-4 are all blind. This is what pattern 5
+    uniquely catches, and the reason it is not simply withdrawn."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo, "services/summarizer/client.py",
+        "def build(spec, cfg):\n"
+        '    if spec.provider == "openrouter":\n'
+        "        return AsyncOpenAI(base_url=cfg.url, api_key=cfg.token)\n"
+        "    return anthropic_client(cfg)\n",
+    )
+    _commit(repo)
+    classes = _classes(repo)
+    assert og.PATTERN_PROVIDER_COMPARISON in classes
+    # No other pattern sees this file — the uniqueness claim, asserted.
+    assert og.PATTERN_BASE_URL not in classes
+    assert og.PATTERN_ENV_KEY not in classes
+    assert og.PATTERN_PROVIDER_LITERAL not in classes
+    assert og.PATTERN_ATTR_KEY not in classes
+
+
+def test_i9111_a_credential_lookup_in_the_branch_is_a_finding(tmp_path):
+    assert _fires(
+        tmp_path, "app/llm.py",
+        'if provider == "openrouter":\n'
+        "    return settings.provider_credential\n",
+    )
+
+
+# --- MUST NOT FIRE: provider name arriving as DATA -------------------------- #
+
+
+def test_i9111_pop_dashboard_expense_row_outside_a_test_path(tmp_path):
+    """crucible-dashboard/tests/test_expenses_page.py:176. Held here WITHOUT
+    the tests/ prefix on purpose: a comprehension filter over display rows is
+    data handling wherever it lives, so this must pass on the discriminator
+    alone and not merely because of the test-path exemption."""
+    assert not _fires(
+        tmp_path, "pages/expenses.py",
+        'openrouter = next(r for r in rows if r["Provider"] == "openrouter")\n',
+    )
+
+
+def test_i9111_pop_alpha_engine_config_defensive_guard_source(tmp_path):
+    """alpha-engine-config/scripts/validate_llm_callsite_registry.py:294 — the
+    fleet's OWN registry validator, whose branch reports a violation. Its
+    failure message necessarily names the thing it rejects; prose is not
+    construction, which is why the discriminator reads identifiers only."""
+    assert not _fires(
+        tmp_path, "scripts/validate_llm_callsite_registry.py",
+        'if provider == "openrouter" and repo != OPENROUTER_LINKAGE_EXEMPT_REPO:\n'
+        '    carveout = entry.get("openrouter_carveout")\n'
+        "    if not isinstance(carveout, dict):\n"
+        '        _fail(f"{cid}: provider is openrouter and repo is not krepis - '
+        'this requires an openrouter_carveout block with a tracked issue")\n',
+    )
+
+
+def test_i9111_pop_alpha_engine_config_price_catalogue_lookup(tmp_path):
+    """alpha-engine-config/scripts/reconcile_llm_model_registry.py:270 — a
+    route name compared against a price-catalogue key. Reads data, builds
+    nothing."""
+    assert not _fires(
+        tmp_path, "scripts/reconcile_llm_model_registry.py",
+        'if route == "openrouter":\n'
+        "    hit = openrouter_db.get(model)\n"
+        "    if hit is not None:\n"
+        '        return "openrouter", model, _norm(hit)\n'
+        "    raise UnknownOpenRouterModel(model)\n",
+    )
+
+
+def test_i9111_pop_krepis_registry_slug_formatting(tmp_path):
+    """krepis/src/krepis/model_registry.py:379 — a registry row's route name
+    deciding a slug prefix. A string is returned; nothing is constructed."""
+    assert not _fires(
+        tmp_path, "src/model_registry.py",
+        'if route == "openrouter":\n'
+        '    return "openrouter/%s" % model\n',
+    )
+
+
+def test_i9111_pop_krepis_boolean_assigned_from_a_registry_row(tmp_path):
+    """krepis/src/krepis/model_registry.py:475 — the comparison is a VALUE
+    assigned to a name, not the test of a branch."""
+    assert not _fires(
+        tmp_path, "src/model_registry.py",
+        "targets_openrouter = (\n"
+        '    entry.get("route") == "openrouter"\n'
+        '    or entry.get("upstream") == "other"\n'
+        ")\n"
+        "if targets_openrouter:\n"
+        '    pinning = entry.get("pinning")\n',
+    )
+
+
+def test_i9111_pop_krepis_predicate_returning_a_bool(tmp_path):
+    """krepis/src/krepis/llm.py:1652 — `_is_openrouter()` returns True. A
+    predicate answering a question is not a call site shaped around a
+    provider."""
+    assert not _fires(
+        tmp_path, "src/llm.py",
+        "def _is_openrouter(self) -> bool:\n"
+        '    if self.spec.provider == "openrouter":\n'
+        "        return True\n"
+        "    return False\n",
+    )
+
+
+def test_i9111_pop_krepis_test_assertion(tmp_path):
+    """krepis/tests/test_llm_config.py:33 and 19 siblings — an assertion. Two
+    independent reasons it must pass: it is a value, and it is a test path."""
+    assert not _fires(
+        tmp_path, "tests/test_llm_config.py",
+        'assert spec.provider == "openrouter"\n',
+    )
+
+
+def test_i9111_pop_evaluator_route_name_fixture_ternary(tmp_path):
+    """crucible-evaluator/tests/test_director.py:1876 — a conditional
+    expression choosing a fixture value inside a dict literal."""
+    assert not _fires(
+        tmp_path, "tests/test_director.py",
+        "row = {\n"
+        '    "provider": "openrouter" if route_name == "openrouter" else "litellm",\n'
+        "}\n",
+    )
+
+
+def test_i9111_a_comment_naming_the_comparison_is_not_a_finding(tmp_path):
+    """crucible-research/tests/test_eval_judge.py:540 — a COMMENT describing
+    the shape. A scan that reads a file's own rationale as an execution path
+    creates pressure to delete the explanation."""
+    assert not _fires(
+        tmp_path, "research/judge.py",
+        '# _openai_extra_body() was added only for provider=="openrouter" - the\n'
+        "# provider is now the router edge, so this no longer applies.\n"
+        "value = 1\n",
+    )
+
+
+def test_i9111_non_python_files_are_out_of_scope_for_the_comparison(tmp_path):
+    """No AST exists for TypeScript/YAML, and every measured instance of this
+    shape is Python. A line-scoped guess there would reintroduce the
+    over-match. Patterns 1-4 still cover every extension — asserted here so
+    this exemption cannot silently widen."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "web/src/route.ts", 'if (spec.provider == "openrouter") { return or(); }\n')
+    _add(repo, "web/src/base.ts", 'const B = "https://openrouter.ai/api/v1";\n')
+    _commit(repo)
+    classes = _classes(repo)
+    assert og.PATTERN_PROVIDER_COMPARISON not in classes
+    assert og.PATTERN_BASE_URL in classes
+
+
+def test_i9111_unparseable_python_falls_back_to_strict(tmp_path):
+    """A file the AST cannot read must not become a silent hole. Strict
+    fallback: every regex match is reported."""
+    assert _fires(
+        tmp_path, "app/broken.py",
+        'if spec.provider == "openrouter":\n'
+        "    this is not python(\n",
+    )
+
+
+# --- the scanner does not scan itself -------------------------------------- #
+
+
+def test_i9111_the_scanner_excludes_its_own_source(tmp_path):
+    """A guard flagging its own source is a defect in its own right: every
+    pattern it detects is necessarily written out in it, so self-scanning
+    costs one allowlist entry per pattern class forever. Handled as a
+    property, not as allowlist lines."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "scripts/openrouter_guard.py", _SCRIPT.read_text())
+    _commit(repo)
+    assert og.scan(repo, og.DEFAULT_EXTENSIONS) == []
+
+
+def test_i9111_the_scanner_excludes_the_tests_that_load_it(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "tests/test_openrouter_guard.py", Path(__file__).read_text())
+    _commit(repo)
+    assert og.scan(repo, og.DEFAULT_EXTENSIONS) == []
+
+
+def test_i9111_self_exclusion_does_not_cover_an_ordinary_call_site(tmp_path):
+    """The exclusion is structural, not a name people can borrow: a file must
+    BE the guard or LOAD the guard."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "app/openrouter_client.py", 'BASE = "https://openrouter.ai/api/v1"\n')
+    _commit(repo)
+    assert og.scan(repo, og.DEFAULT_EXTENSIONS) != []
+
+
+# --- the unit the fleet population is graded on ---------------------------- #
+
+
+def test_i9111_constructs_reads_identifiers_not_string_literals():
+    import ast as _ast
+
+    prose = _ast.parse('_fail("provider is openrouter, needs a credential block")').body
+    assert not og._constructs(prose)
+    code = _ast.parse("client = AsyncClient(base_url=u)").body
+    assert og._constructs(code)
+
+
+def test_i9111_constructs_ignores_the_str_replace_method():
+    """`dataclasses.replace(spec, ...)` rebuilds a request spec; `s.replace()`
+    is a string method and must not be mistaken for it."""
+    import ast as _ast
+
+    assert not og._constructs(_ast.parse('name = name.replace("-", "_")').body)
+    assert og._constructs(_ast.parse("spec = replace(spec, reasoning=None)").body)
