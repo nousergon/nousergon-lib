@@ -100,6 +100,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from .cycle_shape import CycleShape, read_cycle_shape
+from .partition import partition_dates
 
 if TYPE_CHECKING:  # pragma: no cover
     from mypy_boto3_stepfunctions.client import SFNClient
@@ -180,6 +181,10 @@ class StageRow:
     unmeasured_artifacts: tuple[str, ...] = ()
     verdict_key: str | None = None
     recorded_at: str = ""
+    #: The date partition the verdict was actually found under. Equal to the
+    #: sweep's ``run_date`` for a converged stage; the calendar partition for
+    #: one still writing to the legacy family (alpha-engine-config-I8809).
+    partition_date: str = ""
 
     @property
     def is_finding(self) -> bool:
@@ -199,6 +204,7 @@ class StageRow:
             "unmeasured_artifacts": list(self.unmeasured_artifacts),
             "verdict_key": self.verdict_key,
             "recorded_at": self.recorded_at,
+            "partition_date": self.partition_date,
         }
 
 
@@ -213,6 +219,11 @@ class CoverageSweep:
     #: ``declared_only`` (the entered set could not be read).
     denominator_source: str
     denominator_reason: str = ""
+    #: Every date partition this sweep unioned, canonical first. One entry once
+    #: the 2026-09-05 cutover lands; two during the migration window
+    #: (alpha-engine-config-I8809). Reported so a reader can never mistake a
+    #: union for a single-partition result.
+    partitions_read: tuple[str, ...] = ()
     cycle: CycleShape | None = field(default=None, repr=False)
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD
     swept_at: str = ""
@@ -256,6 +267,21 @@ class CoverageSweep:
         }
 
     @property
+    def legacy_partition_rows(self) -> int:
+        """Verdicts found OUTSIDE the canonical partition.
+
+        Never an alert condition on its own — during the migration window it
+        is the expected shape, and paging on it would page on the very thing
+        the window exists to tolerate. It is reported because at the cutover
+        it becomes the number that must be zero.
+        """
+        return sum(
+            1
+            for r in self.rows
+            if r.partition_date and r.partition_date != self.run_date
+        )
+
+    @property
     def alert_conditions(self) -> tuple[str, ...]:
         """Every reason this sweep pages, named. Empty ⇒ it does not page."""
         conditions: list[str] = []
@@ -288,6 +314,11 @@ class CoverageSweep:
             f"of {c['expected']} expected"
         )
         extra = f" ({c['unmeasured']} unmeasured, {c['not_entered']} not entered)"
+        if len(self.partitions_read) > 1:
+            extra += (
+                f" [partitions unioned: {', '.join(self.partitions_read)}; "
+                f"{self.legacy_partition_rows} row(s) from a non-canonical partition]"
+            )
         if self.denominator_source != "entered_states":
             extra += f" [denominator: {self.denominator_source}]"
         if not self.should_alert:
@@ -301,6 +332,8 @@ class CoverageSweep:
             "swept_at": self.swept_at,
             "denominator_source": self.denominator_source,
             "denominator_reason": self.denominator_reason,
+            "partitions_read": list(self.partitions_read),
+            "legacy_partition_rows": self.legacy_partition_rows,
             "finding_threshold": self.finding_threshold,
             "counts": self.counts,
             "should_alert": self.should_alert,
@@ -331,6 +364,7 @@ def sweep_coverage(
     verdicts: Mapping[str, Mapping[str, Any]],
     entered_states: Iterable[str] | None,
     entered_reason: str = "",
+    partitions_read: Sequence[str] | None = None,
     cycle: CycleShape | None = None,
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD,
     now: datetime | None = None,
@@ -343,6 +377,7 @@ def sweep_coverage(
     drifted, and silently ignoring it is how the drift stays invisible.
     """
     now = now or datetime.now(timezone.utc)
+    partitions = tuple(partitions_read) if partitions_read else (run_date,)
     declared = [row for row in (registry.get("pipeline_stages") or []) if row.get("stage")]
 
     if entered_states is None:
@@ -381,7 +416,8 @@ def sweep_coverage(
                         declared_output=declared_output,
                         reason=(
                             "no verdict object under "
-                            f"{VERDICT_PREFIX}/{run_date}/ — the stage "
+                            + " or ".join(f"{VERDICT_PREFIX}/{p}/" for p in partitions)
+                            + " — the stage "
                             + (
                                 "entered and recorded nothing"
                                 if entered is not None
@@ -412,8 +448,12 @@ def sweep_coverage(
                 missing_artifacts=_strs(verdict.get("missing")),
                 stale_artifacts=_strs(verdict.get("stale")),
                 unmeasured_artifacts=_strs(verdict.get("unmeasured")),
-                verdict_key=f"{VERDICT_PREFIX}/{run_date}/{stage}.json",
+                verdict_key=(
+                    f"{VERDICT_PREFIX}/"
+                    f"{str(verdict.get('_partition_date') or run_date)}/{stage}.json"
+                ),
                 recorded_at=str(verdict.get("recorded_at", "")),
+                partition_date=str(verdict.get("_partition_date") or run_date),
             )
         )
 
@@ -430,8 +470,12 @@ def sweep_coverage(
                     "registry and the state machine have drifted; see "
                     "alpha-engine-config/scripts/check_stage_coverage_drift.py"
                 ),
-                verdict_key=f"{VERDICT_PREFIX}/{run_date}/{stage}.json",
+                verdict_key=(
+                    f"{VERDICT_PREFIX}/"
+                    f"{str(verdict.get('_partition_date') or run_date)}/{stage}.json"
+                ),
                 recorded_at=str(verdict.get("recorded_at", "")),
+                partition_date=str(verdict.get("_partition_date") or run_date),
             )
         )
 
@@ -441,6 +485,7 @@ def sweep_coverage(
         rows=tuple(rows),
         denominator_source=denominator_source,
         denominator_reason=denominator_reason,
+        partitions_read=partitions,
         cycle=cycle,
         finding_threshold=finding_threshold,
         swept_at=now.astimezone(timezone.utc).isoformat(),
@@ -451,9 +496,21 @@ def sweep_coverage(
 
 
 def _load_verdicts(
-    s3_client: Any, *, bucket: str, run_date: str, prefix: str = VERDICT_PREFIX
+    s3_client: Any,
+    *,
+    bucket: str,
+    run_date: str,
+    partitions: Sequence[str] | None = None,
+    prefix: str = VERDICT_PREFIX,
 ) -> dict[str, dict[str, Any]]:
-    """Read every verdict object under ``<prefix>/<run_date>/``.
+    """Read every verdict object under each ``<prefix>/<date>/`` partition.
+
+    ``partitions`` is the ordered family list from
+    :func:`~.partition.partition_dates`, canonical FIRST. A stage found in an
+    earlier partition is never overwritten by a later one, so a converged
+    stage is always reported from the canonical family and the legacy family
+    only FILLS GAPS (``alpha-engine-config-I8809``). Each verdict carries the
+    partition it came from under ``_partition_date`` so the row can say so.
 
     A key that lists but will not parse is kept with an explicit
     ``status: UNREADABLE``: dropping it would make a corrupt verdict
@@ -461,8 +518,21 @@ def _load_verdicts(
     ``I8152`` class.
     """
     out: dict[str, dict[str, Any]] = {}
+    for partition in partitions or (run_date,):
+        _load_verdicts_one(s3_client, bucket=bucket, date_key=partition, prefix=prefix, out=out)
+    return out
+
+
+def _load_verdicts_one(
+    s3_client: Any,
+    *,
+    bucket: str,
+    date_key: str,
+    prefix: str,
+    out: dict[str, dict[str, Any]],
+) -> None:
     token: str | None = None
-    base = f"{prefix}/{run_date}/"
+    base = f"{prefix}/{date_key}/"
     while True:
         kwargs: dict[str, Any] = {"Bucket": bucket, "Prefix": base}
         if token:
@@ -475,6 +545,10 @@ def _load_verdicts(
             stage = key[len(base) : -len(".json")]
             if not stage or "/" in stage:
                 continue
+            if stage in out:
+                # Canonical partition wins. A duplicate in a later family is
+                # the migration's expected shape, not a conflict to resolve.
+                continue
             try:
                 body = s3_client.get_object(Bucket=bucket, Key=key)["Body"].read()
                 parsed = json.loads(body)
@@ -486,22 +560,24 @@ def _load_verdicts(
                     "status": "UNREADABLE",
                     "is_finding": False,
                     "reason": f"verdict object unreadable: {type(exc).__name__}: {exc}",
+                    "_partition_date": date_key,
                 }
                 continue
             if isinstance(parsed, dict):
+                parsed["_partition_date"] = date_key
                 out[stage] = parsed
         if not page.get("IsTruncated"):
             break
         token = page.get("NextContinuationToken")
         if not token:
             break
-    return out
 
 
 def read_coverage_sweep(
     *,
     pipeline: str,
     run_date: str,
+    calendar_date: str | None = None,
     state_machine_arn: str | None = None,
     registry: Mapping[str, Any] | None = None,
     bucket: str = "alpha-engine-research",
@@ -510,7 +586,15 @@ def read_coverage_sweep(
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD,
     now: datetime | None = None,
 ) -> CoverageSweep:
-    """Read the registry, the verdicts and the cycle, and sweep them."""
+    """Read the registry, the verdicts and the cycle, and sweep them.
+
+    ``run_date`` is the CANONICAL partition — the cycle's trading day.
+    ``calendar_date`` is the legacy family, unioned in only while the
+    ``alpha-engine-config-I8809`` migration window is open
+    (:func:`~.partition.dual_partition_active`). Passing it after the cutover
+    is a no-op rather than an error: the window is closed by
+    :data:`~.partition.CUTOVER_DATE`, not by every caller remembering.
+    """
     if s3_client is None:  # pragma: no cover — production path
         import boto3
         from krepis.aws_region import resolve_region
@@ -522,7 +606,10 @@ def read_coverage_sweep(
 
         registry = sc.load_registry(s3_client, bucket=bucket)
 
-    verdicts = _load_verdicts(s3_client, bucket=bucket, run_date=run_date)
+    partitions = partition_dates(run_date, calendar_date)
+    verdicts = _load_verdicts(
+        s3_client, bucket=bucket, run_date=run_date, partitions=partitions
+    )
 
     cycle: CycleShape | None = None
     entered: list[str] | None = None
@@ -554,6 +641,7 @@ def read_coverage_sweep(
         verdicts=verdicts,
         entered_states=entered,
         entered_reason=entered_reason,
+        partitions_read=partitions,
         cycle=cycle,
         finding_threshold=finding_threshold,
         now=now,
@@ -663,7 +751,15 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(prog="nousergon_lib.pipeline_status.coverage")
     parser.add_argument("--pipeline", required=True)
-    parser.add_argument("--run-date", required=True)
+    parser.add_argument("--run-date", required=True, help="the cycle's TRADING day — the canonical partition")
+    parser.add_argument(
+        "--calendar-date",
+        default=None,
+        help=(
+            "the execution's calendar date — the legacy partition, unioned in "
+            "only while the alpha-engine-config-I8809 migration window is open"
+        ),
+    )
     parser.add_argument("--state-machine-arn", default=None)
     parser.add_argument("--bucket", default="alpha-engine-research")
     parser.add_argument("--registry-path", default=None, help="read the registry from disk")
@@ -704,6 +800,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
         sweep = read_coverage_sweep(
             pipeline=args.pipeline,
             run_date=args.run_date,
+            calendar_date=args.calendar_date,
             state_machine_arn=args.state_machine_arn,
             registry=registry,
             bucket=args.bucket,
@@ -739,7 +836,12 @@ def _main(argv: Sequence[str] | None = None) -> int:
         else:
             from .completion_marker import augment_marker
 
-            augment_marker(sweep.cycle, s3_client=s3_client, bucket=args.bucket)
+            augment_marker(
+                sweep.cycle,
+                s3_client=s3_client,
+                bucket=args.bucket,
+                also_dates=sweep.partitions_read,
+            )
 
     if args.alert and sweep.should_alert:
         from krepis import alerts

@@ -469,6 +469,24 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     # because it is the last check before spend. Routes failures through
     # ExtractWeeklyPreflightError -> NormalizeFailureContext like the other
     # pre-spend gates.
+    # alpha-engine-config-I8809: the weekly graph's ONE date normalization.
+    # It converts the execution's CALENDAR date into the cycle's TRADING day
+    # and stamps run_date_family, so every artifact prefix and every
+    # stage-coverage verdict downstream lands in ONE partition. Before it, the
+    # 2026-08-22 cycle put 28 verdicts under 2026-08-21 and 11 under
+    # 2026-08-22. Reuses the alpha-engine-weekly-preflight function via an
+    # action fast path rather than adding a Lambda, because a new function
+    # would need an IAM role bootstrap — an operator step a PR cannot perform.
+    "NormalizeRunDates": ArtifactReason(
+        reason="Date normalization at the graph's entry (alpha-engine-config-"
+        "I8809) — resolves $.calendar_date to the cycle's NYSE trading day via "
+        "krepis.dates.resolve_trading_day (idempotent, so every downstream "
+        "normalizer becomes a no-op) and writes it to $.run_date with "
+        "$.run_date_family naming which family the value belongs to. Pure "
+        "calendar arithmetic, no AWS call, fail-open onto "
+        "NormalizeRunDatesDegraded which keeps the calendar value AND says so. "
+        "No per-run rendered artifact — it produces a field, not an object.",
+    ),
     "WeeklyPreflight": ArtifactReason(
         reason="Pre-spend I4494 weekly-preflight gate (alpha-engine-"
         "config#4494) — runs sf_preflight.py checks (IAM reachability, "

@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from .cycle_shape import CycleShape
@@ -198,6 +199,7 @@ def augment_marker(
     s3_client: Any,
     bucket: str = "alpha-engine-research",
     prefix: str = MARKER_PREFIX,
+    also_dates: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Merge the cycle shape into the marker in place. Never raises.
 
@@ -211,7 +213,29 @@ def augment_marker(
     swallow would leave every consumer reading a marker that says nothing
     about the cycle, which is the whole defect.
     """
-    key = marker_key(shape.pipeline, shape.run_date, prefix=prefix)
+    result = _augment_one(shape, s3_client=s3_client, bucket=bucket, prefix=prefix,
+                          run_date=shape.run_date)
+    # alpha-engine-config-I8809 migration window: the state machine dual-writes
+    # the envelope marker to the legacy calendar partition too, so a consumer
+    # still reading that family must not see an un-augmented marker beside an
+    # augmented one — an UNKNOWN verdict where the cycle verdict is known is
+    # exactly the ambiguity the augmentation exists to remove.
+    for extra in also_dates or ():
+        if extra and extra != shape.run_date:
+            _augment_one(shape, s3_client=s3_client, bucket=bucket, prefix=prefix,
+                         run_date=extra)
+    return result
+
+
+def _augment_one(
+    shape: CycleShape,
+    *,
+    s3_client: Any,
+    bucket: str,
+    prefix: str,
+    run_date: str,
+) -> dict[str, Any] | None:
+    key = marker_key(shape.pipeline, run_date, prefix=prefix)
     try:
         marker = read_marker(s3_client, bucket=bucket, key=key)
     except Exception:  # noqa: BLE001 — fail-soft, recorded at ERROR
