@@ -383,3 +383,80 @@ def test_provider_comparison_does_not_match_the_assignment_shape(tmp_path):
 
     matches = og.scan(repo, og.DEFAULT_EXTENSIONS)
     assert not any(m.pattern_class == og.PATTERN_PROVIDER_COMPARISON for m in matches)
+
+
+# --------------------------------------------------------------------------- #
+# alpha-engine-config-I9111 — provider_comparison test-path exemption.
+#
+# PATTERN_PROVIDER_COMPARISON (widened by I9092) matched ~39 sites fleet-wide,
+# ~38 of them test assertions comparing a fixture value to the literal
+# "openrouter" — not an outbound linkage. This is a regression test built
+# from the real line that broke crucible-dashboard-PR798:
+#   crucible-dashboard/tests/test_expenses_page.py:176
+#     openrouter = next(r for r in rows if r["Provider"] == "openrouter")
+# It must be RED without the test-path exemption (i.e. it reproduces
+# I9092's own commit 812837e verbatim) and GREEN with it.
+# --------------------------------------------------------------------------- #
+
+
+def test_i9111_a_test_file_table_row_assertion_is_not_flagged(tmp_path):
+    """The exact line shape that reds crucible-dashboard-PR798 must not fire
+    provider_comparison when it lives in a test file — it inspects display
+    data, it does not construct a call."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "tests/test_expenses_page.py",
+        'openrouter = next(r for r in rows if r["Provider"] == "openrouter")\n',
+    )
+    _commit(repo)
+
+    matches = og.scan(repo, og.DEFAULT_EXTENSIONS)
+    assert not any(m.pattern_class == og.PATTERN_PROVIDER_COMPARISON for m in matches)
+
+
+def test_i9111_the_same_comparison_still_fires_outside_a_test_path(tmp_path):
+    """The exemption is test-path-scoped, not pattern-wide — the same token
+    shape in production code (the vires/api/services/coach/agent.py:373
+    shape this pattern exists to catch) must still be flagged."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "api/services/coach/agent.py",
+        'if spec.provider == "openrouter" and spec.reasoning is None:\n    pass\n',
+    )
+    _commit(repo)
+
+    matches = og.scan(repo, og.DEFAULT_EXTENSIONS)
+    assert any(m.pattern_class == og.PATTERN_PROVIDER_COMPARISON for m in matches)
+
+
+def test_i9111_other_patterns_still_fire_inside_test_paths(tmp_path):
+    """Only provider_comparison is test-path-exempt — an OPENROUTER_API_KEY
+    literal, an openrouter.ai URL, or a provider: assignment in a test file
+    is still a real finding (an integration test could hit the network)."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "tests/test_client.py", 'BASE_URL = "https://openrouter.ai/api/v1"\n')
+    _commit(repo)
+
+    matches = og.scan(repo, og.DEFAULT_EXTENSIONS)
+    assert any(m.pattern_class == og.PATTERN_BASE_URL for m in matches)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "tests/test_client.py",
+        "src/test_client.py",
+        "src/__tests__/foo.test.ts",
+        "web/component.spec.tsx",
+        "some/nested/tests/dir/thing.py",
+    ],
+)
+def test_i9111_is_test_path_recognizes_fleet_conventions(rel):
+    assert og._is_test_path(rel)
+
+
+def test_i9111_is_test_path_does_not_flag_production_code():
+    assert not og._is_test_path("api/services/coach/agent.py")
+    assert not og._is_test_path("src/latest_tests_report.py")

@@ -33,6 +33,22 @@ linkage):
      variance the fleet already allowlists under pattern 2), but by adding
      the two token shapes that were actually missing.
 
+**Pattern 5 is test-path-exempt (alpha-engine-config#9092-followup, landed
+2026-08-28 same day as pattern 5 itself).** An ``==``/``!=`` comparison
+against the literal ``"openrouter"`` is the exact shape a test asserts a
+value equals a fixture's chosen string — e.g. a table-row assertion like
+``row["Provider"] == "openrouter"`` in a display test, which constructs no
+outbound linkage at all. Measured across the fleet the morning pattern 5 shipped:
+of ~39 matches, all but one (``vires/api/services/coach/agent.py:373``, a
+PRODUCTION call site — the one this pattern exists to catch) were either the
+fleet's own guard/registry source naming the literal defensively, or a test
+asserting equality against a fixture value. Patterns 1-4 stay test-covered —
+an ``openrouter.ai`` URL, an ``OPENROUTER_API_KEY``/``openrouter_api_key``
+literal, or a ``provider: openrouter`` assignment IN a test file can still
+construct a real call if that test is ever run for real (e.g. an
+integration test hitting the network), so only pattern 5's specific
+comparison shape is exempted, not the whole file class.
+
 **Baseline, not a blank ban.** Measured 2026-08-19 across the fleet: the
 literal ``openrouter.ai`` / ``OPENROUTER_API_KEY`` strings already appear
 dozens of times in ALREADY-LEGITIMATE places — the router's own model
@@ -172,6 +188,21 @@ def _tracked_files(repo: Path, extensions: frozenset[str]) -> list[Path]:
     return out
 
 
+# Test-path shapes, fleet-wide (alpha-engine-config-I9111). Kept intentionally
+# broad — false negatives here (a test NOT recognized as one) are the safe
+# failure mode, since PATTERN_PROVIDER_COMPARISON then just stays strict on
+# that file. Covers: a `test_`-prefixed or `_test`-suffixed Python module, a
+# `.test.`/`.spec.` JS/TS module, or any path with a `test`/`tests` directory
+# segment (`tests/test_expenses_page.py`, `src/__tests__/foo.test.ts`).
+_TEST_PATH_RE = re.compile(
+    r"(^|/)(tests?|__tests__)/|(^|/)test_[^/]+\.py$|_test\.py$|\.(test|spec)\.[jt]sx?$"
+)
+
+
+def _is_test_path(rel: str) -> bool:
+    return bool(_TEST_PATH_RE.search(rel))
+
+
 def scan(repo: Path, extensions: frozenset[str], skip: frozenset[str] = frozenset()) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
@@ -190,8 +221,15 @@ def scan(repo: Path, extensions: frozenset[str], skip: frozenset[str] = frozense
             print(f"::warning::could not read {fp}: {exc}", file=sys.stderr)
             continue
         rel = str(fp.relative_to(repo))
+        in_test_path = _is_test_path(rel)
         for lineno, line in enumerate(text.splitlines(), 1):
             for pattern_class, regex in _PATTERNS:
+                if pattern_class == PATTERN_PROVIDER_COMPARISON and in_test_path:
+                    # I9111: an `==`/`!=` comparison against the literal is the
+                    # exact shape a test asserts a fixture value equals — it
+                    # constructs no outbound linkage. The other four patterns
+                    # stay test-covered; only this comparison shape is exempt.
+                    continue
                 m = regex.search(line)
                 if not m:
                     continue
