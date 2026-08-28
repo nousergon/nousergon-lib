@@ -583,6 +583,23 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "(not a run-day determination) — SNS alert, pipeline proceeds as a "
         "run day; no persisted artifact (the email IS the surface)."
     ),
+    # alpha-engine-config-I8809: the graph-entry normalization state. Overwrites
+    # $.run_date with the cycle's TRADING day (via ApplyNormalizedRunDate) and
+    # stamps run_date_family — see the state's own Comment in
+    # infrastructure/step_function.json for the full partition-family
+    # rationale. It writes no run artifact of its own; its output is the
+    # normalized $.run_date/$.run_date_family threaded into every downstream
+    # stage, so ArtifactReason (not ArchivePageRef) is the correct shape here,
+    # matching WeeklyRunDayGate immediately above it.
+    "NormalizeRunDates": ArtifactReason(
+        reason="Graph-entry run-date normalizer (Lambda invoke, action="
+        "resolve_run_dates) — overwrites $.run_date with the cycle's NYSE "
+        "trading day and stamps run_date_family so every downstream "
+        "consumer converges on one partition; no persisted artifact — its "
+        "output is the normalized $.run_date/$.run_date_family threaded "
+        "into the rest of the run. Fail-open: NormalizeRunDatesDegraded "
+        "leaves $.run_date at the calendar value on Lambda failure."
+    ),
     "Backtester": ArchivePageRef(
         page="analysis",
         artifact_label="Backtester consolidated report",
