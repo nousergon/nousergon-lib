@@ -466,6 +466,75 @@ def _is_scanner_source(fp: Path, text: str) -> bool:
     return bool(_SCANNER_SELF_RE.search(text))
 
 
+# -- declared registries are not call sites ---------------------------------
+#
+# alpha-engine-config-I9295: a registry of provider linkage necessarily NAMES
+# providers -- that is its job, not a violation of it (principle 8 names the
+# registry as the one legitimate home for a model id). The remaining findings
+# on alpha-engine-config's `main` (360, all measured) are ONE class: the
+# declared registry files themselves, plus the validators/tests whose entire
+# SUBJECT is one of those registries.
+#
+# This is the SAME property `_is_scanner_source` already encodes for this
+# module, generalized rather than re-invented, and generalized the same way
+# PR374 generalized comment-stripping: by a STRUCTURAL marker, never a path
+# list. Two structural signals, each visible in a diff:
+#
+#   1. A file DECLARES itself a registry with a one-line header marker. Any
+#      new registry adopts the same marker rather than growing an allowlist
+#      or this scanner's code.
+#   2. A file whose SUBJECT is a declared registry names that registry's
+#      filename literally -- exactly how a test of THIS module names
+#      "provider_linkage_guard.py". Verified 2026-08-29 against every
+#      offending file on alpha-engine-config's main: every one of
+#      scripts/validate_llm_callsite_registry.py,
+#      scripts/validate_llm_model_registry.py,
+#      scripts/check_llm_custody_conformance.py and their test_* companions
+#      references "LLM_CALLSITE_REGISTRY.yaml" or "LLM_MODEL_REGISTRY.yaml"
+#      by name.
+#
+# A path-based exemption would have hidden precisely the call sites this
+# guard exists for -- this does not: an UNRELATED file that happens to
+# mention a registry filename in passing gets the same file-wide exemption a
+# real registry test already earns today, and a genuine new bypass would
+# have to either literally reference the registry (visible) or go undetected
+# by a different, unrelated mechanism.
+_REGISTRY_SELF_RE = re.compile(r"^\s*#\s*provider-linkage-registry:\s*declared\b", re.MULTILINE)
+_REGISTRY_FILENAME_RE = re.compile(r"\b[A-Za-z0-9_]*_REGISTRY\.ya?ml\b")
+
+
+def _is_declared_registry(fp: Path, text: str) -> bool:
+    """A file that IS a provider-linkage registry, by structural marker."""
+    if fp.suffix.lower() not in {".yaml", ".yml"}:
+        return False
+    return bool(_REGISTRY_SELF_RE.search(text))
+
+
+def _registry_filenames(repo: Path, extensions: frozenset[str]) -> frozenset[str]:
+    """Basenames of every declared registry tracked in the repo.
+
+    A separate pass, not a hardcoded list: any file anywhere in the tree that
+    carries the ``provider-linkage-registry: declared`` marker counts, so a
+    new registry needs only that one line, never an edit here.
+    """
+    names: set[str] = set()
+    for fp in _tracked_files(repo, extensions):
+        if fp.suffix.lower() not in {".yaml", ".yml"}:
+            continue
+        try:
+            text = fp.read_text(errors="replace")
+        except OSError:
+            continue
+        if _is_declared_registry(fp, text):
+            names.add(fp.name)
+    return frozenset(names)
+
+
+def _is_registry_subject(text: str, registry_names: frozenset[str]) -> bool:
+    """A file whose subject is a declared registry -- it names the registry."""
+    return any(name in text for name in registry_names)
+
+
 def scan(
     repo: Path,
     extensions: frozenset[str],
@@ -473,13 +542,25 @@ def scan(
     skip: frozenset[str] = frozenset(),
     *,
     strip: bool = True,
+    registry_aware: bool = True,
 ) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
     ``skip`` holds repo-relative paths excluded outright -- the allowlist file
     itself, whose ``reason`` prose legitimately names these same strings and
     would otherwise have to allowlist itself.
+
+    ``registry_aware`` gates the declared-registry exemption (see
+    ``_is_declared_registry`` / ``_is_registry_subject``) exactly the way
+    ``strip`` gates comment-stripping, and for the identical reason
+    (alpha-engine-config-I9295): this is a RELAXATION, so it must be evaluated
+    only in the findings scan, never in the raw scan staleness is computed
+    from. Applying it to both would let it silently retire an existing
+    allowlist entry into "stale" the moment a repo's registry earns the
+    marker -- turning a guard-side relaxation into a red consumer `main` with
+    no commit there, the same failure mode comment-stripping had to avoid.
     """
+    registry_names = _registry_filenames(repo, extensions) if registry_aware else frozenset()
     matches: list[Match] = []
     for fp in _tracked_files(repo, extensions):
         rel = str(fp.relative_to(repo))
@@ -491,6 +572,10 @@ def scan(
             print(f"::warning::could not read {fp}: {exc}", file=sys.stderr)
             continue
         if _is_scanner_source(fp, text):
+            continue
+        if registry_aware and _is_declared_registry(fp, text):
+            continue
+        if registry_names and _is_registry_subject(text, registry_names):
             continue
         body = strip_comments(rel, text) if strip else text
         for lineno, line in enumerate(body.splitlines(), 1):
@@ -708,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
             pass  # allowlist lives outside the repo (a test fixture) -- nothing to skip
         skip = frozenset({allowlist_rel}) if allowlist_rel else frozenset()
         matches = scan(repo, extensions, patterns, skip=skip)
-        raw_matches = scan(repo, extensions, patterns, skip=skip, strip=False)
+        raw_matches = scan(repo, extensions, patterns, skip=skip, strip=False, registry_aware=False)
         allowlist = load_allowlist(allowlist_path, all_pattern_classes())
     except GuardError as exc:
         print(f"::error::could not complete provider linkage guard scan: {exc}")
