@@ -50,3 +50,21 @@ entries:
       hand-edited (alpha-engine-config-I8337).
     expires: "2027-08-25"
     tracking: alpha-engine-config-I8337
+
+  - path: tests/test_provider_linkage_guard.py
+    pattern: base_url
+    reason: >-
+      Fixture repos built by the generalized provider-linkage guard's tests to
+      assert it detects this vendor's linkage, retaining parity with this
+      guard. No network call is made. Expires with this guard's retirement.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: tests/test_provider_linkage_guard.py
+    pattern: env_key
+    reason: >-
+      Same as above -- guard test fixtures naming the credential variable in
+      order to assert it is detected.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
