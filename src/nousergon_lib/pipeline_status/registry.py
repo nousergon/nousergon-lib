@@ -348,14 +348,23 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="evaluator",
         artifact_label="Eval judge (weekly batch)",
     ),
-    # alpha-engine-config-I9329: replaces the retired EvalJudgePoll
+    # alpha-engine-config-I9329: the cutover replaces the EvalJudgePoll
     # lambda:invoke loop (EvalJudgePollChoice/EvalJudgePollWait/EvalJudgePoll/
-    # EvalJudgePollDecision all deleted). Launches the dedicated eval-judge
-    # spot box that EvalJudgeProcess then drives over SSM; substrate-only,
-    # no per-run rendered artifact of its own — the run record is
-    # s3://alpha-engine-research/decision_artifacts/_eval_batch_plans/{date}/
-    # spot_run.json, and the judge's materialized output is on
-    # EvalJudgeProcess's page.
+    # EvalJudgePollDecision) with a dedicated eval-judge spot box. THE OLD
+    # EvalJudgePoll ENTRY BELOW IS KEPT, not deleted, even though this PR's
+    # own nousergon-lib code no longer refers to it: nousergon-data's live
+    # weekly SF (main, as of this PR) still HAS EvalJudgePoll, and this
+    # library's version installs into crucible-dashboard, whose own CI runs
+    # tests/test_pipeline_status_registry_drift.py against nousergon-data's
+    # CURRENT main SF json on every unrelated PR — removing the entry here
+    # before nousergon-data's own SF migration merges would redden that
+    # cross-repo guard for every crucible-dashboard PR in the gap between the
+    # two merges (measured: reproduced locally with this exact removal
+    # before restoring it). An unused key costs nothing — no test in either
+    # repo asserts the registry has no orphans — so the safe order is: add
+    # the new entry now, remove the old one in a follow-up PR once
+    # nousergon-data's SF PR (which deletes the EvalJudgePoll* states) has
+    # merged to main.
     "DispatchEvalJudgeSpot": ArtifactReason(
         reason="Launches the dedicated eval-judge spot box that "
         "EvalJudgeProcess then drives over SSM; writes no per-run rendered "
@@ -363,6 +372,16 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "s3://alpha-engine-research/decision_artifacts/_eval_batch_plans/"
         "{date}/spot_run.json, and the judge's materialized output is on "
         "EvalJudgeProcess's page."
+    ),
+    # KEPT (not removed) for the transition window described above the
+    # DispatchEvalJudgeSpot entry — this state is retired from the SF design
+    # but nousergon-data's SF PR has not yet merged it out of main.
+    "EvalJudgePoll": ArtifactReason(
+        reason="Polling state for the (retired, transition-window only) "
+        "EvalJudge lambda batch job; no per-run artifact — see "
+        "EvalJudgeProcess for the materialized rubric output. Superseded by "
+        "DispatchEvalJudgeSpot once nousergon-data's SF migration merges "
+        "(alpha-engine-config-I9329); remove this entry in that follow-up."
     ),
     "EvalJudgeProcess": ArchivePageRef(
         page="evaluator",
