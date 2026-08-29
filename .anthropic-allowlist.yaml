@@ -50,8 +50,8 @@ entries:
       for, stated as data, not a call site holding its own linkage. Generated
       from the proxy launchers by
       claude-code-config/llm-routing/publish_egress_routes.py and never
-      hand-edited (mirrors the openrouter.ai entry for the same file under
-      .openrouter-allowlist.yaml, alpha-engine-config-I8337).
+      hand-edited (mirrors the OpenRouter-upstream entry for the same file
+      under .openrouter-allowlist.yaml, alpha-engine-config-I8337).
     expires: "2027-08-29"
     tracking: alpha-engine-config-I9263
   - path: tests/test_secret_scan.py
