@@ -80,6 +80,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from .partition import cycle_keys
 from .read import (
     RunStatus,
     _extract_pipeline_role,
@@ -345,6 +346,7 @@ def read_cycle_shape(
     state_machine_arn: str,
     run_date: str,
     *,
+    calendar_date: str | None = None,
     client: SFNClient | None = None,
     walk_cap: int = DEFAULT_WALK_CAP,
     stage_spine: Sequence[str] | None = None,
@@ -354,7 +356,14 @@ def read_cycle_shape(
     Walks ``ListExecutions`` newest-first up to ``walk_cap``, keeping the
     executions whose ``run_date`` (input field, else execution name, else
     ``startDate`` in UTC — the three sources :func:`~.read._extract_run_date`
-    resolves) equals the requested cycle.
+    resolves) is one of this cycle's keys.
+
+    ``calendar_date`` is the execution's own wall-clock day, and on a
+    trading-day-keyed cycle it is a SECOND legitimate identity for the same
+    cycle — see :func:`~.partition.cycle_keys` for the measurement and for
+    why this is permanent rather than a migration fallback. The returned
+    :attr:`CycleShape.run_date` is always the CANONICAL ``run_date``, so the
+    completion marker this shape augments keeps its canonical key.
 
     Raises :class:`~.read.SFNAccessDenied` / :class:`~.read.SFNThrottled`
     rather than returning an empty cycle: a transport or authorization
@@ -365,6 +374,7 @@ def read_cycle_shape(
         client = _sfn_client(state_machine_arn)
 
     pipeline = state_machine_arn.rsplit(":", 1)[-1]
+    keys = set(cycle_keys(run_date, calendar_date))
     inspected = 0
     next_token: str | None = None
     collected: list[tuple[WorkOutcome, str | None, list[str]]] = []
@@ -395,7 +405,7 @@ def read_cycle_shape(
                 desc = client.describe_execution(executionArn=arn)
             except Exception as exc:  # noqa: BLE001
                 _raise_for_boto_error(exc, "DescribeExecution")
-            if cycle_key_for(desc) != run_date:
+            if cycle_key_for(desc) not in keys:
                 continue
 
             start = _parse_ts(desc.get("startDate"))
@@ -441,10 +451,21 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nousergon_lib.pipeline_status.cycle_shape")
     parser.add_argument("--state-machine-arn", required=True)
     parser.add_argument("--run-date", required=True)
+    parser.add_argument(
+        "--calendar-date",
+        default=None,
+        help=(
+            "the execution's own wall-clock day — a second identity for the same "
+            "cycle whenever the cycle is keyed on the trading day "
+            "(alpha-engine-config-I8809)"
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    shape = read_cycle_shape(args.state_machine_arn, args.run_date)
+    shape = read_cycle_shape(
+        args.state_machine_arn, args.run_date, calendar_date=args.calendar_date
+    )
     print(json.dumps(shape.to_dict(), indent=2) if args.json else shape.explain())
     return {
         CycleVerdict.COMPLETED: 0,

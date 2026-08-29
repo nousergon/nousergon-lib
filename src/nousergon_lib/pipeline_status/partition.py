@@ -43,6 +43,7 @@ from typing import Final
 __all__ = [
     "CUTOVER_DATE",
     "PARTITION_FAMILIES",
+    "cycle_keys",
     "dual_partition_active",
     "partition_dates",
 ]
@@ -92,6 +93,57 @@ def partition_dates(
     """
     out: list[str] = []
     for candidate in (run_date, calendar_date if dual_partition_active(today) else None):
+        text = (candidate or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return tuple(out)
+
+
+def cycle_keys(run_date: str, calendar_date: str | None = None) -> tuple[str, ...]:
+    """The execution-identity keys belonging to one cycle, canonical FIRST.
+
+    **This is NOT :func:`partition_dates`, and it does not expire.**
+    ``partition_dates`` answers *which S3 prefixes hold this cycle's
+    artifacts* — a migration question, closed at :data:`CUTOVER_DATE`.
+    This answers *which Step Functions executions ARE this cycle*, and the
+    answer is permanently two-valued for a trading-day-keyed cycle:
+
+    ``nousergon_lib.pipeline_status.read._extract_run_date`` resolves an
+    execution's cycle key from ``input.run_date`` → the execution name →
+    ``startDate``. A scheduled weekly execution carries no ``run_date`` in its
+    input and an opaque UUID name, so its key always falls through to
+    ``startDate`` — the execution's WALL-CLOCK day. That derivation is
+    calendar-family by construction and cannot be made trading-day-family:
+    Step Functions stamps the start time, and no NYSE calendar reaches it.
+
+    Since ``alpha-engine-config-I8809`` the weekly graph keys its artifacts on
+    the TRADING day, so on every Saturday run the two disagree — the cycle is
+    ``2026-08-28`` and its own execution's identity is ``2026-08-29``.
+    Measured 2026-08-29 against the live state machine:
+    ``read_cycle_shape(arn, "2026-08-28")`` returned ``skipped
+    (declared_skip), 0/16 stages`` — the FRIDAY gate-skip execution — while
+    the Saturday execution that did the week's work was not a contributor at
+    all. Two consequences, and the second is the serious one:
+
+    1. the coverage denominator becomes the skip run's entered set, so almost
+       every real stage reads ``not_entered`` and ``ABSENT`` — the one state
+       :mod:`~.coverage` calls serious — becomes structurally unreachable;
+    2. :func:`~.completion_marker.augment_marker` stamps ``cycle.verdict:
+       skipped`` onto the completion marker of a cycle that fully completed,
+       which is ``alpha-engine-config-I8186`` re-created with the sign
+       flipped, on the object every ``gate:*`` ``Verified-when:`` predicate
+       reads.
+
+    Admitting both keys is safe in the direction that matters: a cycle's
+    coverage is a UNION (:func:`~.cycle_shape.build_cycle_shape`), so an extra
+    contributor can only ADD entered stages, and a declared-skip tick of the
+    same weekly cadence adds none. Under-reading drops the run that did the
+    work; over-reading cannot manufacture work that no execution performed.
+
+    Returns a tuple with no duplicates and no empty entries.
+    """
+    out: list[str] = []
+    for candidate in (run_date, calendar_date):
         text = (candidate or "").strip()
         if text and text not in out:
             out.append(text)
