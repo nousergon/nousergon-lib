@@ -536,3 +536,119 @@ def test_an_entry_covering_nothing_at_all_is_still_stale(tmp_path):
         "    expires: 2099-01-01\n"
     ))
     assert plg.main(["--repo", str(repo)]) == 1
+
+
+# -- a declared registry is not a call site (alpha-engine-config-I9295) -----
+#
+# A registry of provider linkage necessarily NAMES providers -- that is its
+# job. The remaining 360 findings measured on alpha-engine-config's main
+# after comment-stripping were ONE class: the declared registry files
+# themselves, plus the validators/tests whose entire subject is one of them.
+# Generalized the same way comment-stripping was: a STRUCTURAL property, not
+# a path list.
+
+
+def test_a_declared_registry_file_is_not_a_call_site(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "private-docs/LLM_MODEL_REGISTRY.yaml",
+        "# provider-linkage-registry: declared\n"
+        "models:\n"
+        "  - provider: anthropic\n"
+        "    env_key: ANTHROPIC_API_KEY\n"
+        "    base_url: api.anthropic.com\n",
+    )
+    assert plg.scan(repo, plg.DEFAULT_EXTENSIONS, ALL_PATTERNS) == []
+
+
+def test_a_yaml_file_without_the_marker_is_still_scanned(tmp_path):
+    """The marker is required -- a YAML file does not get a free pass just
+    because it happens to be named ``*_REGISTRY.yaml``... except when the
+    filename itself carries the naming convention, which is covered by
+    ``test_a_registry_named_by_convention_is_recognized`` below. This test
+    covers a YAML file that is neither marked nor conventionally named."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "config/settings.yaml", "anthropic_key: ANTHROPIC_API_KEY\n")
+    matches = plg.scan(repo, plg.DEFAULT_EXTENSIONS, ALL_PATTERNS)
+    assert _classes(matches) == {"anthropic:env_key"}
+
+
+def test_a_validator_naming_the_registry_is_exempt(tmp_path):
+    """The same technique as `_is_scanner_source`: a file whose subject is a
+    declared registry names that registry's filename literally, exactly how
+    a test of this module names ``provider_linkage_guard.py``."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "private-docs/LLM_MODEL_REGISTRY.yaml",
+        "# provider-linkage-registry: declared\nmodels: []\n",
+    )
+    _add(
+        repo,
+        "scripts/validate_llm_model_registry.py",
+        '"""Validate private-docs/LLM_MODEL_REGISTRY.yaml."""\n'
+        'KNOWN_HOSTS = ["api.anthropic.com", "openrouter.ai"]\n',
+    )
+    matches = plg.scan(repo, plg.DEFAULT_EXTENSIONS, ALL_PATTERNS)
+    assert matches == []
+
+
+def test_an_unrelated_file_naming_the_registry_stays_exempt_too(tmp_path):
+    """Deliberate: the exemption is FILE-WIDE, same shape as the scanner's own
+    self-exemption. A real bypass in an unrelated file does not happen to
+    mention a registry filename by construction -- it would have to add that
+    reference itself, which is visible in the diff."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "private-docs/LLM_MODEL_REGISTRY.yaml",
+        "# provider-linkage-registry: declared\nmodels: []\n",
+    )
+    _add(
+        repo,
+        "scripts/unrelated.py",
+        '# see private-docs/LLM_MODEL_REGISTRY.yaml for context\n'
+        'x = "ANTHROPIC_API_KEY"\n',
+    )
+    matches = plg.scan(repo, plg.DEFAULT_EXTENSIONS, ALL_PATTERNS)
+    assert matches == []
+
+
+def test_no_declared_registry_means_no_subject_exemption(tmp_path):
+    """Without any file carrying the marker, naming a filename that merely
+    LOOKS like a registry buys nothing -- the exemption is keyed off an
+    actually-declared registry, not off vocabulary."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "scripts/mentions_a_registry.py",
+        '# see private-docs/LLM_MODEL_REGISTRY.yaml for context\n'
+        'x = "ANTHROPIC_API_KEY"\n',
+    )
+    matches = plg.scan(repo, plg.DEFAULT_EXTENSIONS, ALL_PATTERNS)
+    assert _classes(matches) == {"anthropic:env_key"}
+
+
+def test_declared_registry_exemption_does_not_redden_a_consumer(tmp_path):
+    """Same safety property as the comment-stripping relaxation: applying
+    uniformly to both the findings scan and the raw staleness scan means an
+    existing allowlist entry inside a (newly) exempt file cannot flip to
+    unallowlisted -- it simply stops appearing at all, on both sides."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo,
+        "private-docs/LLM_MODEL_REGISTRY.yaml",
+        "# provider-linkage-registry: declared\n"
+        "models:\n  - provider: anthropic\n    env_key: ANTHROPIC_API_KEY\n",
+    )
+    _allowlist(repo, (
+        "entries:\n"
+        "  - path: private-docs/LLM_MODEL_REGISTRY.yaml\n"
+        "    pattern: anthropic:env_key\n"
+        "    reason: pre-existing baseline entry, now superseded by the marker\n"
+        "    expires: 2099-01-01\n"
+    ))
+    # No verdict change: the file is fully exempt, so the entry is neither a
+    # finding nor considered stale (it is simply out of scan scope).
+    assert plg.main(["--repo", str(repo)]) == 0
