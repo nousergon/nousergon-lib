@@ -433,3 +433,72 @@ def test_cli_list_providers(capsys):
     out = capsys.readouterr().out
     for name in plg.ALL_PROVIDER_NAMES:
         assert name in out
+
+
+# -- comments are not linkage (alpha-engine-config-I9295) --------------------
+#
+# Measured 2026-08-29 before this change: alpha-engine-config 469 findings,
+# crucible-research 77, nous-ergon-ops 58. Wiring the guard fleet-wide on that
+# baseline means an allowlist of hundreds of entries, which is the guard being
+# switched off one entry at a time rather than a baseline. A comment is not an
+# execution surface -- the same reason DOC_EXTENSIONS are excluded by default.
+
+
+def test_a_python_comment_is_not_linkage(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", "# reads ANTHROPIC_API_KEY on the box\nx = 1\n")
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_a_hash_comment_in_shell_and_yaml_is_not_linkage(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "s.sh", "# export ANTHROPIC_API_KEY=...\necho hi\n")
+    _add(repo, "w.yml", "steps:\n  # ANTHROPIC_API_KEY is no longer set here\n  - run: true\n")
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_a_slash_comment_in_typescript_is_not_linkage(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "a.ts", "// import '@ai-sdk/openai'\n/* ANTHROPIC_API_KEY */\nexport const x = 1;\n")
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_a_string_literal_is_still_linkage(tmp_path):
+    """Comments are blanked; STRINGS are not. A credential in a string executes."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", 'k = os.environ["ANTHROPIC_API_KEY"]\n')
+    assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_a_hash_inside_a_python_string_is_not_treated_as_a_comment(tmp_path):
+    """The real tokenizer, not a `#`-split: the linkage after it must still fire."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", 'url = "#anchor"; k = os.environ["ANTHROPIC_API_KEY"]\n')
+    assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_a_trailing_comment_does_not_hide_linkage_earlier_on_the_line(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", 'k = os.environ["ANTHROPIC_API_KEY"]  # legacy\n')
+    assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_reported_line_numbers_survive_comment_blanking(tmp_path, capsys):
+    """Blanking preserves numbering, so a finding still points at the real line."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", "# a\n# b\n# c\nk = os.environ['ANTHROPIC_API_KEY']\n")
+    assert plg.main(["--repo", str(repo)]) == 1
+    assert "line=4" in capsys.readouterr().out
+
+
+def test_a_file_that_does_not_tokenize_is_still_scanned(tmp_path):
+    """A syntactically broken .py file must never be silently skipped."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", "def broken(:\nk = os.environ['ANTHROPIC_API_KEY']\n")
+    assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_json_has_no_comment_syntax_and_is_left_intact(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "c.json", '{"env": {"ANTHROPIC_API_KEY": "x"}}\n')
+    assert plg.main(["--repo", str(repo)]) == 1

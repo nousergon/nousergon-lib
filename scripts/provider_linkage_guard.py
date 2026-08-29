@@ -46,7 +46,10 @@ allowlist entry is specific about which vendor linkage it is clearing:
 Docs and markdown are excluded by default (``--include-docs`` to override),
 same rationale both predecessor guards carried: this fleet's policy library
 discusses every one of these vendors constantly as a TOPIC, and prose is not
-linkage.
+linkage. **Comments are excluded for the same reason** (I9295): prose after a
+``#`` or ``//`` is not an execution surface, and the file it sits in does not
+change that. String literals are NOT excluded -- a credential name or a base
+URL in a string executes, and must still fail.
 
 **Baseline, not a blank ban.** A ``.provider-linkage-allowlist.yaml`` at the
 repo root pre-clears known matches. A NEW match with no entry fails. An
@@ -255,6 +258,138 @@ DEFAULT_EXTENSIONS = frozenset({
 DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt"})
 
 
+# -- comments are not linkage ------------------------------------------------
+#
+# The guard matched line-by-line over raw text, so a COMMENT naming a provider
+# credential read as a call site. Measured 2026-08-29 on `alpha-engine-config`:
+# 471 findings, the overwhelming majority inside comments -- an allowlist of
+# that size is not a baseline, it is the guard being switched off one entry at
+# a time. The correct fix is upstream: a comment is not an execution surface,
+# for exactly the reason `DOC_EXTENSIONS` are excluded by default. Prose is not
+# linkage whether it sits in a .md file or after a `#`.
+#
+# STRING LITERALS ARE DELIBERATELY LEFT INTACT. A base URL or a credential name
+# in a string IS executable and must still fail. Only the comment regions are
+# blanked, and blanking preserves line numbering so every reported line number
+# still points at the real line.
+
+_COMMENT_HASH_EXTENSIONS = frozenset({
+    ".sh", ".bash", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".service", ".timer",
+})
+_COMMENT_SLASH_EXTENSIONS = frozenset({".ts", ".tsx", ".js", ".mjs"})
+
+
+def _blank_hash_comments(text: str) -> str:
+    """Blank `#` comments, respecting single/double quoted strings on the line."""
+    out: list[str] = []
+    for line in text.splitlines():
+        quote: str | None = None
+        cut: int | None = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if quote is not None:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                cut = i
+                break
+            i += 1
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
+def _blank_slash_comments(text: str) -> str:
+    """Blank `//` and `/* ... */` comments, respecting quoted strings."""
+    out: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        buf: list[str] = []
+        quote: str | None = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < len(line) else ""
+            if in_block:
+                if ch == "*" and nxt == "/":
+                    in_block = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if quote is not None:
+                buf.append(ch)
+                if ch == "\\":
+                    if nxt:
+                        buf.append(nxt)
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in "\"'`":
+                quote = ch
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                in_block = True
+                i += 2
+                continue
+            buf.append(ch)
+            i += 1
+        out.append("".join(buf))
+    return "\n".join(out)
+
+
+def _blank_python_comments(text: str) -> str:
+    """Blank `#` comments using the real tokenizer, so `#` inside a string survives.
+
+    Falls back to the quote-aware scanner when the file does not tokenize --
+    a syntactically broken file must still be SCANNED, never silently skipped.
+    """
+    import io
+    import tokenize
+
+    lines = text.splitlines()
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return _blank_hash_comments(text)
+    for tok in toks:
+        if tok.type != tokenize.COMMENT:
+            continue
+        row, col = tok.start
+        if 1 <= row <= len(lines):
+            lines[row - 1] = lines[row - 1][:col]
+    return "\n".join(lines)
+
+
+def strip_comments(rel: str, text: str) -> str:
+    """`text` with comment regions blanked, line numbering preserved.
+
+    Extensions with no comment syntax (``.json``, ``.plist``) are returned
+    unchanged -- there is nothing to strip and inventing a rule for them would
+    only create a way to hide a real literal.
+    """
+    suffix = Path(rel).suffix.lower()
+    if suffix == ".py":
+        return _blank_python_comments(text)
+    if suffix in _COMMENT_HASH_EXTENSIONS:
+        return _blank_hash_comments(text)
+    if suffix in _COMMENT_SLASH_EXTENSIONS:
+        return _blank_slash_comments(text)
+    return text
+
+
 @dataclass(frozen=True)
 class Match:
     path: str
@@ -355,7 +490,7 @@ def scan(
             continue
         if _is_scanner_source(fp, text):
             continue
-        for lineno, line in enumerate(text.splitlines(), 1):
+        for lineno, line in enumerate(strip_comments(rel, text).splitlines(), 1):
             for klass, regex in patterns:
                 if regex.search(line):
                     matches.append(Match(rel, lineno, klass, line.strip()))
