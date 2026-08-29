@@ -46,7 +46,10 @@ allowlist entry is specific about which vendor linkage it is clearing:
 Docs and markdown are excluded by default (``--include-docs`` to override),
 same rationale both predecessor guards carried: this fleet's policy library
 discusses every one of these vendors constantly as a TOPIC, and prose is not
-linkage.
+linkage. **Comments are excluded for the same reason** (I9295): prose after a
+``#`` or ``//`` is not an execution surface, and the file it sits in does not
+change that. String literals are NOT excluded -- a credential name or a base
+URL in a string executes, and must still fail.
 
 **Baseline, not a blank ban.** A ``.provider-linkage-allowlist.yaml`` at the
 repo root pre-clears known matches. A NEW match with no entry fails. An
@@ -255,6 +258,138 @@ DEFAULT_EXTENSIONS = frozenset({
 DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt"})
 
 
+# -- comments are not linkage ------------------------------------------------
+#
+# The guard matched line-by-line over raw text, so a COMMENT naming a provider
+# credential read as a call site. Measured 2026-08-29 on `alpha-engine-config`:
+# 471 findings, the overwhelming majority inside comments -- an allowlist of
+# that size is not a baseline, it is the guard being switched off one entry at
+# a time. The correct fix is upstream: a comment is not an execution surface,
+# for exactly the reason `DOC_EXTENSIONS` are excluded by default. Prose is not
+# linkage whether it sits in a .md file or after a `#`.
+#
+# STRING LITERALS ARE DELIBERATELY LEFT INTACT. A base URL or a credential name
+# in a string IS executable and must still fail. Only the comment regions are
+# blanked, and blanking preserves line numbering so every reported line number
+# still points at the real line.
+
+_COMMENT_HASH_EXTENSIONS = frozenset({
+    ".sh", ".bash", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".service", ".timer",
+})
+_COMMENT_SLASH_EXTENSIONS = frozenset({".ts", ".tsx", ".js", ".mjs"})
+
+
+def _blank_hash_comments(text: str) -> str:
+    """Blank `#` comments, respecting single/double quoted strings on the line."""
+    out: list[str] = []
+    for line in text.splitlines():
+        quote: str | None = None
+        cut: int | None = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if quote is not None:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "#":
+                cut = i
+                break
+            i += 1
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
+def _blank_slash_comments(text: str) -> str:
+    """Blank `//` and `/* ... */` comments, respecting quoted strings."""
+    out: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        buf: list[str] = []
+        quote: str | None = None
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            nxt = line[i + 1] if i + 1 < len(line) else ""
+            if in_block:
+                if ch == "*" and nxt == "/":
+                    in_block = False
+                    i += 2
+                    continue
+                i += 1
+                continue
+            if quote is not None:
+                buf.append(ch)
+                if ch == "\\":
+                    if nxt:
+                        buf.append(nxt)
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+                i += 1
+                continue
+            if ch in "\"'`":
+                quote = ch
+                buf.append(ch)
+                i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                in_block = True
+                i += 2
+                continue
+            buf.append(ch)
+            i += 1
+        out.append("".join(buf))
+    return "\n".join(out)
+
+
+def _blank_python_comments(text: str) -> str:
+    """Blank `#` comments using the real tokenizer, so `#` inside a string survives.
+
+    Falls back to the quote-aware scanner when the file does not tokenize --
+    a syntactically broken file must still be SCANNED, never silently skipped.
+    """
+    import io
+    import tokenize
+
+    lines = text.splitlines()
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return _blank_hash_comments(text)
+    for tok in toks:
+        if tok.type != tokenize.COMMENT:
+            continue
+        row, col = tok.start
+        if 1 <= row <= len(lines):
+            lines[row - 1] = lines[row - 1][:col]
+    return "\n".join(lines)
+
+
+def strip_comments(rel: str, text: str) -> str:
+    """`text` with comment regions blanked, line numbering preserved.
+
+    Extensions with no comment syntax (``.json``, ``.plist``) are returned
+    unchanged -- there is nothing to strip and inventing a rule for them would
+    only create a way to hide a real literal.
+    """
+    suffix = Path(rel).suffix.lower()
+    if suffix == ".py":
+        return _blank_python_comments(text)
+    if suffix in _COMMENT_HASH_EXTENSIONS:
+        return _blank_hash_comments(text)
+    if suffix in _COMMENT_SLASH_EXTENSIONS:
+        return _blank_slash_comments(text)
+    return text
+
+
 @dataclass(frozen=True)
 class Match:
     path: str
@@ -331,18 +466,101 @@ def _is_scanner_source(fp: Path, text: str) -> bool:
     return bool(_SCANNER_SELF_RE.search(text))
 
 
+# -- declared registries are not call sites ---------------------------------
+#
+# alpha-engine-config-I9295: a registry of provider linkage necessarily NAMES
+# providers -- that is its job, not a violation of it (principle 8 names the
+# registry as the one legitimate home for a model id). The remaining findings
+# on alpha-engine-config's `main` (360, all measured) are ONE class: the
+# declared registry files themselves, plus the validators/tests whose entire
+# SUBJECT is one of those registries.
+#
+# This is the SAME property `_is_scanner_source` already encodes for this
+# module, generalized rather than re-invented, and generalized the same way
+# PR374 generalized comment-stripping: by a STRUCTURAL marker, never a path
+# list. Two structural signals, each visible in a diff:
+#
+#   1. A file DECLARES itself a registry with a one-line header marker. Any
+#      new registry adopts the same marker rather than growing an allowlist
+#      or this scanner's code.
+#   2. A file whose SUBJECT is a declared registry names that registry's
+#      filename literally -- exactly how a test of THIS module names
+#      "provider_linkage_guard.py". Verified 2026-08-29 against every
+#      offending file on alpha-engine-config's main: every one of
+#      scripts/validate_llm_callsite_registry.py,
+#      scripts/validate_llm_model_registry.py,
+#      scripts/check_llm_custody_conformance.py and their test_* companions
+#      references "LLM_CALLSITE_REGISTRY.yaml" or "LLM_MODEL_REGISTRY.yaml"
+#      by name.
+#
+# A path-based exemption would have hidden precisely the call sites this
+# guard exists for -- this does not: an UNRELATED file that happens to
+# mention a registry filename in passing gets the same file-wide exemption a
+# real registry test already earns today, and a genuine new bypass would
+# have to either literally reference the registry (visible) or go undetected
+# by a different, unrelated mechanism.
+_REGISTRY_SELF_RE = re.compile(r"^\s*#\s*provider-linkage-registry:\s*declared\b", re.MULTILINE)
+_REGISTRY_FILENAME_RE = re.compile(r"\b[A-Za-z0-9_]*_REGISTRY\.ya?ml\b")
+
+
+def _is_declared_registry(fp: Path, text: str) -> bool:
+    """A file that IS a provider-linkage registry, by structural marker."""
+    if fp.suffix.lower() not in {".yaml", ".yml"}:
+        return False
+    return bool(_REGISTRY_SELF_RE.search(text))
+
+
+def _registry_filenames(repo: Path, extensions: frozenset[str]) -> frozenset[str]:
+    """Basenames of every declared registry tracked in the repo.
+
+    A separate pass, not a hardcoded list: any file anywhere in the tree that
+    carries the ``provider-linkage-registry: declared`` marker counts, so a
+    new registry needs only that one line, never an edit here.
+    """
+    names: set[str] = set()
+    for fp in _tracked_files(repo, extensions):
+        if fp.suffix.lower() not in {".yaml", ".yml"}:
+            continue
+        try:
+            text = fp.read_text(errors="replace")
+        except OSError:
+            continue
+        if _is_declared_registry(fp, text):
+            names.add(fp.name)
+    return frozenset(names)
+
+
+def _is_registry_subject(text: str, registry_names: frozenset[str]) -> bool:
+    """A file whose subject is a declared registry -- it names the registry."""
+    return any(name in text for name in registry_names)
+
+
 def scan(
     repo: Path,
     extensions: frozenset[str],
     patterns: tuple[tuple[str, re.Pattern[str]], ...],
     skip: frozenset[str] = frozenset(),
+    *,
+    strip: bool = True,
+    registry_aware: bool = True,
 ) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
     ``skip`` holds repo-relative paths excluded outright -- the allowlist file
     itself, whose ``reason`` prose legitimately names these same strings and
     would otherwise have to allowlist itself.
+
+    ``registry_aware`` gates the declared-registry exemption (see
+    ``_is_declared_registry`` / ``_is_registry_subject``) exactly the way
+    ``strip`` gates comment-stripping, and for the identical reason
+    (alpha-engine-config-I9295): this is a RELAXATION, so it must be evaluated
+    only in the findings scan, never in the raw scan staleness is computed
+    from. Applying it to both would let it silently retire an existing
+    allowlist entry into "stale" the moment a repo's registry earns the
+    marker -- turning a guard-side relaxation into a red consumer `main` with
+    no commit there, the same failure mode comment-stripping had to avoid.
     """
+    registry_names = _registry_filenames(repo, extensions) if registry_aware else frozenset()
     matches: list[Match] = []
     for fp in _tracked_files(repo, extensions):
         rel = str(fp.relative_to(repo))
@@ -355,7 +573,12 @@ def scan(
             continue
         if _is_scanner_source(fp, text):
             continue
-        for lineno, line in enumerate(text.splitlines(), 1):
+        if registry_aware and _is_declared_registry(fp, text):
+            continue
+        if registry_names and _is_registry_subject(text, registry_names):
+            continue
+        body = strip_comments(rel, text) if strip else text
+        for lineno, line in enumerate(body.splitlines(), 1):
             for klass, regex in patterns:
                 if regex.search(line):
                     matches.append(Match(rel, lineno, klass, line.strip()))
@@ -421,11 +644,34 @@ def evaluate(
     matches: list[Match],
     allowlist: list[AllowlistEntry],
     today: _dt.date,
+    raw_matches: list[Match] | None = None,
 ) -> Report:
+    """Findings from ``matches``; STALENESS from ``raw_matches``.
+
+    The two are deliberately different match sets (alpha-engine-config-I9295).
+    ``matches`` is comment-stripped, because a comment is not a call site.
+    Staleness asks a different question -- *is this entry still about anything
+    in this repo* -- and is answered against the RAW text, so that teaching the
+    guard to ignore comments does not, by itself, convert a live allowlist
+    entry into a failure.
+
+    That distinction is load-bearing for the fleet, not a nicety. The reusable
+    guard workflow checks the script out UNPINNED (a deliberate decision: a
+    script fix must not wait on every consumer's pin bump), so a guard-side
+    change re-verdicts every consumer repo's `main` with no commit in that
+    repo -- measured twice on 2026-08-28. A change that makes the guard
+    strictly LESS sensitive must therefore be incapable of reddening anyone.
+    Without this split, ignoring comments would have turned three entries on
+    `crucible-research` main stale on merge.
+    """
     by_key: dict[tuple[str, str], list[AllowlistEntry]] = {}
     for e in allowlist:
         by_key.setdefault((e.path, e.pattern_class), []).append(e)
 
+    seen_keys = {
+        (m.path, m.pattern_class)
+        for m in (matches if raw_matches is None else raw_matches)
+    }
     matched_keys: set[tuple[str, str]] = set()
     unallowlisted: list[Match] = []
     covered = 0
@@ -437,6 +683,8 @@ def evaluate(
             continue
         matched_keys.add(key)
         covered += 1
+
+    matched_keys |= {k for k in seen_keys if k in by_key}
 
     expired = [e for e in allowlist if e.expires < today]
     stale = [
@@ -545,12 +793,13 @@ def main(argv: list[str] | None = None) -> int:
             pass  # allowlist lives outside the repo (a test fixture) -- nothing to skip
         skip = frozenset({allowlist_rel}) if allowlist_rel else frozenset()
         matches = scan(repo, extensions, patterns, skip=skip)
+        raw_matches = scan(repo, extensions, patterns, skip=skip, strip=False, registry_aware=False)
         allowlist = load_allowlist(allowlist_path, all_pattern_classes())
     except GuardError as exc:
         print(f"::error::could not complete provider linkage guard scan: {exc}")
         return 2
 
-    report = evaluate(matches, allowlist, _dt.date.today())
+    report = evaluate(matches, allowlist, _dt.date.today(), raw_matches=raw_matches)
     return render(report, len(matches))
 
 
