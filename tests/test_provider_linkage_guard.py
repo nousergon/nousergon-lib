@@ -502,3 +502,37 @@ def test_json_has_no_comment_syntax_and_is_left_intact(tmp_path):
     repo = _git_repo(tmp_path)
     _add(repo, "c.json", '{"env": {"ANTHROPIC_API_KEY": "x"}}\n')
     assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_ignoring_comments_does_not_make_a_live_allowlist_entry_stale(tmp_path):
+    """A guard-side RELAXATION must not be able to redden a consumer repo.
+
+    The reusable workflow checks this script out unpinned, so a change here
+    re-verdicts every consumer's `main` with no commit in that repo. Staleness
+    is therefore evaluated against RAW text: the entry still describes
+    something real, it just no longer fails.
+    """
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", "# reads ANTHROPIC_API_KEY on the box\nx = 1\n")
+    _allowlist(repo, (
+        "entries:\n"
+        "  - path: h.py\n"
+        "    pattern: anthropic:env_key\n"
+        "    reason: baselined comment\n"
+        "    expires: 2099-01-01\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_an_entry_covering_nothing_at_all_is_still_stale(tmp_path):
+    """The stale check is not weakened — only comment-only coverage survives."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", "x = 1\n")
+    _allowlist(repo, (
+        "entries:\n"
+        "  - path: h.py\n"
+        "    pattern: anthropic:env_key\n"
+        "    reason: nothing here any more\n"
+        "    expires: 2099-01-01\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 1

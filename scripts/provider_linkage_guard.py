@@ -471,6 +471,8 @@ def scan(
     extensions: frozenset[str],
     patterns: tuple[tuple[str, re.Pattern[str]], ...],
     skip: frozenset[str] = frozenset(),
+    *,
+    strip: bool = True,
 ) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
@@ -490,7 +492,8 @@ def scan(
             continue
         if _is_scanner_source(fp, text):
             continue
-        for lineno, line in enumerate(strip_comments(rel, text).splitlines(), 1):
+        body = strip_comments(rel, text) if strip else text
+        for lineno, line in enumerate(body.splitlines(), 1):
             for klass, regex in patterns:
                 if regex.search(line):
                     matches.append(Match(rel, lineno, klass, line.strip()))
@@ -556,11 +559,34 @@ def evaluate(
     matches: list[Match],
     allowlist: list[AllowlistEntry],
     today: _dt.date,
+    raw_matches: list[Match] | None = None,
 ) -> Report:
+    """Findings from ``matches``; STALENESS from ``raw_matches``.
+
+    The two are deliberately different match sets (alpha-engine-config-I9295).
+    ``matches`` is comment-stripped, because a comment is not a call site.
+    Staleness asks a different question -- *is this entry still about anything
+    in this repo* -- and is answered against the RAW text, so that teaching the
+    guard to ignore comments does not, by itself, convert a live allowlist
+    entry into a failure.
+
+    That distinction is load-bearing for the fleet, not a nicety. The reusable
+    guard workflow checks the script out UNPINNED (a deliberate decision: a
+    script fix must not wait on every consumer's pin bump), so a guard-side
+    change re-verdicts every consumer repo's `main` with no commit in that
+    repo -- measured twice on 2026-08-28. A change that makes the guard
+    strictly LESS sensitive must therefore be incapable of reddening anyone.
+    Without this split, ignoring comments would have turned three entries on
+    `crucible-research` main stale on merge.
+    """
     by_key: dict[tuple[str, str], list[AllowlistEntry]] = {}
     for e in allowlist:
         by_key.setdefault((e.path, e.pattern_class), []).append(e)
 
+    seen_keys = {
+        (m.path, m.pattern_class)
+        for m in (matches if raw_matches is None else raw_matches)
+    }
     matched_keys: set[tuple[str, str]] = set()
     unallowlisted: list[Match] = []
     covered = 0
@@ -572,6 +598,8 @@ def evaluate(
             continue
         matched_keys.add(key)
         covered += 1
+
+    matched_keys |= {k for k in seen_keys if k in by_key}
 
     expired = [e for e in allowlist if e.expires < today]
     stale = [
@@ -680,12 +708,13 @@ def main(argv: list[str] | None = None) -> int:
             pass  # allowlist lives outside the repo (a test fixture) -- nothing to skip
         skip = frozenset({allowlist_rel}) if allowlist_rel else frozenset()
         matches = scan(repo, extensions, patterns, skip=skip)
+        raw_matches = scan(repo, extensions, patterns, skip=skip, strip=False)
         allowlist = load_allowlist(allowlist_path, all_pattern_classes())
     except GuardError as exc:
         print(f"::error::could not complete provider linkage guard scan: {exc}")
         return 2
 
-    report = evaluate(matches, allowlist, _dt.date.today())
+    report = evaluate(matches, allowlist, _dt.date.today(), raw_matches=raw_matches)
     return render(report, len(matches))
 
 
