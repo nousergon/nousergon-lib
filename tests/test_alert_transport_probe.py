@@ -9,10 +9,8 @@ wrapper (GHA, Lambda, EC2) depends on.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
-
-import pytest
 
 from nousergon_lib import alert_transport_probe as atp
 
