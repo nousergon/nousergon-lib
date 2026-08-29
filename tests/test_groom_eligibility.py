@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import pytest
+from krepis.router import TIER_GROUPS, group_for_tier
 
 from nousergon_lib import groom_eligibility
 from nousergon_lib.groom_eligibility import (
     BUNDLED_FILTERS,
     CI_EXPECTED_RED_LABEL,
-    FALLBACK_TIER_MODELS,
     GATE_SOFT_EXCLUDE_LABELS,
     RULING_PENDING_LABEL,
-    TIER_MODELS,
     TIERS,
     VALID_ISSUE_FILTERS,
-    FallbackModelConfig,
     comment_only_strikes_exceeded,
     decide_slot,
     expected_red_labels_for_checks,
@@ -124,45 +122,36 @@ class TestFilterGrammar:
         assert "high+mid+low" in VALID_ISSUE_FILTERS
 
 
-class TestFallbackTierModels:
-    """FALLBACK_TIER_MODELS contract: the DeepSeek-direct fallback dict
-    mirrors TIER_MODELS' tier-key shape but carries per-tier thinking/effort
-    config (config#TBD — DeepSeek fallback for the groomer when Brian's
-    Claude Max usage runs out mid-run)."""
+class TestTierModelTablesRemoved:
+    """alpha-engine-config-I9297 (Brian ruling 2026-08-29): the module used
+    to hardcode its own tier -> vendor model id tables (``TIER_MODELS``,
+    ``FALLBACK_TIER_MODELS``) — a second routing plane. Both are gone; a
+    decided run now carries a krepis registry GROUP, resolved via
+    ``krepis.router.group_for_tier`` (the ONE tier->group mapping,
+    fleet-wide), never a model id."""
 
-    def test_keys_match_tier_models_keys(self):
-        assert set(FALLBACK_TIER_MODELS) == set(TIER_MODELS) == set(TIERS)
+    def test_tier_models_no_longer_exported(self):
+        assert not hasattr(groom_eligibility, "TIER_MODELS")
 
-    def test_values_are_fallback_model_config(self):
-        for tier, cfg in FALLBACK_TIER_MODELS.items():
-            assert isinstance(cfg, FallbackModelConfig), tier
+    def test_fallback_tier_models_no_longer_exported(self):
+        assert not hasattr(groom_eligibility, "FALLBACK_TIER_MODELS")
 
-    def test_model_ids_are_deepseek(self):
-        for tier, cfg in FALLBACK_TIER_MODELS.items():
-            assert cfg.model.startswith("deepseek-"), f"{tier}: {cfg.model!r}"
+    def test_fallback_model_config_no_longer_exported(self):
+        assert not hasattr(groom_eligibility, "FallbackModelConfig")
 
-    def test_low_tier_has_no_effort_level(self):
-        # Verified: DeepSeek's effort parameter collapses low/medium to
-        # "high" server-side, so there's no real "low effort" to request.
-        # The low tier runs with thinking off entirely instead.
-        low = FALLBACK_TIER_MODELS["low"]
-        assert low.thinking is False
-        assert low.effort is None
+    def test_group_for_tier_covers_every_declared_tier(self):
+        assert set(TIER_GROUPS) == set(TIERS)
 
-    def test_mid_and_high_tiers_think_with_a_valid_effort_level(self):
-        valid_efforts = {"high", "max"}  # the only two real DeepSeek levels
-        for tier in ("mid", "high"):
-            cfg = FALLBACK_TIER_MODELS[tier]
-            assert cfg.thinking is True
-            assert cfg.effort in valid_efforts
+    def test_group_for_tier_returns_a_registry_group_not_a_model_id(self):
+        for tier in TIERS:
+            group = group_for_tier(tier)
+            assert group in {"low", "med", "high", "ultra"}
+            assert "deepseek" not in group and "claude" not in group
 
-    def test_high_tier_never_a_lesser_model_than_mid(self):
-        # Mirrors the TIER_MODELS "high never rides below its own model"
-        # invariant enforced elsewhere in this module (decide_slot /
-        # decide_trigger) — high's fallback model must be at least as
-        # capable as mid's, never a downgrade.
-        assert FALLBACK_TIER_MODELS["mid"].model == "deepseek-v4-flash"
-        assert FALLBACK_TIER_MODELS["high"].model == "deepseek-v4-pro"
+    def test_group_for_tier_refuses_an_unknown_tier(self):
+        # Fail closed (model-router-policy R20): no silent default-to-mid.
+        with pytest.raises(ValueError):
+            group_for_tier("nope")
 
 
 class TestDecideSlot:
@@ -170,21 +159,21 @@ class TestDecideSlot:
         # Brian's 8/9/10 example: every slot launches, each works ONLY its
         # own tier (no lower tier is below floor, so nothing bundles).
         counts = {"low": 8, "mid": 9, "high": 10}
-        for slot, expected_filter, expected_model in [
-            ("low", "low-only", TIER_MODELS["low"]),
-            ("mid", "mid-only", TIER_MODELS["mid"]),
-            ("high", "high-only", TIER_MODELS["high"]),
+        for slot, expected_filter, expected_tier in [
+            ("low", "low-only", "low"),
+            ("mid", "mid-only", "mid"),
+            ("high", "high-only", "high"),
         ]:
             d = decide_slot(slot, counts)
             assert d.launch and d.issue_filter == expected_filter
-            assert d.model == expected_model
+            assert d.model_group == group_for_tier(expected_tier)
 
     def test_starving_low_bundles_into_mid_slot(self):
         # Brian's example: low=6 (< floor) rides the mid slot.
         d = decide_slot("mid", {"low": 6, "mid": 9, "high": 0})
         assert d.launch
         assert d.issue_filter == "mid+low"
-        assert d.model == TIER_MODELS["mid"]
+        assert d.model_group == group_for_tier("mid")
 
     def test_thin_everything_bundles_at_high_slot_on_cheapest_adequate_model(self):
         # 1 low + 3 mid + 0 high at the high slot: queue is 4 < floor -> skip
@@ -193,14 +182,14 @@ class TestDecideSlot:
         # ...but with 5 high it launches, using the high tier's own model
         d = decide_slot("high", {"low": 1, "mid": 3, "high": 5})
         assert d.launch and d.issue_filter == "high+mid+low"
-        assert d.model == TIER_MODELS["high"]
+        assert d.model_group == group_for_tier("high")
 
     def test_model_is_highest_present_not_slot(self):
         # high slot, no high issues, bundle of starving low+mid -> mid's model.
         d = decide_slot("high", {"low": 5, "mid": 6, "high": 0})
         assert d.launch  # 11 >= floor
         assert d.issue_filter == "mid+low"
-        assert d.model == TIER_MODELS["mid"]  # never the high tier's model without high issues
+        assert d.model_group == group_for_tier("mid")  # never the high tier's group without high issues
 
     def test_light_queue_skips_with_zero_spend(self):
         d = decide_slot("low", {"low": 6, "mid": 40, "high": 3})
@@ -224,7 +213,7 @@ class TestDecideSlot:
         # Low slot with a starving high queue: high must NOT ride Haiku.
         d = decide_slot("low", {"low": 9, "mid": 0, "high": 3})
         assert d.launch and d.issue_filter == "low-only"
-        assert d.model == TIER_MODELS["low"]
+        assert d.model_group == group_for_tier("low")
 
     def test_empty_queue(self):
         d = decide_slot("high", {"low": 0, "mid": 0, "high": 0})
@@ -233,7 +222,7 @@ class TestDecideSlot:
     def test_record_shape(self):
         rec = decide_slot("mid", {"low": 0, "mid": 9, "high": 0}).as_record()
         assert set(rec) == {
-            "launch", "tiers", "issue_filter", "model", "reason",
+            "launch", "tiers", "issue_filter", "model_group", "reason",
         }
 
 
@@ -244,10 +233,11 @@ class TestDecideTrigger:
 
     def test_brians_8_9_10_all_three_spin_up_same_trigger(self):
         decisions = [d for d in self._launches({"low": 8, "mid": 9, "high": 10}) if d.launch]
-        assert [(d.issue_filter, d.model) for d in sorted(decisions, key=lambda x: x.issue_filter)] == [
-            ("high-only", "deepseek-v4-pro"),
-            ("low-only", "deepseek-v4-flash"),
-            ("mid-only", "deepseek-v4-flash"),
+        assert [(d.issue_filter, d.model_group)
+                for d in sorted(decisions, key=lambda x: x.issue_filter)] == [
+            ("high-only", group_for_tier("high")),
+            ("low-only", group_for_tier("low")),
+            ("mid-only", group_for_tier("mid")),
         ]
 
     def test_thin_tier_launches_independently_instead_of_attaching(self):
@@ -266,18 +256,18 @@ class TestDecideTrigger:
         assert len(decisions) == 3
         assert {d.issue_filter for d in decisions} == {"low-only", "mid-only", "high-only"}
 
-    def test_each_tier_gets_own_model(self):
+    def test_each_tier_gets_own_model_group(self):
         decisions = [d for d in self._launches({"low": 1, "mid": 2, "high": 0}) if d.launch]
         by_filter = {d.issue_filter: d for d in decisions}
-        assert by_filter["low-only"].model == "deepseek-v4-flash"
-        assert by_filter["mid-only"].model == "deepseek-v4-flash"
+        assert by_filter["low-only"].model_group == group_for_tier("low")
+        assert by_filter["mid-only"].model_group == group_for_tier("mid")
 
-    def test_high_launches_independently_its_own_model(self):
+    def test_high_launches_independently_its_own_model_group(self):
         decisions = [d for d in self._launches({"low": 9, "mid": 0, "high": 2}) if d.launch]
         by_filter = {d.issue_filter: d for d in decisions}
         assert "low-only" in by_filter
         assert "high-only" in by_filter
-        assert by_filter["high-only"].model == "deepseek-v4-pro"
+        assert by_filter["high-only"].model_group == group_for_tier("high")
 
     def test_empty_backlog_no_launches(self):
         assert all(not d.launch for d in self._launches({"low": 0, "mid": 0, "high": 0}))
