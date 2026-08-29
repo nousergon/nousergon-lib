@@ -113,6 +113,13 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # Per-execution ephemeral dispatch box (nousergon-data#975) — retires the
     # always-on dashboard-box SPOF that every weekly SSM stage dispatched from.
     "WaitForWeeklyFreshnessSpotBootstrap": "DispatchWeeklyFreshnessSpot",
+    # alpha-engine-config-I9329: eval-judge cutover to a dedicated spot box
+    # (replaces the retired EvalJudgePoll lambda:invoke loop). Both companions
+    # poll via getCommandInvocation but still carry a WaitFor* name, so the
+    # name-keyed test_wait_companions_in_json_are_in_wait_grouping guard
+    # requires both rows regardless of resource.
+    "WaitForEvalJudgeSpotBootstrap": "DispatchEvalJudgeSpot",
+    "WaitForEvalJudgeProcess": "EvalJudgeProcess",
     # Pre-open Trading SF
     "WaitForMorningPlanner": "RunMorningPlanner",
     "WaitForDailyNews": "RunDailyNews",  # secondary daily news pull (fail-soft)
@@ -341,9 +348,21 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         page="evaluator",
         artifact_label="Eval judge (weekly batch)",
     ),
-    "EvalJudgePoll": ArtifactReason(
-        reason="Polling state for the EvalJudge batch job; no per-run artifact — "
-        "see EvalJudgeProcess for the materialized rubric output."
+    # alpha-engine-config-I9329: replaces the retired EvalJudgePoll
+    # lambda:invoke loop (EvalJudgePollChoice/EvalJudgePollWait/EvalJudgePoll/
+    # EvalJudgePollDecision all deleted). Launches the dedicated eval-judge
+    # spot box that EvalJudgeProcess then drives over SSM; substrate-only,
+    # no per-run rendered artifact of its own — the run record is
+    # s3://alpha-engine-research/decision_artifacts/_eval_batch_plans/{date}/
+    # spot_run.json, and the judge's materialized output is on
+    # EvalJudgeProcess's page.
+    "DispatchEvalJudgeSpot": ArtifactReason(
+        reason="Launches the dedicated eval-judge spot box that "
+        "EvalJudgeProcess then drives over SSM; writes no per-run rendered "
+        "artifact of its own — the run record is "
+        "s3://alpha-engine-research/decision_artifacts/_eval_batch_plans/"
+        "{date}/spot_run.json, and the judge's materialized output is on "
+        "EvalJudgeProcess's page."
     ),
     "EvalJudgeProcess": ArchivePageRef(
         page="evaluator",
