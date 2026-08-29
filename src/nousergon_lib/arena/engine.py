@@ -489,18 +489,25 @@ def decide_pointer(
             )
         )
 
-    supported = [c for c in comparisons if c.supported]
+    # (lower bound, comparison) pairs. Building the tuple here rather than
+    # reaching through `c.bound` at the ranking site keeps the bound's
+    # presence a fact of the list's construction instead of an invariant a
+    # reader has to hold in their head.
+    supported: list[tuple[float, Comparison]] = [
+        (c.bound.lower, c) for c in comparisons if c.bound is not None and c.bound.supported
+    ]
 
     if not incumbent_eligible:
         # The incumbent is not permitted to serve. The pointer MUST move, and
         # a supported lead is not required — continuing to serve a known-unfit
         # arm is never the safer option.
-        candidates = supported or [c for c in comparisons if c.status == "measured"]
+        candidates = supported or [
+            (c.bound.lower if c.bound else float("-inf"), c)
+            for c in comparisons
+            if c.status == "measured"
+        ]
         if candidates:
-            chosen = max(
-                candidates,
-                key=lambda c: (c.bound.lower if c.bound else float("-inf"), c.challenger),
-            ).challenger
+            chosen = max(candidates, key=lambda item: (item[0], item[1].challenger))[1].challenger
         else:
             chosen = eligible_arms[0]
         return PointerDecision(
@@ -576,7 +583,7 @@ def decide_pointer(
     # sequence's lower bound. This is what makes leads on windows of different
     # lengths comparable without a cross-window aggregation: a short window
     # produces a wide interval and therefore a small lower bound on its own.
-    winner = max(supported, key=lambda c: (c.bound.lower, c.challenger))
+    winner_lower, winner = max(supported, key=lambda item: (item[0], item[1].challenger))
     return PointerDecision(
         slot=config.slot,
         as_of=as_of,
@@ -586,7 +593,7 @@ def decide_pointer(
         status="decided",
         reason=(
             f"{winner.challenger} leads {incumbent} by {winner.window.mean_diff:.6g} over {winner.window.n_dates} paired date(s) ({winner.window.weeks} week(s)); "
-            f"confidence-sequence lower bound {winner.bound.lower:.6g} > 0"
+            f"confidence-sequence lower bound {winner_lower:.6g} > 0"
         ),
         comparisons=tuple(comparisons),
         ineligible=ineligible,

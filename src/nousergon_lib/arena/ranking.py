@@ -265,13 +265,14 @@ def rank_pairwise(
             margin_sum[arm_b] -= margin
             margin_n[arm_a] += 1
             margin_n[arm_b] += 1
-            if verdict.winner is None:
+            won, lost = verdict.winner, verdict.loser
+            if won is None or lost is None:
                 ties[arm_a] += 1
                 ties[arm_b] += 1
             else:
-                wins[verdict.winner] += 1
-                losses[verdict.loser] += 1
-                beats[verdict.winner].add(verdict.loser)
+                wins[won] += 1
+                losses[lost] += 1
+                beats[won].add(lost)
 
     standings = {
         arm: ArmStanding(

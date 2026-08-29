@@ -192,7 +192,7 @@ class ArmEvent:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "kind": self.kind,
             "arm_id": self.arm_id,
             "date": self.date,
