@@ -296,3 +296,155 @@ def test_the_marker_is_augmented_in_every_partition_the_sweep_unioned():
         "_sf_completion/ne-weekly-freshness-pipeline/2026-08-28.json",
         "_sf_completion/ne-weekly-freshness-pipeline/2026-08-29.json",
     }
+
+
+# ── The CYCLE key is not the artifact partition, and does not expire ─────────
+
+
+def test_cycle_keys_admits_the_calendar_identity_permanently():
+    """``cycle_keys`` must NOT be gated on the migration window.
+
+    ``partition_dates`` answers *which S3 prefixes hold this cycle's
+    artifacts* and closes at the cutover. ``cycle_keys`` answers *which
+    executions ARE this cycle*, and a scheduled weekly execution's identity
+    falls through to ``startDate`` — its wall-clock day — forever, because
+    Step Functions stamps the start time and no NYSE calendar reaches it.
+    Expiring this would silently re-break the cycle lookup on 2026-09-05.
+    """
+    from nousergon_lib.pipeline_status.partition import cycle_keys
+
+    assert cycle_keys("2026-08-28", "2026-08-29") == ("2026-08-28", "2026-08-29")
+    # partition_dates DOES expire; cycle_keys must not. Pinned side by side so
+    # a future edit cannot collapse the two into one helper.
+    assert partition_dates("2026-08-28", "2026-08-29", today=CUTOVER_DATE) == ("2026-08-28",)
+
+
+def test_cycle_keys_is_canonical_first_and_never_duplicates():
+    from nousergon_lib.pipeline_status.partition import cycle_keys
+
+    assert cycle_keys("2026-08-28", "2026-08-28") == ("2026-08-28",)
+    assert cycle_keys("2026-08-28", None) == ("2026-08-28",)
+    assert cycle_keys("2026-08-28", "   ") == ("2026-08-28",)
+
+
+class _CycleKeySFN:
+    """Two executions of ONE weekly cycle with two different identities.
+
+    ``sat-uuid`` is the Saturday cadence run: no ``run_date`` in its input and
+    an opaque name, so its cycle key derives from ``startDate`` — the CALENDAR
+    day, ``2026-08-29``. ``fri-uuid`` is the Friday run-day-gate tick, which
+    declares itself and skips. The cycle is keyed on the TRADING day,
+    ``2026-08-28``.
+    """
+
+    _EXECUTIONS = [
+        {
+            "executionArn": "arn:aws:states:us-east-1:1:execution:sf:sat-uuid",
+            "name": "sat-uuid",
+            "status": "SUCCEEDED",
+            "startDate": datetime(2026, 8, 29, 9, 0, tzinfo=timezone.utc),
+        },
+        {
+            "executionArn": "arn:aws:states:us-east-1:1:execution:sf:fri-uuid",
+            "name": "fri-uuid",
+            "status": "SUCCEEDED",
+            "startDate": datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc),
+        },
+    ]
+    _HISTORY = {
+        "sat-uuid": [
+            {"type": "TaskStateEntered", "stateEnteredEventDetails": {"name": n}}
+            for n in ("MorningEnrich", "DataPhase1", "Director")
+        ],
+        "fri-uuid": [
+            {"type": "TaskStateEntered", "stateEnteredEventDetails": {"name": "WeeklyRunDayGate"}}
+        ],
+    }
+
+    def list_executions(self, **_):
+        return {"executions": list(self._EXECUTIONS)}
+
+    def describe_execution(self, *, executionArn):
+        name = executionArn.rsplit(":", 1)[-1]
+        row = next(e for e in self._EXECUTIONS if e["name"] == name)
+        return {
+            "executionArn": executionArn,
+            "name": name,
+            "status": row["status"],
+            "startDate": row["startDate"],
+            "input": '{"pipeline_role":"weekly"}',
+        }
+
+    def get_execution_history(self, *, executionArn, **_):
+        return {"events": self._HISTORY[executionArn.rsplit(":", 1)[-1]]}
+
+
+def test_a_trading_day_cycle_admits_its_own_saturday_execution():
+    """The regression this exists for, measured live 2026-08-29.
+
+    ``read_cycle_shape(arn, "2026-08-21")`` against the real
+    ``ne-weekly-freshness-pipeline`` returned ``skipped (declared_skip),
+    0/16 stages in 1 execution`` — the Friday gate tick — while the four
+    executions that actually ran the 2026-08-22 cycle were not contributors.
+    Passing the calendar identity returned ``incomplete (partial_cycle),
+    14/16 across 5 executions``.
+
+    Two consequences, and the second is the serious one: the coverage
+    denominator becomes the skip run's entered set (so ``ABSENT`` is
+    unreachable), and ``augment_marker`` stamps ``cycle.verdict: skipped``
+    onto the completion marker of a cycle that completed — which is
+    ``alpha-engine-config-I8186`` with the sign flipped, on the object every
+    ``gate:*`` ``Verified-when:`` predicate reads.
+    """
+    from nousergon_lib.pipeline_status.cycle_shape import read_cycle_shape
+
+    arn = "arn:aws:states:us-east-1:1:stateMachine:ne-weekly-freshness-pipeline"
+    spine = ["MorningEnrich", "DataPhase1", "Director"]
+
+    without = read_cycle_shape(arn, "2026-08-28", client=_CycleKeySFN(), stage_spine=spine)
+    assert [e.execution_name for e in without.executions] == ["fri-uuid"]
+    # The Saturday run that did the week's work is not a contributor to its
+    # own cycle: the verdict is derived entirely from the Friday tick.
+    assert without.verdict.value == "incomplete"
+    assert without.stage_coverage == "0/3"
+
+    with_calendar = read_cycle_shape(
+        arn, "2026-08-28", calendar_date="2026-08-29", client=_CycleKeySFN(), stage_spine=spine
+    )
+    assert {e.execution_name for e in with_calendar.executions} == {"fri-uuid", "sat-uuid"}
+    assert with_calendar.verdict.value == "completed"
+    # The shape keeps the CANONICAL key, so the marker it augments keeps its
+    # canonical S3 key rather than moving to the legacy partition.
+    assert with_calendar.run_date == "2026-08-28"
+
+
+def test_the_sweep_hands_the_calendar_identity_to_the_cycle_lookup():
+    """The wiring, not just the primitive: a coverage sweep given both dates
+    must pass BOTH down, or the fix above is unreachable in production."""
+    seen: dict[str, object] = {}
+
+    def _fake_read_cycle_shape(arn, run_date, *, calendar_date=None, client=None):
+        seen["run_date"] = run_date
+        seen["calendar_date"] = calendar_date
+        raise RuntimeError("stop here — the call signature is what is under test")
+
+    original = cov.read_cycle_shape
+    cov.read_cycle_shape = _fake_read_cycle_shape
+    try:
+        cov.read_coverage_sweep(
+            pipeline="ne-weekly-freshness-pipeline",
+            run_date="2026-08-28",
+            calendar_date="2026-08-29",
+            state_machine_arn="arn:aws:states:us-east-1:1:stateMachine:x",
+            registry={"pipeline_stages": []},
+            s3_client=_EmptyS3(),
+        )
+    finally:
+        cov.read_cycle_shape = original
+
+    assert seen == {"run_date": "2026-08-28", "calendar_date": "2026-08-29"}
+
+
+class _EmptyS3:
+    def list_objects_v2(self, **_):
+        return {"Contents": [], "IsTruncated": False}

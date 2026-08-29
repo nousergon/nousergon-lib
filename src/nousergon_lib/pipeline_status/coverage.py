@@ -616,7 +616,18 @@ def read_coverage_sweep(
     entered_reason = ""
     if state_machine_arn:
         try:
-            cycle = read_cycle_shape(state_machine_arn, run_date, client=sfn_client)
+            # The cycle's identity keys are NOT the artifact partitions:
+            # partition_dates expires at the I8809 cutover, cycle_keys does
+            # not. A scheduled execution's key falls through to startDate —
+            # its wall-clock day — so a trading-day-keyed cycle must admit
+            # the calendar key forever, or the Saturday run that did the
+            # week's work is not a contributor to its own cycle.
+            cycle = read_cycle_shape(
+                state_machine_arn,
+                run_date,
+                calendar_date=calendar_date,
+                client=sfn_client,
+            )
         except Exception as exc:  # noqa: BLE001 — degrades LOUDLY, never silently
             entered_reason = f"{type(exc).__name__}: {exc}"
             logger.error(
