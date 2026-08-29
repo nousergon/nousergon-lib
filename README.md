@@ -296,6 +296,22 @@ The shared institutional-analytics engine: pure, front-end- and data-source-agno
 - **`quant.attribution`** — single-period Brinson-Fachler decomposition (`brinson_fachler`) + multi-period Cariño linking (`link_periods`) (stdlib).
 - **`quant.stats`** — strategy/signal-quality evaluation metrics (lifted from the backtester's `analysis/`): `dsr` (Probabilistic + Deflated Sharpe, López de Prado), `information_coefficient` (Spearman rank IC), `expectancy` (hit-rate × win/loss decomposition), `multiple_testing` (Benjamini-Hochberg FDR), `risk_matched_benchmark` (EW-high-vol + beta-matched-SPY baselines + Information Ratio), `regime_sortino` (regime-stratified cross-sectional pick-alpha Sortino). **Needs pandas + scipy** — `pip install "nousergon-lib[quant-stats]"` (scipy is only the IC p-value; numpy fallback otherwise).
 
+### `arena` — the shared champion/challenger scoring engine
+
+`nousergon_lib.arena` is the fleet's single implementation of
+`nous-ergon-ops/policies/champion-challenger-policy.md`, so all four swappable slots — universe cut, selection producer, model (M), strategy (S) — run one set of rules instead of four drifting copies. Pure compute: stdlib only, no numpy, importable from a Lambda.
+
+- **`arena.arms`** — the append-only, immutable arm register. An arm is a **recipe** (features, hyperparameters, training-window rule and refit cadence) and its id encodes its own spec hash, so a changed recipe is necessarily a NEW arm and cannot inherit a record. A scheduled refit is recorded and changes nothing: the score series stays continuous across every refit. Lifecycle is an event fold, not a mutable row, so `retired_date` is queryable without there being a field to overwrite.
+- **`arena.ladder`** — the per-arm score ladder: 1, 2, 3, … N-week scores, every rung recomputed every cycle. The track record. There is deliberately **no** best-rung selector; picking the flattering horizon would turn a pre-registered statistic into a search over 52 of them.
+- **`arena.window`** — longest-common-window pairing. Two arms are compared only over dates on which **both** produced, paired per date, and the intersection is reported alongside the metric. An empty intersection is `unmeasurable` with a reason, never a tie.
+- **`arena.confseq`** — an anytime-valid confidence sequence (Robbins normal-mixture boundary, Howard et al. 2021 §3.5) on the paired per-date difference. Valid at every stopping time, so a weekly look does not inflate the false-promotion rate the way 52 fixed-sample tests a year do. It subsumes minimum-evidence floors, which is why `thin_evidence`-style gates are removed rather than retuned.
+- **`arena.ranking`** — Condorcet-style pairwise-wins ranking, which is how arms of very different ages are ranked without ever comparing incomparable windows: every pair is judged on its own overlap, and an arm's standing is its count of pairwise losses.
+- **`arena.engine`** — `run_cycle()`: the pointer decision (free movement in both directions, no cooldown), the cap-with-grace retirement rule, hard serving preconditions that outrank any lead, a hard `TrainingIntegrityError` when any arm's fit is unsound, and the `arena_cycle` artifact.
+
+```python
+from nousergon_lib.arena import ArenaConfig, ArmRegister, ArmSeries, run_cycle
+```
+
 ### `egress.routes` — published LLM egress-proxy route contract
 
 `nousergon_lib.egress.routes` publishes, as a versioned artifact with a JSON Schema beside it, **which upstream hosts a multi-tenant LLM egress-proxy deployment serves and how each is authenticated** — `box_upstream_hosts()`, `laptop_upstream_hosts()`, `upstream_hosts(table)`, `table(name)`, `load_contract()`, `load_schema()`. A request naming a host absent from the table is refused by the proxy with `unknown upstream host`, so anything deciding which model rows are *servable* has to know the table; publishing it here is what lets a consumer read it with **no credential** instead of checking out the private repo that configures the proxy (alpha-engine-config-I8337). The artifact carries upstream host, path prefix and auth mode only — no key-environment names, no ports, no host of ours — and `tests/test_egress_routes_contract.py` asserts that. Deployments are never unioned: `box` and `laptop` are different tables. Stdlib only.
