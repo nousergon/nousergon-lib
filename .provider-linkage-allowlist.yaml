@@ -1,0 +1,185 @@
+# .provider-linkage-allowlist.yaml -- baseline for scripts/provider_linkage_guard.py
+#
+# Brian's 2026-08-29 ruling: "the entire nous ergon system should now be
+# running through the krepis router... we should have no other parallel
+# setups, it should all funnel through the krepis router."
+#
+# Every entry pre-clears a KNOWN match that is not a call site. A new match
+# with no entry fails the build. An entry whose `expires` has passed fails
+# LOUDLY -- re-justify or remove, never silently re-grandfather. An entry
+# that no longer matches anything ALSO fails, so the allowance cannot quietly
+# widen after the thing it covered is gone.
+#
+# `pattern` is the namespaced `<provider>:<class>` identifier the guard
+# reports. The key is (path, pattern) -- one entry covers every line in that
+# file matching that class.
+#
+# Nothing here is exempted by PATH. The egress proxy is the fleet's DLP
+# chokepoint and legitimately names provider hosts; that legitimacy is
+# recorded as a dated, expiring reason rather than as a silent path rule,
+# because a path rule would have hidden exactly the call sites this guard
+# exists to catch.
+
+entries:
+
+  # -- the egress proxy: the one component whose JOB is naming upstream hosts --
+  #
+  # These are not call sites. `nousergon_lib.egress.proxy` is the DLP
+  # chokepoint that traffic is forwarded THROUGH; the host and credential
+  # env-var names appear as CLI argument documentation and as the published
+  # route contract. A model is never selected here -- the router upstream of
+  # it has already done that.
+
+  - path: src/nousergon_lib/egress/proxy.py
+    pattern: deepseek:base_url
+    reason: >-
+      Egress-proxy CLI usage examples and --upstream-host help text. The proxy
+      forwards to a caller-supplied host; it does not choose a provider.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/proxy.py
+    pattern: deepseek:env_key
+    reason: >-
+      --api-key-env help text naming an example credential variable the proxy
+      reads once at startup to authenticate a forwarded request.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/proxy.py
+    pattern: xai:base_url
+    reason: >-
+      Same as the deepseek entry above -- the second worked example in the
+      proxy's own CLI documentation.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/proxy.py
+    pattern: xai:env_key
+    reason: >-
+      Same as the deepseek entry above -- --api-key-env help text.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/__init__.py
+    pattern: deepseek:base_url
+    reason: >-
+      Package docstring reproducing the proxy's launch example.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/__init__.py
+    pattern: deepseek:env_key
+    reason: >-
+      Package docstring reproducing the proxy's launch example.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/routes.v1.json
+    pattern: anthropic:base_url
+    reason: >-
+      The proxy's published multi-tenant ROUTE CONTRACT -- `upstream_host` per
+      keyed route. This file is the declared adapter boundary principle 8
+      permits: one place naming vendors, downstream of routing.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/routes.v1.json
+    pattern: deepseek:base_url
+    reason: >-
+      Route contract `upstream_host` -- see the anthropic entry above.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/routes.v1.json
+    pattern: google:base_url
+    reason: >-
+      Route contract `upstream_host` -- see the anthropic entry above.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/routes.v1.json
+    pattern: openrouter:base_url
+    reason: >-
+      Route contract `upstream_host` -- see the anthropic entry above.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  - path: src/nousergon_lib/egress/routes.v1.json
+    pattern: xai:base_url
+    reason: >-
+      Route contract `upstream_host` -- see the anthropic entry above.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263
+
+  # -- the predecessor guard, pending retirement --
+  #
+  # scripts/openrouter_guard.py is the single-vendor guard this one
+  # generalizes. It still runs as a REQUIRED check in eight repos, so it
+  # cannot be deleted here -- deleting the reusable workflow would red every
+  # one of them at once. Its retirement (fold its callers onto this guard,
+  # then remove it) is tracked; these entries expire when that lands, so the
+  # fold cannot be forgotten.
+
+  - path: scripts/openrouter_guard.py
+    pattern: openrouter:base_url
+    reason: >-
+      The predecessor single-vendor guard's own detection patterns and
+      rationale. A guard implementation is not a call site.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: scripts/openrouter_guard.py
+    pattern: openrouter:env_key
+    reason: >-
+      Same as above -- the predecessor guard's own patterns.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: tests/test_openrouter_guard.py
+    pattern: openrouter:base_url
+    reason: >-
+      Fixture repos the predecessor guard's tests construct to assert it
+      detects linkage. No network call is made.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: tests/test_openrouter_guard.py
+    pattern: openrouter:env_key
+    reason: >-
+      Same as above -- guard test fixtures.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: .github/workflows/openrouter-guard.yml
+    pattern: openrouter:base_url
+    reason: >-
+      The predecessor guard's reusable-workflow header describing what it
+      scans for.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: .github/workflows/openrouter-guard.yml
+    pattern: openrouter:env_key
+    reason: >-
+      Same as above -- workflow header prose.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  - path: .openrouter-allowlist.yaml
+    pattern: openrouter:base_url
+    reason: >-
+      The predecessor guard's own baseline file, whose `reason` prose names
+      the strings it clears.
+    expires: 2026-11-30
+    tracking: alpha-engine-config-I9263
+
+  # -- a secret-scanner's name list --
+
+  - path: tests/test_secret_scan.py
+    pattern: anthropic:env_key
+    reason: >-
+      A list of credential VARIABLE NAMES the secret scanner must recognise.
+      Naming a credential in order to detect it is the opposite of holding one.
+    expires: 2027-02-28
+    tracking: alpha-engine-config-I9263

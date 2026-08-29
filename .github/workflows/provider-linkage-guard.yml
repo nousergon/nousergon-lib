@@ -1,0 +1,107 @@
+name: Provider direct-linkage guard
+
+# Reusable (workflow_call) fleet primitive: fails when the caller repo's
+# tracked code, config or unit files contain an unallowlisted direct linkage
+# to ANY LLM provider -- an SDK client constructed at the call site, a
+# provider credential env-var name, a provider hostname, or a base-URL
+# override that repoints a client.
+#
+# Brian's 2026-08-29 ruling, verbatim: "the entire nous ergon system should
+# now be running through the krepis router... we should have no other
+# parallel setups, it should all funnel through the krepis router."
+# Tracker: alpha-engine-config-I9263.
+#
+# WHY THIS REPLACES THE PER-VENDOR GUARDS. The fleet reached this point with
+# `openrouter-guard.yml` (I6564, the 2026-08-03 OpenRouter ruling) and was
+# about to add `anthropic-guard.yml` (the 2026-08-29 Anthropic ruling) -- a
+# near-verbatim copy with the vendor name swapped. That shape costs a new
+# script, a new reusable workflow, a new allowlist file and a new caller in
+# every repo for EVERY vendor, so vendor N+1 is always undetected. Direct
+# `anthropic.Anthropic(...)` construction in three of crucible-research's
+# eval-judge Lambda handlers passed every guard the fleet had, for exactly
+# that reason. Here the vendor is DATA: `PROVIDERS` in
+# scripts/provider_linkage_guard.py. Adding one is a table row, not a repo.
+#
+# EXCLUDED entirely: `krepis` -- the router's own repo, holding the single
+# legitimate declared provider adapter (`krepis/src/krepis/llm.py`
+# constructs the SDK client inside the adapter boundary; principle 8 permits
+# exactly one adapter behind the router, and forbids a CALL SITE shaped
+# around a vendor). krepis is not a caller of this workflow.
+#
+# BASELINE. Every caller needs a root `.provider-linkage-allowlist.yaml` --
+# a repo with real pre-existing matches and no allowlist reds on day one,
+# and a repo genuinely clean of them needs no file at all (the script treats
+# a missing one as empty). Entries carry a reason and an EXPIRY; an expired
+# entry fails loudly, and a stale entry (covering nothing) fails too, so an
+# allowance cannot quietly widen after the thing it cleared is gone.
+#
+# CONSUMERS: add one workflow file, pinned per the fleet convention. The
+# `caller-` concurrency-group prefix below is MANDATORY, not cosmetic:
+# inside a CALLED workflow `github.workflow` resolves to the CALLER's name,
+# so a caller declaring the same bare `${{ github.workflow }}-...` group
+# this workflow's own top-level `concurrency:` block uses lands in the
+# identical group and GitHub kills the run with zero jobs and no check --
+# the defect that kept alpha-engine-config's first openrouter-guard caller
+# dead for 35 runs (alpha-engine-config-I7862, I7864).
+#
+#   name: Provider direct-linkage guard
+#   on:
+#     pull_request:
+#       branches: [main]
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   concurrency:
+#     group: caller-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+#     cancel-in-progress: true
+#   jobs:
+#     guard:
+#       uses: nousergon/nousergon-lib/.github/workflows/provider-linkage-guard.yml@<commit-sha>
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: provider direct-linkage guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+
+      # Under workflow_call the checkout above gets the CALLER's repo. The
+      # script lives here, so fetch it separately (unpinned, matching
+      # openrouter-guard.yml and action-pin-guard.yml: the consumer pins the
+      # SKELETON, not the script -- a fix to the script, or a newly covered
+      # vendor, should not wait on every consumer's pin bump) and leave CWD
+      # at the caller's checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: nousergon/nousergon-lib
+          path: _nousergon-lib-script
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - name: No unallowlisted direct provider linkage
+        run: python3 _nousergon-lib-script/scripts/provider_linkage_guard.py --repo .
