@@ -17,7 +17,7 @@ name: Provider direct-linkage guard
 # near-verbatim copy with the vendor name swapped. That shape costs a new
 # script, a new reusable workflow, a new allowlist file and a new caller in
 # every repo for EVERY vendor, so vendor N+1 is always undetected. Direct
-# `anthropic.Anthropic(...)` construction in three of crucible-research's
+# direct Anthropic SDK-client construction in three of crucible-research's
 # eval-judge Lambda handlers passed every guard the fleet had, for exactly
 # that reason. Here the vendor is DATA: `PROVIDERS` in
 # scripts/provider_linkage_guard.py. Adding one is a table row, not a repo.
