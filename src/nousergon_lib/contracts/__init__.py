@@ -34,6 +34,10 @@ single source of truth for those schemas:
   hash + slot fingerprints + typed artifact link table with honest absences);
   the results renderer consumes this record, never a directory listing.
   Envelope contract, not a slot.
+- ``arena_cycle`` — one champion/challenger evaluation cycle of one slot,
+  emitted by ``nousergon_lib.arena.engine.run_cycle`` → the slot's
+  ``arena/{slot}/{date}.json``. The shared engine all four slots consume;
+  see ``nousergon_lib.arena``. Eval-storage contract, not a slot.
 - ``producer_champion_audit`` — the weekly winner-take-all champion-promotion
   audit record, emitted by ``optimizer/champion_promotion.py``
   (crucible-backtester) → ``config/apply_audit/producer_champion/{date}.json``
@@ -101,6 +105,15 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     # Weekly champion-promotion audit record (crucible-backtester) — see the
     # module docstring bullet above. Eval-storage contract, not a slot.
     "producer_champion_audit": "producer_champion_audit.schema.json",
+    # One champion/challenger evaluation cycle of one slot, emitted by
+    # ``nousergon_lib.arena.engine.run_cycle`` for all four slots (universe
+    # cut, selection producer, model M, strategy S). Carries the per-arm
+    # score ladder, every pairwise verdict with the common window it rests
+    # on, the pointer decision with its anytime-valid bound, and every
+    # retirement verdict INCLUDING the non-retirements and their reasons.
+    # Eval-storage contract, not a slot. Normative source:
+    # nous-ergon-ops/policies/champion-challenger-policy.md.
+    "arena_cycle": "arena_cycle.schema.json",
 }
 
 # The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
@@ -125,6 +138,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "experiment": 1,
     "experiment_record": 1,
     "producer_champion_audit": 2,  # schema_version const: 2 (winner-take-all, config-I2518)
+    "arena_cycle": 1,
 }
 
 
