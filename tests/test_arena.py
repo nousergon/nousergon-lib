@@ -36,6 +36,7 @@ from nousergon_lib.arena.ranking import (
     ArmStanding,
     PairwiseRanking,
 )
+from nousergon_lib.arena.selection import rank_by_alpha, rank_to_score
 
 AS_OF = "2026-08-29"
 
@@ -670,3 +671,72 @@ def test_the_emitted_cycle_conforms_to_the_arena_cycle_contract():
         preconditions={ids["c"]: [ServingPrecondition("veto", False, "collapsed")]},
     )
     assert contracts.conformance_errors("arena_cycle", cycle.to_dict()) == []
+
+
+# ── The lifted filling-arm selection rule (alpha-engine-config-I9338) ────────
+
+
+class TestSelectionRule:
+    """`nousergon_lib.arena.selection` — the rule crucible-research and
+    crucible-executor both held a copy of."""
+
+    def test_rank_to_score_maps_the_ends_onto_the_band(self):
+        assert rank_to_score(0.0, 60.0, 95.0) == 95.0
+        assert rank_to_score(1.0, 60.0, 95.0) == 60.0
+
+    def test_rank_to_score_is_monotone_non_increasing(self):
+        band = [rank_to_score(i / 20, 60.0, 95.0) for i in range(21)]
+        assert band == sorted(band, reverse=True)
+
+    def test_rank_to_score_is_linear_in_the_rank_fraction(self):
+        assert rank_to_score(0.5, 60.0, 95.0) == pytest.approx(77.5)
+
+    def test_rank_to_score_clamps_out_of_range_fractions(self):
+        assert rank_to_score(-3.0, 60.0, 95.0) == 95.0
+        assert rank_to_score(4.0, 60.0, 95.0) == 60.0
+
+    @pytest.mark.parametrize("floor,ceiling", [(95.0, 95.0), (95.0, 60.0)])
+    def test_rank_to_score_rejects_an_empty_or_inverted_band(self, floor, ceiling):
+        with pytest.raises(ValueError):
+            rank_to_score(0.0, floor, ceiling)
+
+    def test_rank_by_alpha_sorts_descending(self):
+        assert rank_by_alpha([("A", 0.1), ("B", 0.9), ("C", 0.5)]) == [
+            ("B", 0.9), ("C", 0.5), ("A", 0.1),
+        ]
+
+    def test_rank_by_alpha_breaks_ties_on_ticker_not_on_input_order(self):
+        """§3.1 — an unstable order makes the recorded track record
+        unverifiable, so the tie-break cannot be 'whatever order the rows
+        arrived in'."""
+        forward = rank_by_alpha([("ZZZ", 0.4), ("AAA", 0.4), ("MMM", 0.4)])
+        reverse = rank_by_alpha([("MMM", 0.4), ("AAA", 0.4), ("ZZZ", 0.4)])
+        assert forward == reverse == [("AAA", 0.4), ("MMM", 0.4), ("ZZZ", 0.4)]
+
+    def test_rank_by_alpha_does_not_mutate_its_input(self):
+        rows = [("A", 0.1), ("B", 0.9)]
+        rank_by_alpha(rows)
+        assert rows == [("A", 0.1), ("B", 0.9)]
+
+    def test_rank_by_alpha_handles_the_empty_and_single_cases(self):
+        assert rank_by_alpha([]) == []
+        assert rank_by_alpha([("A", 0.1)]) == [("A", 0.1)]
+
+    def test_the_rule_is_reachable_from_the_package_root(self):
+        import nousergon_lib.arena as arena
+
+        assert arena.rank_by_alpha is rank_by_alpha
+        assert arena.rank_to_score is rank_to_score
+        assert "rank_by_alpha" in arena.__all__
+        assert "rank_to_score" in arena.__all__
+
+    def test_the_module_is_pure(self):
+        """The rest of nousergon_lib.arena holds itself to importable-from-a-
+        Lambda; a rule that dragged pandas or boto3 in would break that."""
+        import pathlib
+
+        from nousergon_lib.arena import selection
+
+        src = pathlib.Path(selection.__file__).read_text()
+        for forbidden in ("import boto3", "import pandas", "import logging", "import json"):
+            assert forbidden not in src

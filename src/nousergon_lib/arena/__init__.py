@@ -82,6 +82,12 @@ from .ranking import (
     PairwiseRanking,
     rank_pairwise,
 )
+from .selection import (
+    DEFAULT_SCORE_CEILING,
+    DEFAULT_SCORE_FLOOR,
+    rank_by_alpha,
+    rank_to_score,
+)
 from .window import ArmSeries, PairedWindow, pair_on_common_window
 
 __all__ = [
@@ -102,6 +108,8 @@ __all__ = [
     "ArmState",
     "Comparison",
     "ConfSeqBound",
+    "DEFAULT_SCORE_CEILING",
+    "DEFAULT_SCORE_FLOOR",
     "EVIDENCE_ANYTIME_VALID",
     "EVIDENCE_POINT",
     "ImmutableArmError",
@@ -119,6 +127,8 @@ __all__ = [
     "derive_arm_id",
     "evaluate_retirements",
     "pair_on_common_window",
+    "rank_by_alpha",
     "rank_pairwise",
+    "rank_to_score",
     "run_cycle",
 ]
