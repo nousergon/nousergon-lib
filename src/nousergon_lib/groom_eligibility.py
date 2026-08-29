@@ -25,12 +25,36 @@ disposition-structural rule: ``comment_only_strikes_exceeded``.
 Everything here is PURE — no I/O, no GitHub calls. Consumers fetch issues
 their own way (gh CLI on-box, urllib in the Lambda) and pass plain label
 lists / counts in.
+
+alpha-engine-config-I9297 (Brian ruling 2026-08-29: "the entire nous ergon
+system should now be running through the krepis router... we should have no
+other parallel setups"): this module used to hardcode its own tier -> VENDOR
+MODEL ID tables (``TIER_MODELS``, ``FALLBACK_TIER_MODELS``) — a second
+routing plane duplicating what ``krepis``'s model registry already owns, and
+one two of five hand-kept copies fleet-wide drifted from (nousergon-data-
+PR683 / alpha-engine-config-I4796). Both are REMOVED. A decided run now
+carries a registry **model group** (``krepis.router.group_for_tier``'s
+answer — "low"/"med"/"high", not a model id), resolved through the ONE
+tier->group mapping ``krepis.router`` owns (fleet-wide, alpha-engine-config-
+I9297). ``group_for_tier`` does zero I/O (a dict lookup that raises on an
+unknown tier), so importing and calling it here does not break this
+module's PURE contract — only the registry's OWN model/provider/endpoint
+resolution (``resolve_group_spec`` et al, which DOES call the router over
+the network) is deliberately never invoked from here: this module runs in
+the ``lambda`` execution context (the scheduled-groom-dispatcher), where the
+router's loopback address does not resolve (model-router-policy R28/R29) —
+a Lambda-side router call would be exactly the silent-degrade failure mode
+R20 forbids. The registry group is resolved on the box where the router IS
+reachable (measured fact: the groom spot box already installs krepis and
+invokes ``python -m krepis.router resolve <group>``), never in this Lambda.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+
+from krepis.router import group_for_tier
 
 # ── Label semantics (mirrors groom_driver.py — contract-tested both sides) ──
 
@@ -134,63 +158,18 @@ _KNOWN_EXPECTED_RED_CHECKS: frozenset[str] = frozenset({
 #: Tier order, cheapest first. Unlabeled issues default to "mid".
 TIERS = ("low", "mid", "high")
 
-#: Tier → model that works it. A bundled run uses the model of the HIGHEST
-#: tier actually present in its queue; high-tier issues never run below the
-#: high tier's own model. config#2409: high moved Opus -> Sonnet (Brian-
-#: ratified cutover, 2026-07-13) — the tier split is now schedule/budget/
-#: dedicated-attention only, not a model-capability step up from mid. See
-#: the module docstring update and the groom prompt rewrites in
-#: alpha-engine-config for the full rationale.
-#: groom-primary-deepseek (2026-07-23): low/mid now use DeepSeek V4 Flash as
-#: PRIMARY backend (Brian ruling, superseding the 7/22 AMENDED note).
-#: (2026-07-24): high moved to DeepSeek V4 Pro, completing the DeepSeek-
-#: primary rollout across all three tiers. Thinking/effort params for
-#: DeepSeek are resolved on-box by groom_eligibility_fallback.py.
-TIER_MODELS = {
-    "low": "deepseek-v4-flash",
-    "mid": "deepseek-v4-flash",
-    "high": "deepseek-v4-pro",
-}
-
-
-@dataclass(frozen=True)
-class FallbackModelConfig:
-    """One tier's DeepSeek-direct fallback config, used when Brian's Claude
-    Max subscription usage runs out mid-groom-run and the groomer falls
-    back to calling DeepSeek's own API directly (native API, not
-    OpenRouter — DeepSeek's own prompt-caching discount is not reliably
-    preserved through OpenRouter for this high-repetition workload).
-
-    A dataclass rather than a bare ``{"model": ..., "thinking": ...}`` dict
-    (unlike ``TIER_MODELS``, which is str -> str) because this carries
-    extra per-tier fields beyond the model id — named attribute access
-    beats string-keyed lookups once there's more than one field per tier.
-
-    ``effort`` is DeepSeek's reasoning-effort request parameter. Verified:
-    DeepSeek only implements two real levels server-side — "low"/"medium"
-    both collapse to "high", and "xhigh" maps to "max" — so there is no
-    meaningful "low effort" setting to ask for. The low complexity tier
-    therefore runs with thinking disabled entirely (``thinking=False``,
-    ``effort=None``) rather than requesting a low/medium effort value that
-    would be silently upgraded server-side to "high".
-    """
-
-    model: str
-    thinking: bool
-    effort: str | None = None
-
-
-#: Tier -> DeepSeek fallback config. Parallel to TIER_MODELS above (same
-#: three tier keys, same "high tier never runs a lesser model than mid"
-#: shape) but for the DeepSeek-direct fallback path, not Claude. See
-#: FallbackModelConfig for the per-field rationale, including why the low
-#: tier has no effort level.
-FALLBACK_TIER_MODELS: dict[str, FallbackModelConfig] = {
-    "low": FallbackModelConfig(model="deepseek-v4-flash", thinking=False),
-    "mid": FallbackModelConfig(model="deepseek-v4-flash", thinking=True, effort="max"),
-    "high": FallbackModelConfig(model="deepseek-v4-pro", thinking=True, effort="max"),
-}
-
+#: Tier → registry model GROUP that works it (alpha-engine-config-I9297: the
+#: ONLY tier->group mapping lives in ``krepis.router.TIER_GROUPS``; this
+#: module resolves it via ``group_for_tier`` rather than keeping a second
+#: copy). A bundled run uses the group of the HIGHEST tier actually present
+#: in its queue; high-tier issues never run below the high tier's own group.
+#: config#2409: high moved Opus -> Sonnet (Brian-ratified cutover,
+#: 2026-07-13) — the tier split is now schedule/budget/dedicated-attention
+#: only, not a model-capability step up from mid.
+#: The vendor model, provider, endpoint, credential and reasoning params
+#: behind each group are a registry decision, resolved through
+#: ``krepis.router`` wherever the router is reachable (never here — see the
+#: module docstring for why this module never makes that call itself).
 #: Every issue_filter value the driver accepts. Single-tier forms keep the
 #: legacy names; bundled forms are "+"-joined highest-first (config#1933).
 SINGLE_TIER_FILTERS = {"low": "low-only", "mid": "mid-only", "high": "high-only"}
@@ -291,13 +270,15 @@ class SlotDecision:
     launch: bool
     tiers: tuple[str, ...]      # tiers in the queue, cheapest first ((), if skip)
     issue_filter: str           # driver filter to export ("" if skip)
-    model: str                  # model for the run ("" if skip)
+    model_group: str            # registry model GROUP for the run ("" if skip) —
+                                 # alpha-engine-config-I9297: a krepis group name
+                                 # ("low"/"med"/"high"), never a vendor model id.
     reason: str                 # human-readable, rendered in the decision record
 
     def as_record(self) -> dict:
         return {
             "launch": self.launch, "tiers": list(self.tiers),
-            "issue_filter": self.issue_filter, "model": self.model,
+            "issue_filter": self.issue_filter, "model_group": self.model_group,
             "reason": self.reason,
         }
 
@@ -320,12 +301,13 @@ def decide_slot(
     - Launch iff the combined queue >= ``floor``, OR the escape valve fires:
       an actionable P0 exists, or any considered tier's oldest actionable
       issue has waited >= ``max_wait_hours`` (anti-starvation, ARCH §66).
-    - The run's model = highest tier actually PRESENT in the queue — a
-      bundle of only low+mid issues runs on Sonnet even at the high-tier
-      slot; high-tier issues never run below the high tier's own model
-      (COMPLEXITY GUARDRAIL — config#2409: that model is Sonnet as of the
-      2026-07-13 cutover, same as mid; the guardrail now protects the
-      dedicated queue/budget, not a model-capability step up).
+    - The run's model_group = registry group of the highest tier actually
+      PRESENT in the queue — a bundle of only low+mid issues runs on mid's
+      group even at the high-tier slot; high-tier issues never run below
+      the high tier's own group (COMPLEXITY GUARDRAIL — config#2409: mid and
+      high resolved to the same underlying model as of the 2026-07-13
+      cutover; the guardrail now protects the dedicated queue/budget, not a
+      model-capability step up).
     """
     if slot_tier not in TIERS:
         raise ValueError(f"unknown slot tier: {slot_tier!r}")
@@ -354,7 +336,7 @@ def decide_slot(
         )
     model_tier = present[-1]  # highest present
     return SlotDecision(
-        True, tuple(present), filter_for_tiers(present), TIER_MODELS[model_tier], reason,
+        True, tuple(present), filter_for_tiers(present), group_for_tier(model_tier), reason,
     )
 
 
@@ -478,6 +460,6 @@ def decide_trigger(
             continue
         reason = f"{count} actionable — unconditional launch (no floor gate)"
         launches.append(SlotDecision(
-            True, (tier,), SINGLE_TIER_FILTERS[tier], TIER_MODELS[tier], reason,
+            True, (tier,), SINGLE_TIER_FILTERS[tier], group_for_tier(tier), reason,
         ))
     return launches
