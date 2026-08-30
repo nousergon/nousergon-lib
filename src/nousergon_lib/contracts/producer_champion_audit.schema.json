@@ -48,6 +48,8 @@
         "scanner_predictor_direct",
         "thinktank_coverage",
         "scanner_top20_predictor",
+        "no_agent_quant",
+        "single_agent_quant",
         null
       ],
       "description": "The pointer's champion value read at the start of this evaluation (or the base-case default 'scanner_predictor_direct' when no pointer has ever been written). 'agentic' is READ-TOLERATED for historical continuity (the 2026-07-13 bootstrap's own audit record carries champion_before='agentic') but is WRITE-FORBIDDEN going forward \u2014 see contracts/producer_champion.schema.json. Null only on outcome='error' when evaluation aborted before the pointer could even be read."
@@ -58,6 +60,8 @@
         "scanner_predictor_direct",
         "thinktank_coverage",
         "scanner_top20_predictor",
+        "no_agent_quant",
+        "single_agent_quant",
         null
       ],
       "description": "The pointer's champion value at the end of this evaluation. Equal to champion_before on every no_contest/unchanged_winner_already_champion/error outcome, and on a frozen promotion (blocked_by=['frozen']) \u2014 this artifact records a held week without ever mutating config/producer_champion.json. Null only alongside a null champion_before (outcome='error', pointer never read)."
@@ -123,6 +127,8 @@
         "scanner_predictor_direct",
         "thinktank_coverage",
         "scanner_top20_predictor",
+        "no_agent_quant",
+        "single_agent_quant",
         null
       ],
       "description": "The BEST-SCORING challenger this run \u2014 the only arm that could have taken the seat. Was 'the complement of champion_before' under the two-arm set; alpha-engine-config-I8756 (Brian's 2026-08-27 ruling) made the slot N-arm, so the complement is no longer a single value. null when no challenger was scored this week, which is a no-contest. 'agentic' is read-tolerated for historical v1 records only."
@@ -155,6 +161,8 @@
         "scanner_predictor_direct",
         "thinktank_coverage",
         "scanner_top20_predictor",
+        "no_agent_quant",
+        "single_agent_quant",
         null
       ],
       "description": "ADDITIVE (alpha-engine-config-I2515, 2026-08-20). The arm with the strictly higher realized weekly score \u2014 who WOULD have taken the live pointer on score alone \u2014 or null when no comparison was possible (outcome=no_contest, or outcome=error where evaluation aborted before scoring). Equals `champion_after` on an ordinary promotion and `champion_before` on a defended incumbency; the case this field exists for is outcome=held_shadow_only, where it names the SHADOW-ONLY arm that won and was deliberately NOT promoted. Without it a held_shadow_only record could not express \"the shadow arm would have won\", and a shadow arm whose wins stop being visible in the durable record defeats the purpose of shadow mode (champion-challenger-policy.md \u00a73: measurement is unconditional and is not what promotion governs). Optional (not in `required`) so pre-I2515 v2 records remain valid without a version bump \u2014 per this schema's additive-only policy."

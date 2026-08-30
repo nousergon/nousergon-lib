@@ -1127,6 +1127,19 @@ class TestProducerChampionAuditContract:
 # ── producer_champion_audit: the slot is N-arm (alpha-engine-config-I8756) ──
 
 
+def test_producer_champion_audit_admits_the_quant_arms():
+    """Brian's 2026-08-29 ruling made every research arm promotion-eligible.
+    The two quant arms were the only ones carrying confidence 'ok' on the
+    2026-08-28 board, but the audit enums still projected them to null
+    (alpha-engine-config-I9406)."""
+    from nousergon_lib.contracts import load_schema
+
+    schema = load_schema("producer_champion_audit")
+    for key in ("champion_before", "champion_after", "challenger", "counterfactual_winner"):
+        for arm in ("no_agent_quant", "single_agent_quant"):
+            assert arm in schema["properties"][key]["enum"], key
+
+
 def test_producer_champion_audit_admits_the_scanner_top20_arm():
     """Brian's ruling 2026-08-27 put a third arm in the entry-selection slot:
     the scanner's weekly attractiveness top-20, passed to the predictor. The
