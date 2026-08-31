@@ -120,7 +120,13 @@ def test_dry_run_writes_nothing_and_returns_none():
 
 def test_emit_never_raises_when_s3_is_unavailable(monkeypatch):
     """A check must not go red because its telemetry did. The console renders a
-    missing artifact as `unreadable`, never `ok`, so the gap stays visible."""
+    missing artifact as `unreadable`, never `ok`, so the gap stays visible.
+
+    The allow-writes escape hatch is set deliberately: without it the test-write
+    guard below returns None BEFORE boto3 is ever imported, and this test would
+    pass while exercising nothing — the assertion is `is None` either way.
+    """
+    monkeypatch.setenv(fcr.ALLOW_TEST_WRITES_ENV, "1")
     import builtins
     real_import = builtins.__import__
 
@@ -131,6 +137,66 @@ def test_emit_never_raises_when_s3_is_unavailable(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", boom)
     assert fcr.emit(_ok()) is None
+
+
+# ── The test-write guard (alpha-engine-config-I9052) ──────────────────────
+
+
+def test_a_test_process_never_publishes_to_the_live_surface(monkeypatch):
+    """`ops/checks/<id>/latest.json` is ONE mutable object the console reads as
+    a component's live state. A producer test that reaches `emit` unstubbed
+    republishes its own fixture as the fleet's truth, and because `emit`
+    swallows every exception it does so silently. Measured instance: on
+    2026-08-31 a nous-ergon-ops drill test published `status: error` /
+    `deep_link: "s3://test"` over the real run, and the console rendered the
+    component FAILED.
+    """
+    published = []
+    monkeypatch.setattr(fcr, "key_for", lambda cid: published.append(cid) or f"k/{cid}")
+    monkeypatch.delenv(fcr.ALLOW_TEST_WRITES_ENV, raising=False)
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("emit reached the S3 write from inside a test")
+
+    import builtins
+    real_import = builtins.__import__
+    monkeypatch.setattr(
+        builtins, "__import__",
+        lambda name, *a, **k: must_not_run() if name == "boto3"
+        else real_import(name, *a, **k))
+    assert fcr.emit(_ok()) is None
+
+
+def test_the_guard_reads_the_current_test_not_the_interpreter(monkeypatch):
+    """`PYTEST_CURRENT_TEST` is set only for the duration of a test, so the
+    guard answers "am I inside a test right now" — not the weaker "was this
+    interpreter started by pytest", which would also gag a production script
+    that happened to be launched from a pytest-installed venv.
+    """
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("UNITTEST_CURRENT_TEST", raising=False)
+    assert fcr._running_under_test() is False
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/x.py::test_y (call)")
+    assert fcr._running_under_test() is True
+
+
+def test_the_escape_hatch_lets_a_deliberate_write_through(monkeypatch):
+    """A test whose SUBJECT is the write must still be able to run it."""
+    monkeypatch.setenv(fcr.ALLOW_TEST_WRITES_ENV, "1")
+    wrote = []
+
+    class _S3:
+        def put_object(self, **kw):
+            wrote.append(kw["Key"])
+
+    class _Boto:
+        @staticmethod
+        def client(_name, **_k):
+            return _S3()
+
+    monkeypatch.setitem(__import__("sys").modules, "boto3", _Boto)
+    assert fcr.emit(_ok()) is not None
+    assert wrote == [fcr.key_for(_ok()["check_id"])]
 
 
 def test_findings_default_to_an_empty_list_not_none():
