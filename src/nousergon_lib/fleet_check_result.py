@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 # `datetime.UTC` is 3.11+, and this package declares requires-python >=3.9.
 # The alpha-engine-config original could use it because that repo runs 3.12
@@ -142,16 +143,63 @@ def key_for(check_id: str) -> str:
     return f"{CHECKS_PREFIX}{check_id}/latest.json"
 
 
+#: Set to "1" to let a test process actually publish. The ONLY legitimate user
+#: is a test that is deliberately exercising this function's S3 write against a
+#: throwaway bucket; nothing in a normal suite should need it.
+ALLOW_TEST_WRITES_ENV = "FLEET_CHECK_RESULT_ALLOW_TEST_WRITES"
+
+
+def _running_under_test() -> bool:
+    """Is this process a test runner?
+
+    `PYTEST_CURRENT_TEST` is set by pytest for the duration of every test and
+    unset outside one, so it answers "am I inside a test right now", not the
+    weaker "was this interpreter started by pytest" that `sys.modules` would
+    answer. `UNITTEST_CURRENT_TEST` covers the stdlib runner some box scripts
+    still use.
+    """
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")
+                or os.environ.get("UNITTEST_CURRENT_TEST"))
+
+
 def emit(envelope: dict, *, dry_run: bool = False) -> str | None:
     """Publish an envelope. Returns the s3:// URI, or None if nothing was
     written.
 
     Never raises — see the module docstring. A check must not go red because
-    its telemetry did."""
+    its telemetry did.
+
+    A TEST PROCESS NEVER WRITES (alpha-engine-config-I9052). `ops/checks/<id>/
+    latest.json` is a single mutable production object that the console reads
+    as a component's live state, so a producer test that reaches this function
+    unstubbed does not fail — it silently republishes its own fixture as the
+    fleet's truth. That is what happened on 2026-08-31: nous-ergon-ops'
+    `test_a_failed_restore_keeps_the_deadman_armed` drove
+    `router_degraded_mode_drill.main([])` with `restore_router` raising, and
+    the real `emit_check_envelope` published `status: error`, `summary:
+    "CRITICAL: restore failed: did not come back"`, `deep_link: "s3://test"`
+    over the genuine 2026-08-25 drill run. The console rendered the drill
+    FAILED, which withheld `ARMED` from the Lambda probe row anchored to it and
+    held the fleet transparency gap at 1.
+
+    The guard lives HERE rather than in each producer's tests because the
+    exposure is the whole class: every `emit`/`emit_result` call site in every
+    repo, present and future, is one unstubbed test away from the same write,
+    and the `except Exception` below means it fails silently and invisibly on
+    any machine WITHOUT credentials — so the defect is undetectable exactly
+    where it is harmless and lands in production exactly where it is not.
+    Stubbing the two known tests fixes two tests; this fixes the class.
+    """
     key = key_for(envelope["check_id"])
     uri = f"s3://{RESEARCH_BUCKET}/{key}"
     if dry_run:
         logger.info("[dry-run] would publish %s (%s)", uri, envelope["status"])
+        return None
+    if _running_under_test() and os.environ.get(ALLOW_TEST_WRITES_ENV) != "1":
+        logger.warning(
+            "REFUSING to publish %s from a test process — %s is a live console "
+            "surface. Stub this call in the test, or set %s=1 if the write is "
+            "the thing under test.", uri, key, ALLOW_TEST_WRITES_ENV)
         return None
     try:
         import boto3
