@@ -128,6 +128,12 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForInstanceReady": "StartExecutorEC2",
     # config#1811 code-freshness poll loop (ssm-liveness-poller iterations).
     "WaitForCodeFreshness": "CodeFreshnessGate",
+    # alpha-engine-config-I9466: sf-pipeline-policy.md §2.3a correctness-verdict
+    # gate acquired a poll companion for the same reason CodeFreshnessGate has
+    # one — both are SSM checks on the trading box. Without this row the
+    # companion renders as its own console row instead of rolling up into its
+    # gate, and alpha-engine-data's registry-source check fails.
+    "WaitForCorrectnessVerdict": "CorrectnessVerdictGate",
     # Note: weekday SF's MorningEnrich shares its WaitForMorningEnrich with
     # the Saturday map above (same state name). Lookup-by-name is OK because
     # the parent name is the same in both SFs.
@@ -1054,6 +1060,23 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "checkouts (executor/data/config) are on main @ origin/main before "
         "pipeline work, one self-heal retry; no artifact — gate outcome is "
         "encoded in the SF branch taken."
+    ),
+    # alpha-engine-config-I9466 (2026-08-31): sf-pipeline-policy.md §2.3a
+    # requires a correctness verdict to exist AND propagate to consumers, and
+    # the executor — the module that places the orders — read none. Same shape
+    # as CodeFreshnessGate above: an SSM check on the trading box whose outcome
+    # is a branch, not an object.
+    "CorrectnessVerdictGate": ArtifactReason(
+        reason="sf-pipeline-policy §2.3a correctness-verdict gate — SSM check "
+        "that `backtest/latest/attestation.json` reads a literal PASS and "
+        "attests the same cycle that wrote `config/executor_params.json`, "
+        "before any new position may be opened; no artifact — the gate "
+        "outcome is encoded in the SF branch taken."
+    ),
+    "WaitForCorrectnessVerdict": ArtifactReason(
+        reason="Poll companion of CorrectnessVerdictGate — ssm-liveness-poller "
+        "iterations; no artifact of its own, same treatment as "
+        "WaitForCodeFreshness."
     ),
     # config#1807 (2026-07-06): pre-open data phase decoupled onto a daily
     # data spot; launch is fire-and-forget from the dashboard dispatcher.
