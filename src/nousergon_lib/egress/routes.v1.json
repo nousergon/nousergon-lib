@@ -71,6 +71,11 @@
           "path_prefix": "/api/paas/v4"
         },
         {
+          "upstream_host": "chatgpt.com",
+          "auth_mode": "passthrough",
+          "path_prefix": null
+        },
+        {
           "upstream_host": "generativelanguage.googleapis.com",
           "auth_mode": "keyed",
           "path_prefix": "/v1beta/openai"
