@@ -567,6 +567,68 @@ def test_every_arm_gets_a_retirement_verdict_including_the_survivors():
     assert all(v.reason for v in verdicts)
 
 
+def test_a_controls_win_does_not_move_a_real_arm_toward_the_cap():
+    """alpha-engine-config-I9770: a control beating a real arm must not count
+    toward that arm's retirement cap. With cap=5 and 5 real arms, the worst
+    real arm can be beaten by at most 4 OTHER real arms — adding an
+    uncounted control win must not push it to 5 and trigger retirement."""
+    names = [f"a{i}" for i in range(5)]
+    reg, ids = ArmRegister(), {}
+    for i, name in enumerate(names):
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        ids[name] = record.arm_id
+    reg, ctrl = reg.register(
+        slot="model", name="benchmark", spec={"k": "control"}, created_date="2026-01-05", control=True
+    )
+    series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
+    series[ctrl.arm_id] = _series(ctrl.arm_id, [0.99] * 30)  # beats every real arm
+    created = {ids[n]: "2026-01-05" for n in names}
+    created[ctrl.arm_id] = "2026-01-05"
+    ranking = rank_pairwise(series, created_dates=created, as_of=AS_OF, clip=0.05)
+
+    # Sanity: the control's win IS counted in the control-blind ranking.
+    assert ranking.standings[ids["a4"]].losses == 5
+
+    verdicts = {
+        v.arm_id: v
+        for v in evaluate_retirements(_config(), AS_OF, reg, ranking, champion=ids["a0"])
+    }
+    assert ctrl.arm_id not in verdicts, "a control never receives a retirement verdict"
+    worst = verdicts[ids["a4"]]
+    assert not worst.retire, "the control's win must not push the worst real arm to the cap"
+    assert worst.pairwise_losses == 4
+    assert "in top 5" in worst.reason
+
+
+def test_a_control_is_never_retired():
+    """alpha-engine-config-I9770: a control stays in the pairwise ranking
+    (§6.2 is unchanged) but can never itself be retired, however badly it
+    underperforms and however old it is."""
+    names = [f"a{i}" for i in range(6)]
+    reg, ids = ArmRegister(), {}
+    for i, name in enumerate(names):
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        ids[name] = record.arm_id
+    reg, ctrl = reg.register(
+        slot="model", name="benchmark", spec={"k": "control"}, created_date="2026-01-05", control=True
+    )
+    series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
+    series[ctrl.arm_id] = _series(ctrl.arm_id, [-0.99] * 30)  # loses to every real arm
+    created = {ids[n]: "2026-01-05" for n in names}
+    created[ctrl.arm_id] = "2026-01-05"
+    ranking = rank_pairwise(series, created_dates=created, as_of=AS_OF, clip=0.05)
+
+    # Sanity: the control-blind ranking would otherwise retire it outright.
+    assert ranking.standings[ctrl.arm_id].losses == 6
+
+    verdicts = evaluate_retirements(_config(cap=5), AS_OF, reg, ranking, champion=ids["a0"])
+    assert ctrl.arm_id not in {v.arm_id for v in verdicts}
+    # The real arms are unaffected: with a control present, only the top 5
+    # of 6 real arms is the effective real-arm cap, and it is judged as such.
+    real_verdicts = {v.arm_id: v for v in verdicts}
+    assert real_verdicts[ids["a5"]].retire
+
+
 def test_anytime_valid_retirement_evidence_is_available_and_stricter():
     series = {
         "a": _series("a", [0.02] * 6),

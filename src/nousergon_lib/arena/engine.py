@@ -623,8 +623,45 @@ def evaluate_retirements(
     excluded explicitly here, and it is also excluded structurally: an arm
     that ``cap`` arms beat pairwise cannot simultaneously hold a lead that
     the pointer decision supports. Both are asserted in the test suite.
+
+    **Control arms (`alpha-engine-config-I9770`) are excluded from the cap in
+    both directions, never as a side effect of §6.2's ranking.** A control is
+    a real point of comparison — it stays in ``ranking`` unchanged, exactly
+    like any other arm, because §6.2's pairwise aggregation must not be
+    slot-aware. Only this function, which owns the cap/grace/floor rule, is
+    control-aware:
+
+    - a control never receives a retirement verdict at all (never in
+      ``ordered``, never in the returned tuple) — it is not part of the
+      real-arm rotation the cap governs;
+    - a control's pairwise **win** never counts toward another arm's
+      ``pairwise_losses`` — a benchmark beating a real arm says nothing about
+      that arm's standing among its actual competitors. ``ranking.standings``
+      is control-blind by construction (§6.2's ranking must not be
+      slot-aware), so this function subtracts, from each arm's reported
+      ``standing.losses``, the count of that arm's losses in
+      ``ranking.verdicts`` whose winner is a control. This composes with any
+      ``standings`` a caller supplies (including a hand-built
+      :class:`~nousergon_lib.arena.ranking.ArmStanding` in a test) rather than
+      requiring ``standings`` and ``verdicts`` to agree;
+    - ``min_active_arms`` is checked against the **real-arm** pool size
+      (``active`` below already excludes controls), not
+      ``register.active_arms()`` — a deliberate choice: the floor exists so a
+      comparison always has slack (§6.1), and a control cannot serve as that
+      slack since it can never lose its exemption or take the pointer.
+      ``register.active_arms()`` itself is unchanged and still includes
+      controls, since `run_cycle` and the emitted ``ArenaCycle.active_arms``
+      correctly report every live arm, controls included.
     """
-    active = list(register.active_arms())
+    control_ids = frozenset(
+        a for a in register.active_arms() if register.state(a).record.control
+    )
+    active = [a for a in register.active_arms() if a not in control_ids]
+    control_losses: dict[str, int] = dict.fromkeys(active, 0)
+    for verdict in ranking.verdicts:
+        if verdict.winner in control_ids and verdict.loser in control_losses:
+            control_losses[verdict.loser] += 1
+
     verdicts: list[RetirementVerdict] = []
     remaining = len(active)
 
@@ -640,7 +677,7 @@ def evaluate_retirements(
         state = register.state(arm)
         age_weeks = state.age_weeks(as_of)
         standing = ranking.standings.get(arm)
-        losses = standing.losses if standing else 0
+        losses = (standing.losses if standing else 0) - control_losses.get(arm, 0)
 
         if arm == champion:
             verdicts.append(
