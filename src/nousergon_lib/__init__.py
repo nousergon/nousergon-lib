@@ -1,3 +1,3 @@
 """nousergon-lib — shared utilities for Alpha Engine modules."""
 
-__version__ = "0.124.106"
+__version__ = "0.124.107"
