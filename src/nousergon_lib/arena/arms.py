@@ -141,6 +141,14 @@ class ArmRecord:
     supersedes: str | None = None
     bootstrap: bool = False
     notes: str = ""
+    #: A control (synthetic benchmark) arm. Scored and ranked exactly like
+    #: any other arm — it is a real point of comparison — but excluded from
+    #: the §6 retirement cap in both directions: a control's pairwise win
+    #: never counts toward another arm's `pairwise_losses`, and a control is
+    #: never itself retired (`nousergon_lib.arena.engine.evaluate_retirements`).
+    #: Additive: absent on every prior record, which folds to False
+    #: (`alpha-engine-config-I9770`).
+    control: bool = False
 
     def __post_init__(self) -> None:
         expected_prefix = f"{self.slot}:{self.name}:"
@@ -166,6 +174,7 @@ class ArmRecord:
             "supersedes": self.supersedes,
             "bootstrap": self.bootstrap,
             "notes": self.notes,
+            "control": self.control,
         }
 
 
@@ -362,6 +371,7 @@ class ArmRegister:
         supersedes: str | None = None,
         bootstrap: bool = False,
         notes: str = "",
+        control: bool = False,
     ) -> tuple[ArmRegister, ArmRecord]:
         """Append a new vintage. Returns the new register and the record."""
         arm_id = derive_arm_id(slot, name, spec)
@@ -374,6 +384,7 @@ class ArmRegister:
             supersedes=supersedes,
             bootstrap=bootstrap,
             notes=notes,
+            control=control,
         )
         if supersedes is not None and supersedes not in self._states:
             raise ImmutableArmError(
