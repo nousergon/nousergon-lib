@@ -30,7 +30,8 @@ the answer is no; take it to Brian as a policy amendment.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date as _date
 from datetime import timedelta
 from typing import Any
@@ -69,7 +70,15 @@ class LadderRung:
 
 @dataclass(frozen=True)
 class ScoreLadder:
-    """Every rung for one arm, plus the arm's total span."""
+    """Every rung for one arm, plus the arm's total span and its lineage.
+
+    ``lineage`` is carried through from :attr:`ArmSeries.lineage` unread. It
+    is the ONLY reason a verdict artifact can say whether a champion's score
+    series rests on one upstream version or several
+    (`alpha-engine-config-I9903`): the pointer decision and the ladder are
+    emitted per cycle, while the produce-time provenance lived only in each
+    constituent day's run manifest.
+    """
 
     arm_id: str
     as_of: str
@@ -77,6 +86,10 @@ class ScoreLadder:
     total_weeks: int
     total_dates: int
     total_misses: int
+    #: Slot-supplied provenance, dimension -> distinct values. Empty for any
+    #: slot that declares none, and ABSENT from documents written before the
+    #: field existed — the two are deliberately distinguishable.
+    lineage: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def longest(self) -> LadderRung | None:
@@ -90,6 +103,7 @@ class ScoreLadder:
             "total_weeks": self.total_weeks,
             "total_dates": self.total_dates,
             "total_misses": self.total_misses,
+            "lineage": {k: list(v) for k, v in sorted(self.lineage.items())},
             "rungs": [rung.to_dict() for rung in self.rungs],
         }
 
@@ -112,6 +126,7 @@ def build_ladder(series: ArmSeries, as_of: str, max_weeks: int | None = None) ->
             total_weeks=0,
             total_dates=0,
             total_misses=len([d for d in series.misses if _parse(d) <= as_of_date]),
+            lineage=dict(series.lineage),
         )
 
     earliest = min(scored)
@@ -150,4 +165,5 @@ def build_ladder(series: ArmSeries, as_of: str, max_weeks: int | None = None) ->
         total_weeks=total_weeks,
         total_dates=len(scored),
         total_misses=len(misses),
+        lineage=dict(series.lineage),
     )
