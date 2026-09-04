@@ -802,3 +802,114 @@ class TestSelectionRule:
         src = pathlib.Path(selection.__file__).read_text()
         for forbidden in ("import boto3", "import pandas", "import logging", "import json"):
             assert forbidden not in src
+
+
+# ── Slot-supplied lineage on the verdict surface (alpha-engine-config-I9903) ─
+
+
+class TestSeriesLineageReachesTheVerdictArtifact:
+    """The engine carries a slot's provenance without learning what it means.
+
+    `alpha-engine-config-I9801` removed `ModelRecipe.feature_version` from the
+    M recipe's hashed spec and left the resolved version as PRODUCE-time
+    lineage in the run manifest's `inputs[]`. No VERDICT-surface artifact
+    carried it, so "did this champion's score series span one feature-layer
+    version or several" was answerable only by walking every constituent
+    day's manifest. `ArmSeries.lineage` is the channel; the engine never
+    reads a key or a value, which is what keeps `run_cycle` scoring U, R, M
+    and S off one implementation (principles.md §2.8).
+    """
+
+    def test_the_ladder_names_the_versions_the_arms_series_read(self):
+        reg, ids, series = _cycle_fixture()
+        series[ids["a"]] = ArmSeries(
+            ids["a"], series[ids["a"]].scores, lineage={"feature_version": ("f00d",)}
+        )
+        cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+        by_arm = {ladder.arm_id: ladder for ladder in cycle.ladders}
+        assert by_arm[ids["a"]].lineage == {"feature_version": ("f00d",)}
+        assert by_arm[ids["b"]].lineage == {}
+
+    def test_a_series_spanning_two_versions_is_readable_as_spanning_two(self):
+        """The whole point: one value means one layer, two means it moved."""
+        reg, ids, series = _cycle_fixture()
+        series[ids["a"]] = ArmSeries(
+            ids["a"], series[ids["a"]].scores, lineage={"feature_version": ("beef", "f00d")}
+        )
+        cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+        emitted = cycle.to_dict()["ladders"]
+        spans = {
+            entry["arm_id"]: len(entry["lineage"].get("feature_version", [])) for entry in emitted
+        }
+        assert spans[ids["a"]] == 2
+        assert spans[ids["b"]] == 0
+
+    def test_an_empty_ladder_still_carries_the_lineage(self):
+        """An arm with no scored date is the case a pass-through most easily
+        drops — `build_ladder` returns early, on a separate constructor."""
+        ladder = build_ladder(
+            ArmSeries("m:x:1", {}, lineage={"feature_version": ("f00d",)}), AS_OF
+        )
+        assert ladder.rungs == ()
+        assert ladder.lineage == {"feature_version": ("f00d",)}
+
+    def test_values_are_sorted_and_deduplicated_so_two_runs_agree(self):
+        series = ArmSeries("m:x:1", {}, lineage={"feature_version": ["f00d", "beef", "f00d"]})
+        assert series.lineage == {"feature_version": ("beef", "f00d")}
+
+    def test_a_dimension_declared_with_no_values_is_refused(self):
+        """§7.2 — a well-formed record of nothing. A slot with no provenance
+        omits the dimension; it never declares it empty."""
+        with pytest.raises(ValueError, match="at least one non-empty"):
+            ArmSeries("m:x:1", {}, lineage={"feature_version": ()})
+
+    def test_a_bare_string_is_refused_rather_than_split_into_characters(self):
+        with pytest.raises(ValueError, match="not a bare string"):
+            ArmSeries("m:x:1", {}, lineage={"feature_version": "f00d"})
+
+    def test_the_engine_never_reads_the_lineage(self):
+        """Substitutability: a dimension no slot in this repo has ever heard of
+        must pass through untouched. If the engine ever branches on a key, this
+        is the test that fails."""
+        reg, ids, series = _cycle_fixture()
+        series[ids["a"]] = ArmSeries(
+            ids["a"],
+            series[ids["a"]].scores,
+            lineage={"a_dimension_the_engine_cannot_know": ("x",)},
+        )
+        cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+        by_arm = {ladder.arm_id: ladder for ladder in cycle.ladders}
+        assert by_arm[ids["a"]].lineage == {"a_dimension_the_engine_cannot_know": ("x",)}
+
+    def test_a_cycle_carrying_lineage_still_conforms_to_arena_cycle_v1(self):
+        """The field is ADDITIVE and optional, so the contract stays at v1:
+        a new document validates against the old schema's `required` list and
+        an old document (no `lineage` key at all) validates against this one."""
+        pytest.importorskip("jsonschema")
+        from nousergon_lib import contracts
+
+        reg, ids, series = _cycle_fixture()
+        series[ids["a"]] = ArmSeries(
+            ids["a"], series[ids["a"]].scores, lineage={"feature_version": ("beef", "f00d")}
+        )
+        cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+        payload = cycle.to_dict()
+        assert payload["schema_version"] == 1
+        assert contracts.conformance_errors("arena_cycle", payload) == []
+
+        # An artifact written before the field existed. ABSENT is legal and
+        # means "not recorded"; `{}` means "the slot declares none".
+        for entry in payload["ladders"]:
+            entry.pop("lineage")
+        assert contracts.conformance_errors("arena_cycle", payload) == []
+
+    def test_the_schema_refuses_a_dimension_with_an_empty_value_list(self):
+        """§7.4 — the guard has to FAIL on the shape it exists to catch."""
+        pytest.importorskip("jsonschema")
+        from nousergon_lib import contracts
+
+        reg, ids, series = _cycle_fixture()
+        cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+        payload = cycle.to_dict()
+        payload["ladders"][0]["lineage"] = {"feature_version": []}
+        assert contracts.conformance_errors("arena_cycle", payload) != []

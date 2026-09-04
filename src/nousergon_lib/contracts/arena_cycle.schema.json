@@ -39,6 +39,17 @@
           "total_weeks": {"type": "integer", "minimum": 0},
           "total_dates": {"type": "integer", "minimum": 0},
           "total_misses": {"type": "integer", "minimum": 0},
+          "lineage": {
+            "type": "object",
+            "description": "Slot-supplied provenance for THIS arm's series: dimension name -> the distinct values that dimension took across the arm's scored dates. Opaque to the engine, which never reads a key or a value — a `feature_version` field on a contract that also serves U, R and S would make a slot-agnostic engine know about one consumer (principles.md §2.8). The M slot populates `feature_version`; a slot with no upstream version reports `{}`. Distinct VALUES, not a per-date map: the per-date attribution already exists once, in each produce run's manifest `inputs[]`, and the question this surface could not answer was 'did this champion's score series span one feature-layer version or several' (alpha-engine-config-I9903). ABSENT — as opposed to `{}` — means the document was written before the field existed; the two are deliberately distinguishable, which is why this property is optional rather than required.",
+            "additionalProperties": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "propertyNames": {"minLength": 1}
+          },
           "rungs": {
             "type": "array",
             "items": {

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = [
     "ArmSeries",
@@ -84,6 +85,42 @@ def elapsed_weeks(start_date: str, end_date: str) -> int:
     return delta // _DAYS_PER_WEEK
 
 
+def _normalize_lineage(
+    arm_id: str, lineage: Mapping[Any, Any] | None
+) -> dict[str, tuple[str, ...]]:
+    """Sort and de-duplicate each dimension's values; refuse an empty claim.
+
+    Deterministic ordering is what makes two runs of the same cycle produce
+    byte-identical artifacts. A dimension mapped to no values is refused
+    rather than emitted: "this arm declared `feature_version` and it took no
+    value" is a well-formed record of nothing, which is the §7.2 shape — a
+    slot with no provenance to report omits the dimension.
+    """
+    if not lineage:
+        return {}
+    normalized: dict[str, tuple[str, ...]] = {}
+    for dimension, values in lineage.items():
+        if not isinstance(dimension, str) or not dimension:
+            raise ValueError(
+                f"arm {arm_id}: lineage dimension names must be non-empty strings; "
+                f"got {dimension!r}"
+            )
+        if isinstance(values, str):
+            raise ValueError(
+                f"arm {arm_id}: lineage[{dimension!r}] must be a sequence of values, not a "
+                "bare string — a single version is a one-element sequence, and accepting "
+                "the string would silently record it as its own characters"
+            )
+        collected = sorted({str(v) for v in values})
+        if not collected or any(not v for v in collected):
+            raise ValueError(
+                f"arm {arm_id}: lineage[{dimension!r}] must carry at least one non-empty "
+                "value; a dimension with nothing to report is omitted, never declared empty"
+            )
+        normalized[dimension] = tuple(collected)
+    return normalized
+
+
 @dataclass(frozen=True)
 class ArmSeries:
     """One arm's per-date scores, already expressed against the slot benchmark.
@@ -97,15 +134,38 @@ class ArmSeries:
     ``misses`` holds dates on which this arm was expected to produce and did
     not. They are excluded from every window — a miss is not a zero — but
     they are carried so the artifact can report them (§3).
+
+    ``lineage`` is the **slot's own** provenance for this series, and the
+    engine never reads it. It maps a dimension name the slot chooses — the
+    M slot uses ``feature_version`` — to the DISTINCT values that dimension
+    took across the dates in ``scores``. One value means the whole series
+    rests on one upstream version; two or more means it spans a change, and
+    that is the fact a verdict surface has to carry (see
+    :class:`nousergon_lib.arena.ladder.ScoreLadder`, which emits it).
+
+    **Why it is an opaque map and not a ``feature_version`` field.** This
+    engine scores four slot kinds and only one of them reads a feature layer
+    at all. A ``feature_version`` on a slot-agnostic contract would make the
+    engine know about a specific consumer, which `principles.md` §2.8
+    forbids: address the capability class — "a slot has provenance" — not
+    the consumer. Nothing in this package inspects a key or a value.
+
+    It records WHICH values, not which date took which. The per-date
+    attribution already exists, once, in the produce run's manifest
+    ``inputs[]``; duplicating it here would create a second copy that can
+    disagree with the first. What the verdict surface could not answer
+    before, and now can, is "one version or several".
     """
 
     arm_id: str
     scores: Mapping[str, float]
     misses: frozenset[str] = field(default_factory=frozenset)
+    lineage: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.arm_id:
             raise ValueError("ArmSeries.arm_id must be non-empty")
+        object.__setattr__(self, "lineage", _normalize_lineage(self.arm_id, self.lineage))
         overlap = set(self.scores) & set(self.misses)
         if overlap:
             raise ValueError(
