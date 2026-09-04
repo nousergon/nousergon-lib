@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = [
     "ArmSeries",
@@ -85,7 +86,7 @@ def elapsed_weeks(start_date: str, end_date: str) -> int:
 
 
 def _normalize_lineage(
-    arm_id: str, lineage: Mapping[str, object] | None
+    arm_id: str, lineage: Mapping[Any, Any] | None
 ) -> dict[str, tuple[str, ...]]:
     """Sort and de-duplicate each dimension's values; refuse an empty claim.
 
