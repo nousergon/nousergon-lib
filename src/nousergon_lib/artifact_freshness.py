@@ -35,9 +35,14 @@ ships the freshness-monitor Lambda that wires the two together.
   ``continuous`` / ``event_driven``).
 - :class:`ArtifactSpec` — registry-row dataclass.
 - :class:`CheckResult` — single-probe outcome dataclass.
-- :func:`check_freshness` — pure ``(s3_client, spec, now) → CheckResult``.
+- :func:`check_freshness` — pure
+  ``(s3_client, spec, now, *, list_cache=None) → CheckResult``.
   No side effects, no alerting. The Lambda is responsible for
   consuming the result and routing to :func:`nousergon_lib.alerts.publish`.
+  ``list_cache`` is an optional per-run dict that lets one sweep LIST each
+  ``(bucket, prefix)`` once instead of once per spec — 106.7 s → 9.7 s over
+  the live 185-spec registry (alpha-engine-config-I9206). It must not
+  outlive a single sweep.
 - :func:`resolve_dedup_key` — pure ``(spec, now) → str`` producing the
   stable per-cycle dedup key used by ``alerts.publish``.
 - :func:`resolve_current_cycle` — pure helper exposing the
@@ -855,39 +860,27 @@ def _key_suffix(template: str) -> str:
     return template.rsplit("}", 1)[-1]
 
 
-def _newest_under_prefix(
+def _list_prefix(
     s3_client: Any,
     bucket: str,
     prefix: str,
-    suffix: str,
-    *,
-    cap_pages: int = 64,
-) -> tuple[str, datetime | None, str | None]:
-    """Return ``(newest_key, newest_last_modified, probe_error)`` for the
-    most-recently-modified object under ``prefix`` whose key ends with
-    ``suffix``.
+    cap_pages: int,
+) -> tuple[list[tuple[str, datetime]], str | None]:
+    """Walk ``prefix`` once and return ``(objects, probe_error)``.
 
-    Pure w.r.t. side effects beyond ``s3_client`` LIST calls. Paginates up
-    to ``cap_pages`` pages (64 × 1000 = 64,000 objects) as a runaway
-    backstop. A LIST client error (403 / network) returns
-    ``("", None, reason)`` so the caller can surface ``probe_failed`` rather
-    than mis-reporting ``missing``.
+    ``objects`` is every ``(key, last_modified)`` pair seen, in S3's own
+    lexical listing order, with naive timestamps coerced to UTC and
+    timestamp-less entries dropped. ``probe_error`` is non-``None`` when the
+    listing could not be completed (a LIST client error, or a truncated scan
+    past ``cap_pages``); in that case ``objects`` is empty, because a partial
+    listing must never be filtered into an answer.
 
-    **Hitting the cap is a probe failure, never a verdict**
-    (alpha-engine-config-I7617). The docstring used to claim "every
-    freshness-tracked date-templated prefix is far smaller"; on 2026-08-18
-    ``market_data/weekly/`` reached 8208 objects and the claim stopped being
-    true, silently. Because S3 lists lexically and these prefixes are
-    date-templated, the objects past the cap are the NEWEST — so a truncated
-    scan does not degrade gracefully, it names a stale instance as the
-    freshest and pages five registry rows CRITICAL for artifacts that were
-    fresh. The cap was raised so today's prefixes clear it by ~8×, AND made
-    loud so the next prefix to cross it says "I could not measure this"
-    instead of answering wrongly. A backstop whose limit is reachable by
-    ordinary growth needs both.
+    This is the *unfiltered, per-(bucket, prefix, cap_pages)* half of
+    :func:`_newest_under_prefix` — split out so one sweep can list a prefix
+    once and answer every suffix against the same listing. Suffix filtering
+    stays in :func:`_newest_under_prefix`, so the split is behaviour-neutral.
     """
-    newest_lm: datetime | None = None
-    newest_key = ""
+    objects: list[tuple[str, datetime]] = []
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
@@ -922,24 +915,21 @@ def _newest_under_prefix(
                 break
             for obj in page.get("Contents", []) or []:
                 key = obj.get("Key", "")
-                if suffix and not key.endswith(suffix):
-                    continue
                 lm = obj.get("LastModified")
                 if lm is None:
                     continue
                 if lm.tzinfo is None:
                     lm = lm.replace(tzinfo=timezone.utc)
-                if newest_lm is None or lm > newest_lm:
-                    newest_lm, newest_key = lm, key
+                objects.append((key, lm))
     except Exception as err:  # noqa: BLE001 — duck-typed boto error classification
         state, reason = _classify_client_error(err)
         # A LIST that 404s is nonsensical (prefix-level); treat any LIST
         # error as a probe failure — the monitor can't see the bucket.
         if state == "missing":
             reason = f"S3 LIST returned 404-class for prefix {prefix!r}: {reason}"
-        return ("", None, reason)
+        return ([], reason)
     if truncated:
-        return ("", None, (
+        return ([], (
             f"S3 LIST over prefix {prefix!r} exceeded the {cap_pages}-page "
             f"scan cap ({cap_pages * 1000} objects) and was truncated. Keys "
             f"list lexically, so the objects past the cap are the newest ones "
@@ -947,6 +937,92 @@ def _newest_under_prefix(
             f"guessed at. Narrow the prefix, or raise the cap "
             f"(alpha-engine-config-I7617)."
         ))
+    return (objects, None)
+
+
+def _newest_under_prefix(
+    s3_client: Any,
+    bucket: str,
+    prefix: str,
+    suffix: str,
+    *,
+    cap_pages: int = 64,
+    cache: dict | None = None,
+) -> tuple[str, datetime | None, str | None]:
+    """Return ``(newest_key, newest_last_modified, probe_error)`` for the
+    most-recently-modified object under ``prefix`` whose key ends with
+    ``suffix``.
+
+    Pure w.r.t. side effects beyond ``s3_client`` LIST calls. Paginates up
+    to ``cap_pages`` pages (64 × 1000 = 64,000 objects) as a runaway
+    backstop. A LIST client error (403 / network) returns
+    ``("", None, reason)`` so the caller can surface ``probe_failed`` rather
+    than mis-reporting ``missing``.
+
+    **Hitting the cap is a probe failure, never a verdict**
+    (alpha-engine-config-I7617). The docstring used to claim "every
+    freshness-tracked date-templated prefix is far smaller"; on 2026-08-18
+    ``market_data/weekly/`` reached 8208 objects and the claim stopped being
+    true, silently. Because S3 lists lexically and these prefixes are
+    date-templated, the objects past the cap are the NEWEST — so a truncated
+    scan does not degrade gracefully, it names a stale instance as the
+    freshest and pages five registry rows CRITICAL for artifacts that were
+    fresh. The cap was raised so today's prefixes clear it by ~8×, AND made
+    loud so the next prefix to cross it says "I could not measure this"
+    instead of answering wrongly. A backstop whose limit is reachable by
+    ordinary growth needs both.
+
+    **``cache`` — one LIST per prefix per sweep** (alpha-engine-config-I9206).
+    The registry's specs are not one-per-prefix: dozens share ``research/``,
+    ``backtest/``, ``predictor/``, differing only in the key SUFFIX. Every
+    templated spec re-paginated the whole shared prefix, so the LIST cost grew
+    with (specs × prefix size) rather than with the number of distinct
+    prefixes. Measured 2026-09-06 against the live registry's 185 specs: LIST
+    time summed **per spec is 106.7 s**, summed once per distinct
+    ``(bucket, prefix)`` it is **9.7 s** — an ~11× reduction. That is the
+    difference between the freshness-monitor Lambda's 71 s run of 2026-08-22
+    and the 120 s timeout it has hit every day since 2026-09-01 (3 Errors/day
+    = the initial invoke plus two async retries, firing two CloudWatch alarms
+    daily).
+
+    Pass a plain ``dict`` and it is keyed by ``(bucket, prefix, cap_pages)``.
+    The cached value is the *raw listing outcome* — the objects seen and the
+    listing's probe error, never a per-suffix verdict — so suffix filtering
+    still runs on every call and each spec gets exactly the answer it gets
+    today. A truncated scan and a listing ``ClientError`` are cached too: one
+    403 on ``research/`` is then reported identically for every spec on that
+    prefix instead of being re-requested and re-failed once per spec.
+
+    **The cache is per-run and must not outlive one sweep.** Freshness is a
+    time-sensitive judgment about what exists *now*; a listing reused across
+    sweeps would answer a later sweep with an earlier sweep's S3, which is
+    precisely the silent-staleness class this module exists to catch. Build a
+    fresh ``dict`` at the top of each sweep and drop it at the end — never a
+    module-level or warm-Lambda-global cache. The freshness-monitor Lambda
+    (``nousergon-data/infrastructure/lambdas/freshness-monitor/index.py``)
+    passes it as ``check_freshness(..., list_cache=list_cache)``, with
+    ``list_cache`` created inside the handler.
+
+    ``cache=None`` (the default) is today's behaviour exactly: one LIST per
+    call, no sharing.
+    """
+    key_ = (bucket, prefix, cap_pages)
+    entry = None if cache is None else cache.get(key_)
+    if entry is None:
+        entry = _list_prefix(s3_client, bucket, prefix, cap_pages)
+        if cache is not None:
+            cache[key_] = entry
+    objects, probe_error = entry
+    if probe_error is not None:
+        return ("", None, probe_error)
+
+    newest_lm: datetime | None = None
+    newest_key = ""
+    for key, lm in objects:
+        if suffix and not key.endswith(suffix):
+            continue
+        if newest_lm is None or lm > newest_lm:
+            newest_lm, newest_key = lm, key
     return (newest_key, newest_lm, None)
 
 
@@ -1203,9 +1279,39 @@ def _window_leading_edge_reason(
 
 
 def check_freshness(
-    s3_client: Any, spec: ArtifactSpec, now: datetime
+    s3_client: Any,
+    spec: ArtifactSpec,
+    now: datetime,
+    *,
+    list_cache: dict | None = None,
 ) -> CheckResult:
     """Probe ``spec`` and return the classified outcome.
+
+    ``list_cache`` (keyword-only, default ``None``) is an optional per-run
+    S3-LIST cache threaded into every :func:`_newest_under_prefix` call this
+    probe makes — the templated canonical key and, when set, the templated
+    recovery key. Pass the SAME plain ``dict`` to every
+    ``check_freshness`` call in one sweep and each distinct
+    ``(bucket, prefix, cap_pages)`` is listed once instead of once per spec.
+    Results are byte-identical either way: only the raw listing is shared,
+    and each spec's own suffix filter, freshness floor and classification run
+    unchanged.
+
+    Why (alpha-engine-config-I9206): the live registry's 185 specs share a
+    handful of prefixes (``research/``, ``backtest/``, ``predictor/``), so the
+    per-spec LIST cost measured 2026-09-06 sums to **106.7 s** against
+    **9.7 s** when each distinct ``(bucket, prefix)`` is listed once. The
+    freshness-monitor Lambda's daily 12:00 UTC run grew from 71 s
+    (2026-08-22) to hitting its 120 s timeout every day since 2026-09-01,
+    firing two CloudWatch alarms a day.
+
+    **The cache is per-run and must not outlive one sweep** — freshness is a
+    claim about what exists *now*, and a listing reused across sweeps would
+    answer a later sweep with an earlier sweep's S3. Create the dict inside
+    the sweep and drop it at the end; never a module-level or warm-Lambda
+    global. The freshness-monitor Lambda
+    (``nousergon-data/infrastructure/lambdas/freshness-monitor/index.py``)
+    passes it as ``check_freshness(s3, spec, now, list_cache=list_cache)``.
 
     Pure with respect to side effects beyond the ``s3_client.head_object``
     call (no logging, no alerting, no DDB / S3 marker writes). The
@@ -1352,6 +1458,7 @@ def check_freshness(
             return _newest_under_prefix(
                 s3_client, spec.s3_bucket,
                 _listable_prefix(tmpl), _key_suffix(tmpl),
+                cache=list_cache,
             )
         state, lm, reason = _head_object(s3_client, spec.s3_bucket, tmpl)
         if state == "probe_failed":
