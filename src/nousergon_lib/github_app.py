@@ -29,6 +29,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -50,10 +51,11 @@ _ENV_OVERRIDES = {
 }
 _USER_AGENT = "nousergon-lib-github-app"
 
-# Keyed by (ssm_prefix, requested-permissions) — NOT by prefix alone. A single
-# key would let a full-authority token minted by one consumer be served to a
-# narrowed one in the same process, silently undoing §4's narrowest-grant rule.
-_cache: dict[tuple[str, str], InstallationToken] = {}
+# Keyed by (ssm_prefix, requested-permissions, requested-repositories) — NOT by
+# prefix alone. A single key would let a full-authority (or repo-unrestricted)
+# token minted by one consumer be served to a narrowed one in the same process,
+# silently undoing §4's narrowest-grant rule.
+_cache: dict[tuple[str, str, str], InstallationToken] = {}
 _cache_lock = threading.Lock()
 
 
@@ -115,6 +117,7 @@ def mint_installation_token(
     installation_id: str,
     private_key_pem: str,
     permissions: dict[str, str] | None = None,
+    repositories: Sequence[str] | None = None,
     api: str = GITHUB_API,
 ) -> InstallationToken:
     """POST /app/installations/{id}/access_tokens → short-lived ``ghs_`` token.
@@ -132,11 +135,26 @@ def mint_installation_token(
     time is where the tension resolves, and it resolves per-request rather than
     by a configuration a later edit could widen.
 
+    ``repositories`` narrows along the orthogonal axis: repo *names* (no owner
+    prefix, e.g. ``["nous-ergon-ops"]``) the token may act on, out of every repo
+    the installation covers. **A token narrowed this way 404s on any other
+    repository the installation has access to** — that is GitHub's documented
+    behavior for a repo-narrowed installation token used outside its granted
+    repos, not a bug in the caller. Only repo *names* are sent
+    (``repository_ids`` is not exposed here — no caller has needed it; add it
+    if one does). Omit to leave the token scoped to every repo the installation
+    covers (unchanged default, matches existing callers byte-for-byte).
+
     Raises :class:`GitHubAppTokenError` on any transport or contract failure —
     consumers own the decision to fall back to a PAT, this module never does.
     """
     app_jwt = build_app_jwt(app_id, private_key_pem)
-    body = json.dumps({"permissions": permissions}).encode() if permissions else b"{}"
+    payload: dict[str, object] = {}
+    if permissions:
+        payload["permissions"] = permissions
+    if repositories:
+        payload["repositories"] = list(repositories)
+    body = json.dumps(payload).encode() if payload else b"{}"
     url = f"{api}/app/installations/{installation_id}/access_tokens"
     # S310 can't see through the ``api`` parameter indirection (kept for
     # testability); constructing a Request does no I/O — the https scheme is
@@ -157,9 +175,7 @@ def mint_installation_token(
             body = json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
-        raise GitHubAppTokenError(
-            f"GitHub App token mint failed: HTTP {exc.code}: {detail}"
-        ) from exc
+        raise GitHubAppTokenError(f"GitHub App token mint failed: HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise GitHubAppTokenError(f"GitHub App token mint failed: {exc}") from exc
     token = body.get("token")
@@ -198,8 +214,7 @@ def _read_credential(name: str, ssm_prefix: str, region: str | None) -> str:
         value = resp["Parameter"]["Value"].strip()
     except (BotoCoreError, ClientError) as exc:
         raise GitHubAppTokenError(
-            f"App credential unreadable at SSM {ssm_prefix}{name} "
-            f"(and no ${env_name} env override): {exc}"
+            f"App credential unreadable at SSM {ssm_prefix}{name} (and no ${env_name} env override): {exc}"
         ) from exc
     if not value:
         raise GitHubAppTokenError(f"App credential empty at SSM {ssm_prefix}{name}")
@@ -211,15 +226,20 @@ def installation_token(
     ssm_prefix: str = DEFAULT_SSM_PREFIX,
     region: str | None = None,
     permissions: dict[str, str] | None = None,
+    repositories: Sequence[str] | None = None,
     api: str = GITHUB_API,
 ) -> str:
     """Cached installation token from SSM-held App credentials.
 
     ``permissions`` narrows the token below the installation's own grants (see
-    :func:`mint_installation_token`). Narrowed tokens are cached under a key that
-    includes the requested permissions, so a ``contents: read`` caller can never
-    be served a cached full-authority token minted by a different consumer in the
-    same process — which would silently undo the narrowing.
+    :func:`mint_installation_token`). ``repositories`` narrows it to the named
+    repos (no owner prefix) instead of every repo the installation covers —
+    **a token narrowed this way 404s on any other repo the installation has
+    access to**. Narrowed tokens are cached under a key that includes both the
+    requested permissions and the requested repositories, so a caller that
+    asked for a repo-narrowed (or permission-narrowed) token can never be
+    served a cached token minted for a wider request by a different consumer
+    in the same process — which would silently undo the narrowing.
 
     Reads ``{ssm_prefix}github_app_id`` / ``_installation_id`` /
     ``_private_key`` (env overrides ``GROOM_GH_APP_*`` win — the groom
@@ -227,7 +247,11 @@ def installation_token(
     concurrent callers (Streamlit threads, Lambda warm starts) can't
     stampede the GitHub endpoint.
     """
-    cache_key = (ssm_prefix, json.dumps(permissions, sort_keys=True) if permissions else "")
+    cache_key = (
+        ssm_prefix,
+        json.dumps(permissions, sort_keys=True) if permissions else "",
+        json.dumps(sorted(repositories)) if repositories else "",
+    )
     with _cache_lock:
         cached = _cache.get(cache_key)
         if cached and not cached.expiring_within(REFRESH_MARGIN_SECONDS):
@@ -240,6 +264,7 @@ def installation_token(
             installation_id=inst_id,
             private_key_pem=pem,
             permissions=permissions,
+            repositories=repositories,
             api=api,
         )
         _cache[cache_key] = minted
