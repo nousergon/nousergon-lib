@@ -1856,3 +1856,178 @@ def test_truncation_is_reported_even_when_nothing_matched_the_suffix():
         "/short_interest.json", cap_pages=8,
     )
     assert err is not None and key == "" and lm is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# One LIST per prefix per sweep (alpha-engine-config-I9206)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The live registry's 185 specs do not have 185 distinct prefixes — dozens
+# share `research/`, `backtest/`, `predictor/` and differ only in the key
+# SUFFIX, so every spec re-paginated the whole shared prefix. Measured
+# 2026-09-06 against the live registry: LIST time summed per spec 106.7 s,
+# summed once per distinct (bucket, prefix) 9.7 s. The freshness-monitor
+# Lambda's daily 12:00 UTC run grew from 71 s (2026-08-22) into its 120 s
+# timeout every day from 2026-09-01, firing two CloudWatch alarms a day.
+#
+# The cache holds the RAW LISTING, never a verdict: suffix filtering, the
+# freshness floor and the classification all still run per spec, so a shared
+# listing changes the cost and nothing else. These tests pin that — including
+# for the two outcomes it would be easiest to get wrong by caching a verdict
+# instead: a truncated scan and a LIST that 403s.
+
+
+def _shared_prefix_fixture():
+    """Two artifacts under ONE prefix, distinguished only by suffix — the
+    registry shape that makes the per-spec LIST cost quadratic in specs."""
+    return [
+        ("research/2026-09-01/factors.json",
+         datetime(2026, 9, 1, 13, tzinfo=timezone.utc)),
+        ("research/2026-09-01/signals.json",
+         datetime(2026, 9, 1, 12, tzinfo=timezone.utc)),
+        ("research/2026-09-05/factors.json",
+         datetime(2026, 9, 5, 13, tzinfo=timezone.utc)),
+        ("research/2026-09-05/signals.json",
+         datetime(2026, 9, 5, 12, tzinfo=timezone.utc)),
+    ]
+
+
+def _paginate_calls(s3):
+    return s3.get_paginator.return_value.paginate.call_count
+
+
+def test_two_suffixes_on_one_prefix_share_a_single_listing():
+    """The headline: one LIST, two correct and DIFFERENT answers. If the
+    cache stored a verdict rather than the listing, both suffixes would get
+    whichever artifact happened to be newest overall."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_shared_prefix_fixture())
+    cache: dict = {}
+
+    sig = af._newest_under_prefix(
+        s3, "b", "research/", "/signals.json", cache=cache,
+    )
+    fac = af._newest_under_prefix(
+        s3, "b", "research/", "/factors.json", cache=cache,
+    )
+
+    assert _paginate_calls(s3) == 1
+    assert sig == (
+        "research/2026-09-05/signals.json",
+        datetime(2026, 9, 5, 12, tzinfo=timezone.utc),
+        None,
+    )
+    assert fac == (
+        "research/2026-09-05/factors.json",
+        datetime(2026, 9, 5, 13, tzinfo=timezone.utc),
+        None,
+    )
+
+
+def test_check_freshness_threads_the_cache_through_two_specs():
+    """The caller-facing shape the Lambda uses: one `list_cache` dict across
+    the sweep, one LIST for the prefix the two specs share, and each spec
+    still classified against its own key."""
+    s3 = _paged_s3(_shared_prefix_fixture())
+    now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+    cache: dict = {}
+
+    sig = check_freshness(
+        s3, _spec(s3_key_template="research/{date}/signals.json"), now,
+        list_cache=cache,
+    )
+    fac = check_freshness(
+        s3, _spec(s3_key_template="research/{date}/factors.json"), now,
+        list_cache=cache,
+    )
+
+    assert _paginate_calls(s3) == 1
+    assert sig.state == "fresh" and fac.state == "fresh"
+    assert "research/2026-09-05/signals.json" in sig.reason
+    assert "research/2026-09-05/factors.json" in fac.reason
+
+
+def test_no_cache_is_todays_behaviour_one_list_per_call():
+    """`list_cache=None` (the default) must not quietly share anything —
+    the opt-in is the whole safety story for a time-sensitive check."""
+    s3 = _paged_s3(_shared_prefix_fixture())
+    now = datetime(2026, 9, 6, 12, tzinfo=timezone.utc)
+
+    a = check_freshness(
+        s3, _spec(s3_key_template="research/{date}/signals.json"), now,
+    )
+    b = check_freshness(
+        s3, _spec(s3_key_template="research/{date}/factors.json"), now,
+    )
+
+    assert _paginate_calls(s3) == 2
+    assert a.state == "fresh" and b.state == "fresh"
+
+
+def test_a_truncated_scan_is_cached_and_every_suffix_gets_the_probe_error():
+    """Truncation is a property of the PREFIX, not of one suffix — so it must
+    be shared, and it must still be a probe error for both callers. Caching a
+    'newest key' here would resurrect the I7617 wrong-verdict bug once per
+    spec instead of once."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_weekly_fixture())
+    cache: dict = {}
+
+    _k1, _lm1, err1 = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json",
+        cap_pages=8, cache=cache,
+    )
+    k2, lm2, err2 = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/filler.json",
+        cap_pages=8, cache=cache,
+    )
+
+    assert _paginate_calls(s3) == 1
+    assert err1 is not None and "truncated" in err1
+    assert err2 == err1
+    assert k2 == "" and lm2 is None
+
+
+def test_a_listing_client_error_is_cached_and_reported_for_every_suffix():
+    """One 403 on a shared prefix is one fact about the monitor's blindness.
+    Re-issuing it per spec spends the LIST budget on a call that already
+    failed, and 185 identical failures read as 185 problems."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _fake_s3(list_raises={"research/": _ClientError403()})
+    cache: dict = {}
+
+    k1, lm1, err1 = af._newest_under_prefix(
+        s3, "b", "research/", "/signals.json", cache=cache,
+    )
+    k2, lm2, err2 = af._newest_under_prefix(
+        s3, "b", "research/", "/factors.json", cache=cache,
+    )
+
+    assert _paginate_calls(s3) == 1
+    assert err1 is not None and "403" in err1
+    assert err2 == err1
+    assert (k1, lm1) == ("", None) and (k2, lm2) == ("", None)
+
+
+def test_a_different_cap_pages_is_a_different_cache_entry():
+    """cap_pages changes what the listing IS — a scan truncated at 8 pages and
+    a complete scan at 64 are not the same fact, so they cannot share a slot."""
+    from nousergon_lib import artifact_freshness as af
+    s3 = _paged_s3(_weekly_fixture())
+    cache: dict = {}
+
+    _k1, _lm1, err_capped = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json",
+        cap_pages=8, cache=cache,
+    )
+    key, lm, err_full = af._newest_under_prefix(
+        s3, "b", "market_data/weekly/", "/short_interest.json",
+        cache=cache,
+    )
+
+    assert _paginate_calls(s3) == 2
+    assert len(cache) == 2
+    assert err_capped is not None and "truncated" in err_capped
+    assert err_full is None
+    assert key == "market_data/weekly/2026-08-14/short_interest.json"
+    assert lm == datetime(2026, 8, 15, 9, 49, 5, tzinfo=timezone.utc)
