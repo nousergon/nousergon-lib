@@ -71,9 +71,7 @@ def test_normalize_pem_unescapes_and_terminates():
 def test_mint_installation_token_success(rsa_keys):
     pem, _ = rsa_keys
     with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response()) as m:
-        minted = github_app.mint_installation_token(
-            app_id="1", installation_id="99", private_key_pem=pem
-        )
+        minted = github_app.mint_installation_token(app_id="1", installation_id="99", private_key_pem=pem)
     assert minted.token == "ghs_testtoken"
     assert minted.expires_at == datetime(2099, 1, 1, tzinfo=timezone.utc)
     req = m.call_args[0][0]
@@ -106,20 +104,84 @@ def test_mint_without_permissions_sends_an_empty_body(rsa_keys):
     assert m.call_args[0][0].data == b"{}"
 
 
+def test_mint_narrows_repositories_in_the_request_body(rsa_keys):
+    """``repositories`` narrows along the axis orthogonal to ``permissions`` —
+    the resulting token 404s on any repo the installation covers but that was
+    not named here (alpha-engine-config-I10117)."""
+    pem, _ = rsa_keys
+    with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response()) as m:
+        github_app.mint_installation_token(
+            app_id="1",
+            installation_id="99",
+            private_key_pem=pem,
+            permissions={"contents": "read"},
+            repositories=["nous-ergon-ops"],
+        )
+    assert json.loads(m.call_args[0][0].data) == {
+        "permissions": {"contents": "read"},
+        "repositories": ["nous-ergon-ops"],
+    }
+
+
+def test_mint_without_repositories_omits_the_key(rsa_keys):
+    """Existing callers that never pass ``repositories`` must send a
+    byte-identical body to before this parameter existed."""
+    pem, _ = rsa_keys
+    with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response()) as m:
+        github_app.mint_installation_token(
+            app_id="1",
+            installation_id="99",
+            private_key_pem=pem,
+            permissions={"contents": "read"},
+        )
+    sent = json.loads(m.call_args[0][0].data)
+    assert "repositories" not in sent
+    assert sent == {"permissions": {"contents": "read"}}
+
+
+def test_repo_narrowed_token_is_rejected_outside_its_granted_repos(rsa_keys):
+    """The narrowing has teeth: mint against one repo, then confirm — against a
+    recorded/mocked GitHub response — that using the minted token on a SIBLING
+    repo the same installation covers is rejected. GitHub's documented behavior
+    for a repo-narrowed installation token used outside its granted repos is a
+    404 (not a 403): the token is valid, the repo is simply invisible to it."""
+    pem, _ = rsa_keys
+    with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response()) as m:
+        minted = github_app.mint_installation_token(
+            app_id="1",
+            installation_id="99",
+            private_key_pem=pem,
+            repositories=["one-repo"],
+        )
+    assert json.loads(m.call_args[0][0].data) == {"repositories": ["one-repo"]}
+
+    sibling_404 = urllib.error.HTTPError(
+        "https://api.github.com/repos/nousergon/sibling-repo",
+        404,
+        "Not Found",
+        None,
+        io.BytesIO(b'{"message":"Not Found"}'),
+    )
+    sibling_req = urllib.request.Request(
+        "https://api.github.com/repos/nousergon/sibling-repo",
+        headers={"Authorization": f"Bearer {minted.token}"},
+    )
+    with mock.patch.object(github_app.urllib.request, "urlopen", side_effect=sibling_404):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            github_app._safe_urlopen(sibling_req)
+    assert exc_info.value.code == 404
+
+
 def test_narrowed_and_full_tokens_do_not_share_a_cache_entry(monkeypatch):
     """A single cache key would serve a full-authority token to a narrowed caller
     in the same process, silently undoing the narrowing."""
     _patch_secrets(monkeypatch)
     github_app.clear_cache()
-    full = github_app.InstallationToken(
-        token="ghs_full", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
-    )
+    full = github_app.InstallationToken(token="ghs_full", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55))
     narrow = github_app.InstallationToken(
         token="ghs_narrow", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
     )
-    with mock.patch.object(
-        github_app, "mint_installation_token", side_effect=[full, narrow]
-    ) as m:
+    with mock.patch.object(github_app, "mint_installation_token", side_effect=[full, narrow]) as m:
         assert github_app.installation_token() == "ghs_full"
         assert github_app.installation_token(permissions={"contents": "read"}) == "ghs_narrow"
         # …and each is cached under its own key.
@@ -129,6 +191,25 @@ def test_narrowed_and_full_tokens_do_not_share_a_cache_entry(monkeypatch):
     assert m.call_args.kwargs["permissions"] == {"contents": "read"}
 
 
+def test_repo_narrowed_and_full_tokens_do_not_share_a_cache_entry(monkeypatch):
+    """Same rationale as the permissions cache-key test, on the orthogonal axis:
+    a caller requesting ``repositories=[...]`` must never be served a token
+    minted for a different (or unrestricted) repo set."""
+    _patch_secrets(monkeypatch)
+    github_app.clear_cache()
+    full = github_app.InstallationToken(token="ghs_full", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55))
+    narrow = github_app.InstallationToken(
+        token="ghs_repo_narrow", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
+    )
+    with mock.patch.object(github_app, "mint_installation_token", side_effect=[full, narrow]) as m:
+        assert github_app.installation_token() == "ghs_full"
+        assert github_app.installation_token(repositories=["one-repo"]) == "ghs_repo_narrow"
+        assert github_app.installation_token() == "ghs_full"
+        assert github_app.installation_token(repositories=["one-repo"]) == "ghs_repo_narrow"
+    assert m.call_count == 2
+    assert m.call_args.kwargs["repositories"] == ["one-repo"]
+
+
 def test_mint_http_error_raises(rsa_keys):
     pem, _ = rsa_keys
     err = urllib.error.HTTPError(
@@ -136,29 +217,21 @@ def test_mint_http_error_raises(rsa_keys):
     )
     with mock.patch.object(github_app.urllib.request, "urlopen", side_effect=err):
         with pytest.raises(github_app.GitHubAppTokenError, match="HTTP 401"):
-            github_app.mint_installation_token(
-                app_id="1", installation_id="99", private_key_pem=pem
-            )
+            github_app.mint_installation_token(app_id="1", installation_id="99", private_key_pem=pem)
 
 
 def test_mint_missing_token_field_raises(rsa_keys):
     pem, _ = rsa_keys
-    with mock.patch.object(
-        github_app.urllib.request, "urlopen", return_value=_mint_response(token="")
-    ):
+    with mock.patch.object(github_app.urllib.request, "urlopen", return_value=_mint_response(token="")):
         with pytest.raises(github_app.GitHubAppTokenError, match="missing 'token'"):
-            github_app.mint_installation_token(
-                app_id="1", installation_id="99", private_key_pem=pem
-            )
+            github_app.mint_installation_token(app_id="1", installation_id="99", private_key_pem=pem)
 
 
 def test_parse_expiry_degrades_to_55min():
     before = datetime.now(timezone.utc)
     parsed = github_app._parse_expiry("not-a-date")
     assert parsed - before >= timedelta(minutes=54)
-    assert github_app._parse_expiry("2099-01-01T00:00:00Z") == datetime(
-        2099, 1, 1, tzinfo=timezone.utc
-    )
+    assert github_app._parse_expiry("2099-01-01T00:00:00Z") == datetime(2099, 1, 1, tzinfo=timezone.utc)
 
 
 # ── cached SSM-backed convenience ───────────────────────────────────────────
@@ -188,12 +261,8 @@ def test_installation_token_remints_near_expiry(monkeypatch):
     nearly_dead = github_app.InstallationToken(
         token="ghs_old", expires_at=datetime.now(timezone.utc) + timedelta(minutes=2)
     )
-    fresh = github_app.InstallationToken(
-        token="ghs_new", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
-    )
-    with mock.patch.object(
-        github_app, "mint_installation_token", side_effect=[nearly_dead, fresh]
-    ) as m:
+    fresh = github_app.InstallationToken(token="ghs_new", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55))
+    with mock.patch.object(github_app, "mint_installation_token", side_effect=[nearly_dead, fresh]) as m:
         assert github_app.installation_token() == "ghs_old"
         assert github_app.installation_token() == "ghs_new"  # margin forces re-mint
     assert m.call_count == 2
@@ -220,9 +289,7 @@ def test_installation_token_reads_ssm_when_no_env(monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     from moto import mock_aws
 
-    fresh = github_app.InstallationToken(
-        token="ghs_ssm", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55)
-    )
+    fresh = github_app.InstallationToken(token="ghs_ssm", expires_at=datetime.now(timezone.utc) + timedelta(minutes=55))
     with mock_aws():
         import boto3
 
@@ -232,9 +299,7 @@ def test_installation_token_reads_ssm_when_no_env(monkeypatch):
             ("github_app_installation_id", "4242"),
             ("github_app_private_key", "KEY\\nMATERIAL"),
         ]:
-            ssm.put_parameter(
-                Name=f"/alpha-engine/groom/{name}", Value=value, Type="SecureString"
-            )
+            ssm.put_parameter(Name=f"/alpha-engine/groom/{name}", Value=value, Type="SecureString")
         with mock.patch.object(github_app, "mint_installation_token", return_value=fresh) as m:
             assert github_app.installation_token() == "ghs_ssm"
     assert m.call_args.kwargs["app_id"] == "42"
@@ -243,9 +308,7 @@ def test_installation_token_reads_ssm_when_no_env(monkeypatch):
 
 
 def test_expiring_within():
-    tok = github_app.InstallationToken(
-        token="t", expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc)
-    )
+    tok = github_app.InstallationToken(token="t", expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc))
     at = datetime(2029, 12, 31, 23, 56, tzinfo=timezone.utc)  # 4 min left
     assert tok.expiring_within(300, now=at)
     assert not tok.expiring_within(120, now=at)
