@@ -652,3 +652,152 @@ def test_declared_registry_exemption_does_not_redden_a_consumer(tmp_path):
     # No verdict change: the file is fully exempt, so the entry is neither a
     # finding nor considered stale (it is simply out of scan scope).
     assert plg.main(["--repo", str(repo)]) == 0
+
+
+# -- a docstring is prose, not a call site (alpha-engine-config-I9263) ------
+#
+# Five allowlist entries EXPIRED 2026-09-05 on crucible-research covering the
+# exact same shape comment-stripping already fixed once: a migration's own
+# module docstring narrating the retired `anthropic.Anthropic(api_key=...)`
+# construction it replaced, and a test asserting that pattern's absence. A
+# docstring is a real syntax position (first statement of a module, class or
+# function), identified structurally -- never a text heuristic over what the
+# string says -- exactly the discipline `_blank_python_comments` and
+# `_is_declared_registry` already use.
+
+
+def test_a_module_docstring_naming_a_retired_pattern_is_not_linkage(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", (
+        '"""This module replaced `anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)`.\n'
+        '"""\n'
+        "x = 1\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_a_function_docstring_naming_a_retired_pattern_is_not_linkage(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", (
+        "def f():\n"
+        '    """Used to read ANTHROPIC_API_KEY here."""\n'
+        "    return 1\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_a_real_anthropic_construction_still_trips_the_guard(tmp_path):
+    """The regression this guard exists for must still fire -- a docstring
+    exemption must not become a way to hide a real call site."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", (
+        '"""Docstring with nothing to say about providers."""\n'
+        "import anthropic\n"
+        "client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)\n"
+    ))
+    matches = _scan(repo)
+    assert "anthropic:sdk_client" in _classes(matches)
+    assert "anthropic:env_key" in _classes(matches)
+
+
+def test_a_string_not_in_first_statement_position_is_not_a_docstring(tmp_path):
+    """A bare string expression AFTER other statements is dead code, not
+    documentation -- it is not exempted, because it is not structurally a
+    docstring at all, the same distinction `_docstring_spans` draws."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", (
+        "x = 1\n"
+        '"anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)"\n'
+    ))
+    matches = _scan(repo)
+    assert "anthropic:sdk_client" in _classes(matches)
+
+
+def test_a_string_literal_assigned_to_a_variable_is_still_linkage(tmp_path):
+    """Docstring-stripping must not widen to ordinary string-literal code --
+    a base URL or credential name assigned to a variable is still linkage,
+    because it never occupies the first-statement-of-a-scope position."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", 'BASE_URL = "api.anthropic.com"\n')
+    assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_a_python_file_that_does_not_parse_still_gets_docstring_pass_skipped(tmp_path):
+    """`_docstring_spans` must degrade to "nothing stripped", never crash, on
+    a syntactically broken file -- the comment-blanking fallback already
+    guarantees the file is still scanned in full."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", "def broken(:\nk = os.environ['ANTHROPIC_API_KEY']\n")
+    assert plg.main(["--repo", str(repo)]) == 1
+
+
+def test_docstring_exemption_does_not_redden_a_consumer(tmp_path):
+    """Same safety property already proven for comment-stripping and the
+    declared-registry marker: this is a RELAXATION evaluated only in the
+    findings scan, so an existing allowlist entry inside a docstring cannot
+    flip from covered to unallowlisted -- it simply stops appearing."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "h.py", (
+        '"""Reads ANTHROPIC_API_KEY historically."""\n'
+        "x = 1\n"
+    ))
+    _allowlist(repo, (
+        "entries:\n"
+        "  - path: h.py\n"
+        "    pattern: anthropic:env_key\n"
+        "    reason: baselined docstring prose\n"
+        "    expires: 2099-01-01\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+# -- a declared "asserts-absence" file is not a call site (alpha-engine-
+# config-I9263) --------------------------------------------------------------
+#
+# A test's literal tuple of forbidden strings, compared with `not in` against
+# a module's source to prove a retired pattern is GONE, is ordinary CODE, not
+# a docstring -- `tests/test_eval_judge_batch_transport.py`'s
+# `test_no_anthropic_sdk_construction` is the exact shape. Exempted the same
+# way `_is_declared_registry` exempts a registry: an explicit, opt-in,
+# structural marker the file declares about itself, narrower than "any
+# string in a test file is exempt" so a genuine accidental construction
+# elsewhere in a test is still caught.
+
+
+def test_a_file_marked_asserts_absence_is_not_a_call_site(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "tests/test_no_anthropic.py", (
+        "# provider-linkage-guard: asserts-absence\n"
+        "FORBIDDEN = (\"anthropic.Anthropic(\", \"ANTHROPIC_API_KEY\")\n"
+        "def test_gone():\n"
+        "    assert all(f not in read_source() for f in FORBIDDEN)\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_a_test_file_without_the_marker_still_trips_the_guard(tmp_path):
+    """The marker is opt-in, not automatic for anything under tests/ -- a
+    genuine accidental construction in an unmarked test must still fire."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "tests/test_something.py", (
+        "def test_x():\n"
+        "    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)\n"
+    ))
+    matches = _scan(repo)
+    assert "anthropic:sdk_client" in _classes(matches)
+
+
+def test_asserts_absence_exemption_does_not_redden_a_consumer(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "tests/test_no_anthropic.py", (
+        "# provider-linkage-guard: asserts-absence\n"
+        "FORBIDDEN = \"ANTHROPIC_API_KEY\"\n"
+    ))
+    _allowlist(repo, (
+        "entries:\n"
+        "  - path: tests/test_no_anthropic.py\n"
+        "    pattern: anthropic:env_key\n"
+        "    reason: pre-existing baseline entry, now superseded by the marker\n"
+        "    expires: 2099-01-01\n"
+    ))
+    assert plg.main(["--repo", str(repo)]) == 0

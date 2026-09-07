@@ -49,7 +49,22 @@ discusses every one of these vendors constantly as a TOPIC, and prose is not
 linkage. **Comments are excluded for the same reason** (I9295): prose after a
 ``#`` or ``//`` is not an execution surface, and the file it sits in does not
 change that. String literals are NOT excluded -- a credential name or a base
-URL in a string executes, and must still fail.
+URL in a string executes, and must still fail, **except** two narrow,
+structural carve-outs (I9263), neither a text heuristic over what a string
+says:
+
+  - a Python **docstring** -- a bare string-constant statement in first
+    position of a module/class/function body (``_docstring_spans``) -- is
+    prose under the identical rationale as a comment, identified the same
+    structural way comments already are (a real syntax position, never
+    content-sniffed);
+  - a file that opts in with a ``# provider-linkage-guard: asserts-absence``
+    marker (``_is_asserts_absence``) -- the same declared-marker discipline
+    ``_is_declared_registry`` already uses -- because a test's literal tuple
+    of forbidden strings, compared with ``not in`` to prove a retired
+    pattern is GONE, is not a call site either. Both are file-wide and
+    apply only to the findings scan, never the staleness scan (see
+    ``scan()``'s ``registry_aware``/``absence_aware`` docstring).
 
 **Baseline, not a blank ban.** A ``.provider-linkage-allowlist.yaml`` at the
 repo root pre-clears known matches. A NEW match with no entry fails. An
@@ -373,8 +388,89 @@ def _blank_python_comments(text: str) -> str:
     return "\n".join(lines)
 
 
+def _docstring_spans(text: str) -> list[tuple[int, int, int, int]]:
+    """``(start_line, start_col, end_line, end_col)`` for every real docstring.
+
+    A docstring is identified STRUCTURALLY -- a bare string-constant
+    ``Expr`` statement in FIRST position of a module, class or function body
+    -- exactly the definition Python itself uses (``ast.get_docstring``), not
+    a heuristic over content. That is deliberate: it cannot be fooled by a
+    string that merely *looks* like documentation, and it cannot hide a
+    string that is not in first-statement position, because that string is
+    not a docstring at all -- it is a normal expression statement (dead code
+    in practice, but not this guard's concern to adjudicate).
+
+    Returns an empty list -- never raises -- on a file that fails to parse:
+    a syntactically broken file must still be SCANNED in full, the same
+    fallback discipline ``_blank_python_comments`` already applies.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    spans: list[tuple[int, int, int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", None)
+        if not body:
+            continue
+        first = body[0]
+        if (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        ):
+            v = first.value
+            if v.end_lineno is not None and v.end_col_offset is not None:
+                spans.append((v.lineno, v.col_offset, v.end_lineno, v.end_col_offset))
+    return spans
+
+
+def _blank_python_docstrings(text: str) -> str:
+    """Blank real docstrings (see ``_docstring_spans``), preserving line numbers.
+
+    **Why this exists (alpha-engine-config-I9263).** Five allowlist entries
+    on ``crucible-research`` expired covering the exact same shape comment-
+    stripping already fixed once for ``#``: a migration's own module
+    docstring narrating the retired ``anthropic.Anthropic(api_key=...)``
+    construction it replaced is prose, not a call site -- a string is not a
+    client construction any more than a comment is. Re-dating those entries
+    forever is a suppression renewal, not a fix; the guard's own module
+    docstring above already states the rule this closes the gap on:
+    "Comments are excluded... prose is not linkage." A module/class/function
+    docstring is prose under the identical rationale, identified the same
+    structural way (a real syntax position), never a text heuristic over
+    what the string says.
+
+    **What this does NOT weaken.** String literals used as CODE -- a base
+    URL assigned to a variable, a credential name passed to
+    ``os.environ.get(...)``, a test's tuple of forbidden literals compared
+    with ``in``/``not in`` -- are untouched: none of those occupy the
+    first-statement-of-a-scope position a docstring requires, so none are in
+    ``_docstring_spans``' output. Detection of every one of those shapes is
+    unchanged.
+    """
+    spans = _docstring_spans(text)
+    if not spans:
+        return text
+    lines = text.splitlines()
+    for l1, c1, l2, c2 in spans:
+        if l1 == l2:
+            line = lines[l1 - 1]
+            lines[l1 - 1] = line[:c1] + " " * (c2 - c1) + line[c2:]
+        else:
+            lines[l1 - 1] = lines[l1 - 1][:c1]
+            for i in range(l1, l2 - 1):
+                lines[i] = ""
+            lines[l2 - 1] = " " * c2 + lines[l2 - 1][c2:]
+    return "\n".join(lines)
+
+
 def strip_comments(rel: str, text: str) -> str:
-    """`text` with comment regions blanked, line numbering preserved.
+    """`text` with comment AND docstring regions blanked, line numbers preserved.
 
     Extensions with no comment syntax (``.json``, ``.plist``) are returned
     unchanged -- there is nothing to strip and inventing a rule for them would
@@ -382,7 +478,7 @@ def strip_comments(rel: str, text: str) -> str:
     """
     suffix = Path(rel).suffix.lower()
     if suffix == ".py":
-        return _blank_python_comments(text)
+        return _blank_python_docstrings(_blank_python_comments(text))
     if suffix in _COMMENT_HASH_EXTENSIONS:
         return _blank_hash_comments(text)
     if suffix in _COMMENT_SLASH_EXTENSIONS:
@@ -510,6 +606,37 @@ def _is_declared_registry(fp: Path, text: str) -> bool:
     return bool(_REGISTRY_SELF_RE.search(text))
 
 
+# -- a structural test literal asserting a pattern's ABSENCE is not linkage -
+#
+# alpha-engine-config-I9263: the docstring fix above does not reach a string
+# literal that is ordinary CODE, not a docstring -- e.g. a test's tuple of
+# forbidden strings compared with ``not in`` against a module's source, the
+# exact shape ``tests/test_eval_judge_batch_transport.py`` and
+# ``tests/test_no_anthropic_sdk_construction`` use to prove the retired
+# ``anthropic.Anthropic(...)``/``ANTHROPIC_API_KEY`` pattern is GONE. That
+# literal is not a call site any more than the guard's own PROVIDERS table
+# (``_is_scanner_source``) or a declared registry's schema
+# (``_is_declared_registry``) are -- and it gets the SAME treatment: an
+# explicit, opt-in, structural marker a file declares about ITSELF, never a
+# path list and never inferred from the string's content.
+#
+# This is deliberately NARROWER than "any string in a _test_ file is exempt"
+# -- that would blind the guard to a genuine accidental construction sitting
+# in an unrelated test (a copy-pasted fixture, a live-smoke helper that
+# actually calls the SDK). Only a file that explicitly declares its subject
+# is proving absence earns the exemption, exactly the discipline
+# ``_is_declared_registry`` already established for "a file that IS a
+# registry" versus "a file that merely mentions one."
+_ASSERTS_ABSENCE_RE = re.compile(
+    r"^\s*#\s*provider-linkage-guard:\s*asserts-absence\b", re.MULTILINE
+)
+
+
+def _is_asserts_absence(text: str) -> bool:
+    """A file that structurally asserts a retired pattern's ABSENCE, by marker."""
+    return bool(_ASSERTS_ABSENCE_RE.search(text))
+
+
 def _registry_filenames(repo: Path, extensions: frozenset[str]) -> frozenset[str]:
     """Basenames of every declared registry tracked in the repo.
 
@@ -543,6 +670,7 @@ def scan(
     *,
     strip: bool = True,
     registry_aware: bool = True,
+    absence_aware: bool = True,
 ) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
@@ -559,6 +687,11 @@ def scan(
     allowlist entry into "stale" the moment a repo's registry earns the
     marker -- turning a guard-side relaxation into a red consumer `main` with
     no commit there, the same failure mode comment-stripping had to avoid.
+
+    ``absence_aware`` gates the ``asserts-absence`` marker exemption (see
+    ``_is_asserts_absence``) the same way, for the same reason: it is a
+    relaxation and must never retroactively stale an existing allowlist
+    entry on ``main`` with no commit in that repo.
     """
     registry_names = _registry_filenames(repo, extensions) if registry_aware else frozenset()
     matches: list[Match] = []
@@ -576,6 +709,8 @@ def scan(
         if registry_aware and _is_declared_registry(fp, text):
             continue
         if registry_names and _is_registry_subject(text, registry_names):
+            continue
+        if absence_aware and _is_asserts_absence(text):
             continue
         body = strip_comments(rel, text) if strip else text
         for lineno, line in enumerate(body.splitlines(), 1):
@@ -793,7 +928,10 @@ def main(argv: list[str] | None = None) -> int:
             pass  # allowlist lives outside the repo (a test fixture) -- nothing to skip
         skip = frozenset({allowlist_rel}) if allowlist_rel else frozenset()
         matches = scan(repo, extensions, patterns, skip=skip)
-        raw_matches = scan(repo, extensions, patterns, skip=skip, strip=False, registry_aware=False)
+        raw_matches = scan(
+            repo, extensions, patterns, skip=skip,
+            strip=False, registry_aware=False, absence_aware=False,
+        )
         allowlist = load_allowlist(allowlist_path, all_pattern_classes())
     except GuardError as exc:
         print(f"::error::could not complete provider linkage guard scan: {exc}")
