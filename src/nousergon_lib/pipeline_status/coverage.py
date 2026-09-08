@@ -692,6 +692,7 @@ def read_coverage_sweep(
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD,
     observer_execution_arn: str | None = None,
     observer_stage: str | None = None,
+    stage_spine: Sequence[str] | None = None,
     now: datetime | None = None,
 ) -> CoverageSweep:
     """Read the registry, the verdicts and the cycle, and sweep them.
@@ -709,6 +710,21 @@ def read_coverage_sweep(
     an out-of-band re-sweep, a backfill or the CLI: those observe from
     OUTSIDE the cycle and have no self to exclude
     (``alpha-engine-config-I10161``).
+
+    ``stage_spine`` overrides the declared spine
+    (:func:`~.registry.stage_order_for`) forwarded to
+    :func:`~.cycle_shape.read_cycle_shape` verbatim — ``None`` (the default)
+    uses the full declared spine. This is the caller's answer to "does this
+    CYCLE intend to run every declared stage" — a question the registry
+    cannot answer alone: :data:`~.registry.PIPELINE_STAGE_ORDER` names
+    ``ParityParallel`` / ``PitParityCompare`` unconditionally, but a run with
+    ``skip_parity: true`` (a recorded operator flag, not a defect) never
+    intends to enter them. Without an exclusion, such a cycle reads
+    ``INCOMPLETE`` forever, on every run for as long as the flag is set —
+    ``alpha-engine-config-I10175``, measured live on the 2026-09-04 cycle.
+    The caller (not this function) is responsible for deriving which stages
+    a given cycle deliberately excludes — this module has no reader for
+    ``run_scope.json`` and must not grow one just to answer this.
     """
     if s3_client is None:  # pragma: no cover — production path
         import boto3
@@ -743,6 +759,7 @@ def read_coverage_sweep(
                 calendar_date=calendar_date,
                 client=sfn_client,
                 observer_execution_arn=observer_execution_arn,
+                stage_spine=stage_spine,
             )
         except Exception as exc:  # noqa: BLE001 — degrades LOUDLY, never silently
             entered_reason = f"{type(exc).__name__}: {exc}"
