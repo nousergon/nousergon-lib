@@ -269,6 +269,54 @@ def test_stale_entry_fails(tmp_path):
     assert len(report.stale) == 1
 
 
+def test_unmatched_entry_for_a_disabled_class_is_not_stale(tmp_path):
+    """alpha-engine-config-I10225: a `dist` allowlist entry added ahead of
+    `nousergon-lib-PR397`'s enforcement flip must not fail the pre-flip
+    reusable workflow run (no `--include-dist`) that never scans `dist` at
+    all -- an entry for a class this invocation did not look at is
+    unknowable, not stale. Unmatched, disabled, no `raw_matches` covering it
+    at all (mirrors the reusable workflow's real pre-flip shape)."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "clean.py", "x = 1\n")
+    p = _allowlist(repo, (
+        "entries:\n"
+        "  - path: pyproject.toml\n"
+        "    pattern: anthropic:dist\n"
+        "    reason: description prose, not a dependency\n"
+        f"    expires: {FUTURE}\n"
+    ))
+    report = plg.evaluate(
+        _scan(repo), plg.load_allowlist(p, plg.all_pattern_classes()), TODAY,
+        enabled_classes=plg.DEFAULT_PATTERN_CLASSES,
+    )
+    assert report.ok
+    assert report.stale == []
+    assert len(report.disabled) == 1
+    assert report.disabled[0].pattern_class == "anthropic:dist"
+
+
+def test_unmatched_entry_for_an_enabled_class_is_still_stale(tmp_path):
+    """The disabled-class carve-out must not weaken the guard for a class
+    this invocation DOES scan -- an unused entry for an ENABLED class still
+    fails, unchanged."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "clean.py", "x = 1\n")
+    p = _allowlist(repo, (
+        "entries:\n"
+        "  - path: gone.py\n"
+        "    pattern: anthropic:sdk_client\n"
+        "    reason: baselined\n"
+        f"    expires: {FUTURE}\n"
+    ))
+    report = plg.evaluate(
+        _scan(repo), plg.load_allowlist(p, plg.all_pattern_classes()), TODAY,
+        enabled_classes=plg.DEFAULT_PATTERN_CLASSES,
+    )
+    assert not report.ok
+    assert len(report.stale) == 1
+    assert report.disabled == []
+
+
 def test_allowlist_entry_is_scoped_to_its_pattern_class(tmp_path):
     """Clearing one vendor shape must not clear a different one in the same file."""
     repo = _git_repo(tmp_path)

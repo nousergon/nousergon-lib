@@ -183,3 +183,22 @@ entries:
       Naming a credential in order to detect it is the opposite of holding one.
     expires: 2027-02-28
     tracking: alpha-engine-config-I9263
+
+  # -- `dist` class, enforcement flip (alpha-engine-config-I10225) --
+
+  - path: pyproject.toml
+    pattern: anthropic:dist
+    reason: >-
+      The `[project].description` field's PROSE ("Anthropic payload
+      chokepoint", describing the egress-proxy module) matches the bare
+      distribution-name boundary regex even though it names no dependency --
+      this repo's `pyproject.toml` [project.dependencies] carries no
+      `anthropic` pin at all (measured: `anthropic` appears nowhere in
+      [project.dependencies] or [project.optional-dependencies]). A metadata
+      description field is not a dependency declaration. Named in I10225's
+      body as a known gotcha at flip time; not rescoping the guard's regex to
+      dependency-array-only sections in this PR (larger, cross-file-format
+      change) -- the allowlist entry is the correct-for-now clearance, this
+      being a doc-metadata false positive rather than a real linkage.
+    expires: "2026-12-07"
+    tracking: alpha-engine-config-I10225

@@ -163,7 +163,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -945,6 +945,7 @@ class Report:
     expired: list[AllowlistEntry]
     stale: list[AllowlistEntry]
     covered: int
+    disabled: list[AllowlistEntry] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -956,8 +957,32 @@ def evaluate(
     allowlist: list[AllowlistEntry],
     today: _dt.date,
     raw_matches: list[Match] | None = None,
+    *,
+    enabled_classes: frozenset[str] | None = None,
 ) -> Report:
     """Findings from ``matches``; STALENESS from ``raw_matches``.
+
+    ``enabled_classes`` is the set of bare pattern-class names (``sdk_client``,
+    ``env_key``, ... -- NOT the namespaced ``<provider>:<class>`` form) actually
+    scanned in this invocation, e.g. `DEFAULT_PATTERN_CLASSES` without
+    `--include-dist`. Pass ``None`` (the default) to mean "every class is
+    enabled" -- the historical behaviour, still correct for a caller that
+    scans unconditionally.
+
+    An allowlist entry for a class this invocation did NOT scan is neither
+    matched nor genuinely unmatched -- its usefulness is unknowable, because
+    the class it names was never looked at. alpha-engine-config-I10225:
+    reporting "unknowable" as `stale` deadlocked six consumer PRs against
+    `nousergon-lib-PR397`, which enables the `dist` class fleet-wide -- their
+    new `dist` allowlist entries were reported stale by the reusable
+    workflow's pre-flip run (no `--include-dist`), a red required check no PR
+    may merge past, while the flip that would make the class scanned could
+    not itself land first without reddening those six repos' `main` with
+    unallowlisted findings the instant it merged. Such an entry moves to
+    ``disabled`` (a distinct, non-erroring bucket) instead of ``stale``, and
+    is reported as skipped rather than silently dropped. This does NOT relax
+    detection for a class this invocation DOES scan: an unused entry for an
+    ENABLED class is still `stale`, unchanged.
 
     The two are deliberately different match sets (alpha-engine-config-I9295).
     ``matches`` is comment-stripped, because a comment is not a call site.
@@ -998,17 +1023,34 @@ def evaluate(
     matched_keys |= {k for k in seen_keys if k in by_key}
 
     expired = [e for e in allowlist if e.expires < today]
-    stale = [
+    unmatched = [
         e for e in allowlist
         if e.expires >= today and (e.path, e.pattern_class) not in matched_keys
     ]
-    return Report(unallowlisted=unallowlisted, expired=expired, stale=stale, covered=covered)
+    disabled = [
+        e for e in unmatched
+        if enabled_classes is not None
+        and e.pattern_class.rsplit(":", 1)[-1] not in enabled_classes
+    ]
+    disabled_keys = {(e.path, e.pattern_class) for e in disabled}
+    stale = [e for e in unmatched if (e.path, e.pattern_class) not in disabled_keys]
+    return Report(
+        unallowlisted=unallowlisted, expired=expired, stale=stale,
+        covered=covered, disabled=disabled,
+    )
 
 
 # -- reporting --------------------------------------------------------------
 
 
 def render(report: Report, total_matches: int) -> int:
+    for e in sorted(report.disabled, key=lambda e: (e.path, e.pattern_class)):
+        print(
+            f"::notice file={e.path}::skipping staleness check for pattern="
+            f"{e.pattern_class} -- this pattern class is not enabled for this "
+            f"invocation, so whether the entry still matches anything is "
+            f"unknowable here, not stale"
+        )
     if report.ok:
         print(
             f"No unallowlisted direct provider linkage. "
@@ -1124,7 +1166,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::could not complete provider linkage guard scan: {exc}")
         return 2
 
-    report = evaluate(matches, allowlist, _dt.date.today(), raw_matches=raw_matches)
+    report = evaluate(
+        matches, allowlist, _dt.date.today(), raw_matches=raw_matches,
+        enabled_classes=frozenset(classes),
+    )
     return render(report, len(matches))
 
 

@@ -104,4 +104,4 @@ jobs:
         run: pip install --quiet pyyaml
 
       - name: No unallowlisted direct provider linkage
-        run: python3 _nousergon-lib-script/scripts/provider_linkage_guard.py --repo .
+        run: python3 _nousergon-lib-script/scripts/provider_linkage_guard.py --repo . --include-dist
