@@ -120,7 +120,12 @@ def test_real_failure_is_incomplete_and_names_the_stages_it_reached():
     assert o.verdict is WorkVerdict.INCOMPLETE
     assert o.reason == "execution_failed"
     assert o.should_alert
-    assert o.stage_coverage == "10/16"
+    # 11/17, not 10/16: alpha-engine-config-I10199 added `EvalRollingMean` to
+    # the weekly spine, and this execution DID enter it. Both halves moved —
+    # the denominator by declaration, the numerator because the fixture is a
+    # verbatim capture that entered the stage.
+    assert o.stage_coverage == "11/17"
+    assert "EvalRollingMean" in o.stages_entered
     assert "ParityParallel" in o.stages_missing
     assert "MorningEnrich" in o.stages_entered
 

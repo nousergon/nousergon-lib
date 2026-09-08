@@ -1472,6 +1472,29 @@ def lookup_registry(state_name: str) -> ArchivePageRef | ArtifactReason | None:
 #: ``nousergon-data`` — a stage rename that is not mirrored here blinds every
 #: reader matching on the old name, and that blindness reports as the benign
 #: "that stage did not run" (the I6857 defect).
+#:
+#: ## Why this is a LITERAL and not derived (``alpha-engine-config-I10199``)
+#:
+#: Three candidate sources were checked before typing a name, and none can
+#: produce this tuple:
+#:
+#: - the **state-machine definitions** live in ``nousergon-data``
+#:   (``infrastructure/step_function.json``). This library must not depend on
+#:   the repo that consumes it, and the definition is not available at import
+#:   time to a ``Final`` constant.
+#: - the **artifact registry**'s ``pipeline_stages`` section is a runtime
+#:   S3/krepis read, and it declares ~49 weekly stages including every
+#:   conditional fork and degraded-path twin. A spine derived from it would
+#:   call each of those substantive and make every cycle permanently
+#:   ``incomplete`` — the ``alpha-engine-config-I10175`` failure, in reverse.
+#: - :data:`STATE_TO_ARCHIVE_PAGE` carries no pipeline attribution and no
+#:   graph, so it cannot say which states belong to which pipeline, let alone
+#:   which of them are substantive.
+#:
+#: The spine is a JUDGMENT — "whose entry is what the pipeline ran MEANS" —
+#: and a judgment is declared, per ``observability-policy.md`` §8.3. What is
+#: derived is the CHOICE OF NAME for each entry, and that derivation is
+#: written down where it is not obvious. See ``EvalRollingMean`` below.
 PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-weekly-freshness-pipeline": (
         "MorningEnrich",
@@ -1481,6 +1504,46 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
         "SignalsEnvelope",
         "PredictorTraining",
         "DataPhase2",
+        # alpha-engine-config-I10199 deliverable 2. The eval-judge chain had
+        # NO representative here at all, so `cycle_shape` was structurally
+        # incapable of calling an unjudged week `incomplete` — a week nobody
+        # judged rendered green on every surface that reads the cycle verdict.
+        #
+        # WHY THIS NAME, walked from the live weekly definition 2026-09-08
+        # (the chain is branch 0 of `ResearchPredictorParallel`):
+        #
+        #   CheckSkipEvalJudge --skip--> CheckSkipRationaleClustering (past it)
+        #   CheckSkipEvalJudge --work--> ComputeEvalCadence -> CheckMonthlyCadence
+        #     -> EvalJudgeSubmitWeekly | EvalJudgeSubmitFirstSaturday   (a FORK)
+        #        -> EvalJudgeEmptyPlan ---------------------> EvalRollingMean
+        #        -> PrepareEvalJudgeSpotDispatch -> ... -> EvalJudgeProcess
+        #                                                -> EvalRollingMean
+        #        -> (any Extract*Error) -> MarkEvalJudgeDegraded
+        #                                                -> EvalRollingMean
+        #
+        # `EvalRollingMean` is the UNIQUE convergence point of every non-skip
+        # route — the happy path, the contract-declared empty plan
+        # (`sf-pipeline-policy.md` §2.3a rule 3) and the degraded path — and
+        # it is on no skip route. So its non-entry means exactly one thing:
+        # the eval chain did not run. Every other candidate is a fork
+        # (`EvalJudgeSubmit*`, monthly cadence) or is legitimately bypassed
+        # (`EvalJudgeProcess`, by the empty-plan and degraded routes), and
+        # declaring one of those would make the cycle permanently incomplete
+        # on the weeks it is correctly absent — `alpha-engine-config-I10175`.
+        #
+        # This is entry, not honesty about what was PRODUCED: 2026-08-15
+        # entered `EvalRollingMean` and still produced nothing, because the
+        # stage returned `status: OK` over an ERRORed `agent_quality`
+        # sub-result. That class is `sf-pipeline-policy.md` §2.3b
+        # (`SFP-2.3b-stage-status-is-the-worst-substatus`, nous-ergon-ops-PR1119)
+        # and is fixed at its source in `crucible-research`. The two are
+        # complementary and neither substitutes for the other.
+        #
+        # A DELIBERATE skip of the judge stays expressible: the caller drops
+        # this name from the `stage_spine` it passes to `read_cycle_shape` /
+        # `read_coverage_sweep` (nousergon-lib-PR392), because only the caller
+        # can read `run_scope.json`. It is never inferred here.
+        "EvalRollingMean",
         "Backtester",
         "ParityParallel",
         "PitParityCompare",
