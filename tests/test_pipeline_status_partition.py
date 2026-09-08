@@ -424,11 +424,13 @@ def test_the_sweep_hands_the_calendar_identity_to_the_cycle_lookup():
     seen: dict[str, object] = {}
 
     def _fake_read_cycle_shape(
-        arn, run_date, *, calendar_date=None, client=None, observer_execution_arn=None
+        arn, run_date, *, calendar_date=None, client=None, observer_execution_arn=None,
+        stage_spine=None,
     ):
         seen["run_date"] = run_date
         seen["calendar_date"] = calendar_date
         seen["observer_execution_arn"] = observer_execution_arn
+        seen["stage_spine"] = stage_spine
         raise RuntimeError("stop here — the call signature is what is under test")
 
     original = cov.read_cycle_shape
@@ -452,6 +454,9 @@ def test_the_sweep_hands_the_calendar_identity_to_the_cycle_lookup():
         # not name its observer has none — the CLI and out-of-band re-sweeps
         # observe from OUTSIDE the cycle.
         "observer_execution_arn": None,
+        # alpha-engine-config-I10175: absent here too — this caller passed no
+        # override, so the full declared spine applies (unchanged default).
+        "stage_spine": None,
     }
 
 
