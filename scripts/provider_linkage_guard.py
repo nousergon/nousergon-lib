@@ -91,18 +91,20 @@ A distribution appearing only in a **compiled lock file**, never in
 this reason: a bare ``requirements.in`` scan alone would recreate the exact
 blind spot ``I7723`` occupied.
 
-**Rollout is warn-only until each caller's baseline is allowlisted.** The
-reusable workflow (``.github/workflows/provider-linkage-guard.yml``) invokes
-this script WITHOUT ``--include-dist`` for now -- merging this class lands it
-in the library without re-verdicting any of the fleet's callers on merge (the
-workflow is checked out unpinned; see the module-level note on
-``evaluate()`` for why a guard-side widening must not by itself redden a
-consumer). The enforcement flip -- adding ``--include-dist`` to the reusable
-workflow step -- is a separate, later change, once each caller's baseline is
-measured and any legitimate match is allowlisted with an expiry. Tracked:
-alpha-engine-config-I10032 (this class), alpha-engine-config-I10225 (the
-flip -- baseline measured 2026-09-08 against all 15 current callers, 6 with
-legitimate pre-existing matches, 9 clean).
+**Enforcement flipped 2026-09-08 (alpha-engine-config-I10225).** The
+reusable workflow (``.github/workflows/provider-linkage-guard.yml``) now
+invokes this script WITH ``--include-dist`` unconditionally -- every one of
+the fleet's 15 callers is scanned for this class on every run (the workflow
+is checked out unpinned, so this took effect fleet-wide the moment this PR
+merged, with no commit required in any caller repo). The rollout that
+preceded the flip: alpha-engine-config-I10032 landed the class warn-only
+(flag off by default) so merging it did not re-verdict any caller; I10225
+then measured the baseline against all 15 callers (6 with legitimate
+pre-existing matches -- crucible-dashboard, crucible-research,
+crucible-evaluator, crucible-backtester, telos, flow-doctor -- 9 clean),
+got each of the 6 allowlisted with a reason and an expiry, and flipped the
+flag last, in that order, so no caller's `main` ever saw an unallowlisted
+finding.
 
 Docs and markdown are excluded by default (``--include-docs`` to override),
 same rationale both predecessor guards carried: this fleet's policy library
@@ -179,10 +181,12 @@ CLASS_DIST = "dist"
 PATTERN_CLASSES = (CLASS_SDK_CLIENT, CLASS_ENV_KEY, CLASS_BASE_URL, CLASS_BASE_URL_ENV, CLASS_DIST)
 
 # Pattern classes scanned by DEFAULT, without `--include-dist`. `dist` is
-# excluded here -- see the module docstring's DEPENDENCY FILES /
-# "warn-only until baseline is allowlisted" sections. `all_pattern_classes()`
-# still reports `dist` as a KNOWN class (an allowlist entry naming it is
-# valid), independent of whether a given run scans for it.
+# excluded here -- the CLI flag's default is unchanged by the I10225
+# enforcement flip; only the reusable workflow's own invocation now passes
+# `--include-dist` explicitly (see the module docstring's "Enforcement
+# flipped" section). `all_pattern_classes()` still reports `dist` as a KNOWN
+# class (an allowlist entry naming it is valid), independent of whether a
+# given run scans for it.
 DEFAULT_PATTERN_CLASSES = tuple(k for k in PATTERN_CLASSES if k != CLASS_DIST)
 
 
