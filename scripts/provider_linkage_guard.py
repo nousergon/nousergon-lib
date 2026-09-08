@@ -42,6 +42,67 @@ allowlist entry is specific about which vendor linkage it is clearing:
                    (``ANTHROPIC_BASE_URL``, ``OPENAI_BASE_URL``). Addressing
                    a model by base URL is a principle-8 violation in its own
                    right even when the URL happens to be the router's.
+  ``dist``         a PEP 503 distribution name in a dependency file
+                   (``anthropic==0.34.0`` in ``requirements.txt``, a ``name =
+                   "anthropic"`` package table in ``uv.lock``, a bare
+                   ``"openai>=1.0"`` string in ``pyproject.toml``). See
+                   "DEPENDENCY FILES" below -- this class grades what the
+                   resolved environment can REACH, not what a call site
+                   spells out (alpha-engine-config-I10032). Gated behind
+                   ``--include-dist`` (see that section) -- OFF by default,
+                   same opt-in shape as ``--include-docs``.
+
+**DEPENDENCY FILES (alpha-engine-config-I10032).** The four classes above are
+call-site-shaped: they grade what a repo's *source* addresses. They cannot
+see a provider SDK that enters the resolved environment as a plain
+dependency and is never imported anywhere in that repo's tree --
+``alpha-engine-config-I7723`` is exactly this: the ``anthropic`` SDK sat in
+the trading box's venv, pulled transitively through ``krepis``'s old
+``flow-doctor[diagnosis]`` extra, with zero ``import anthropic`` in
+``crucible-executor``'s tree, for three months, invisible to every guard the
+fleet had because every guard looked at source.
+
+``dist`` closes that gap by reading dependency/lock files for a bare
+distribution name. Two design choices, both deliberate:
+
+  1. **Matched by FILENAME, not extension** (``DEPENDENCY_FILENAME_RE``):
+     ``requirements*.txt``, ``requirements*.in``, ``pyproject.toml``,
+     ``uv.lock``, ``poetry.lock``, ``Pipfile.lock``. The alternative --
+     adding ``.in``/``.lock`` to ``DEFAULT_EXTENSIONS`` and moving ``.txt``
+     out of ``DOC_EXTENSIONS`` -- was rejected: ``.txt`` genuinely is a doc
+     extension everywhere else this guard looks (a runbook, a changelog), and
+     widening it fleet-wide would scan every ``.txt`` file in every repo as
+     code. Filename matching reaches exactly the dependency-resolution
+     surface and nothing else, independent of ``--include-docs``.
+  2. **The pattern is a bare PEP 503 name, boundary-matched** (``_dist_boundary``),
+     not a "looks like a requirements line" heuristic: a distribution name is
+     free to appear as ``anthropic==0.34.0``, ``anthropic[bedrock]>=0.30``,
+     ``name = "anthropic"`` (a TOML lock package table), or a bare
+     ``"anthropic"`` JSON key (``Pipfile.lock``) -- one boundary-aware regex
+     per name covers all four shapes without parsing each format, matching
+     this module's existing architecture (a line-by-line regex scanner, not a
+     format-aware parser). PEP 503 normalizes ``-``/``_``/``.`` to a single
+     separator and lowercases, so the pattern treats those three characters
+     as interchangeable and matches case-insensitively, same as ``base_url``.
+
+A distribution appearing only in a **compiled lock file**, never in
+``requirements.in`` itself (a transitive dependency), is still caught --
+``uv.lock``/``poetry.lock``/``Pipfile.lock`` are all in scope for exactly
+this reason: a bare ``requirements.in`` scan alone would recreate the exact
+blind spot ``I7723`` occupied.
+
+**Rollout is warn-only until each caller's baseline is allowlisted.** The
+reusable workflow (``.github/workflows/provider-linkage-guard.yml``) invokes
+this script WITHOUT ``--include-dist`` for now -- merging this class lands it
+in the library without re-verdicting any of the fleet's callers on merge (the
+workflow is checked out unpinned; see the module-level note on
+``evaluate()`` for why a guard-side widening must not by itself redden a
+consumer). The enforcement flip -- adding ``--include-dist`` to the reusable
+workflow step -- is a separate, later change, once each caller's baseline is
+measured and any legitimate match is allowlisted with an expiry. Tracked:
+alpha-engine-config-I10032 (this class), alpha-engine-config-I10225 (the
+flip -- baseline measured 2026-09-08 against all 15 current callers, 6 with
+legitimate pre-existing matches, 9 clean).
 
 Docs and markdown are excluded by default (``--include-docs`` to override),
 same rationale both predecessor guards carried: this fleet's policy library
@@ -113,8 +174,37 @@ CLASS_SDK_CLIENT = "sdk_client"
 CLASS_ENV_KEY = "env_key"
 CLASS_BASE_URL = "base_url"
 CLASS_BASE_URL_ENV = "base_url_env"
+CLASS_DIST = "dist"
 
-PATTERN_CLASSES = (CLASS_SDK_CLIENT, CLASS_ENV_KEY, CLASS_BASE_URL, CLASS_BASE_URL_ENV)
+PATTERN_CLASSES = (CLASS_SDK_CLIENT, CLASS_ENV_KEY, CLASS_BASE_URL, CLASS_BASE_URL_ENV, CLASS_DIST)
+
+# Pattern classes scanned by DEFAULT, without `--include-dist`. `dist` is
+# excluded here -- see the module docstring's DEPENDENCY FILES /
+# "warn-only until baseline is allowlisted" sections. `all_pattern_classes()`
+# still reports `dist` as a KNOWN class (an allowlist entry naming it is
+# valid), independent of whether a given run scans for it.
+DEFAULT_PATTERN_CLASSES = tuple(k for k in PATTERN_CLASSES if k != CLASS_DIST)
+
+
+def _dist_boundary(*names: str) -> str:
+    """A PEP 503 distribution-name regex: boundary-matched, separator-flexible.
+
+    A distribution name can appear as ``anthropic==0.34.0``,
+    ``anthropic[bedrock]>=0.30``, a TOML lock's ``name = "anthropic"``, or a
+    bare ``"anthropic"`` JSON key -- one regex per name covers all of those
+    shapes without parsing each format (this module scans line-by-line, not
+    format-aware). ``-``/``_``/``.`` are treated as interchangeable, per PEP
+    503 normalization, so ``google-generativeai`` also matches
+    ``google_generativeai``. The lookaround boundary (neither a word char nor
+    one of those three separators on either side) is what stops a real match
+    on ``anthropic==1.0`` while still refusing a false one on an unrelated
+    compound name that merely CONTAINS this name as a substring.
+    """
+    alts = []
+    for n in names:
+        parts = re.split(r"[-_.]", n)
+        alts.append("[-_.]".join(re.escape(p) for p in parts))
+    return rf"(?<![\w.-])(?:{'|'.join(alts)})(?![\w.-])"
 
 
 @dataclass(frozen=True)
@@ -134,6 +224,7 @@ class Provider:
     env_key: str | None = None
     base_url: str | None = None
     base_url_env: str | None = None
+    dist: str | None = None
 
 
 PROVIDERS: tuple[Provider, ...] = (
@@ -151,6 +242,9 @@ PROVIDERS: tuple[Provider, ...] = (
         env_key=r"ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN",
         base_url=r"api\.anthropic\.com",
         base_url_env=r"ANTHROPIC_BASE_URL",
+        # PyPI dist "anthropic" -- I7723: the SDK sat in a resolved venv with
+        # zero call sites anywhere in the tree.
+        dist=_dist_boundary("anthropic"),
     ),
     Provider(
         name="openai",
@@ -163,13 +257,19 @@ PROVIDERS: tuple[Provider, ...] = (
         env_key=r"OPENAI_API_KEY",
         base_url=r"api\.openai\.com",
         base_url_env=r"OPENAI_BASE_URL",
+        dist=_dist_boundary("openai"),
     ),
     Provider(
+        # No `dist`: OpenRouter has no dedicated PyPI SDK -- it is reached
+        # through the openai-compatible client, whose dist is already
+        # covered under the "openai" provider above.
         name="openrouter",
         env_key=r"OPENROUTER_API_KEY",
         base_url=r"openrouter\.ai",
     ),
     Provider(
+        # No `dist`: same reasoning as openrouter -- reached via the
+        # openai-compatible client, no dedicated PyPI package of its own.
         name="deepseek",
         env_key=r"DEEPSEEK_API_KEY",
         base_url=r"api\.deepseek\.com",
@@ -178,6 +278,7 @@ PROVIDERS: tuple[Provider, ...] = (
         name="xai",
         env_key=r"XAI_API_KEY|GROK_API_KEY",
         base_url=r"api\.x\.ai",
+        dist=_dist_boundary("xai-sdk"),
     ),
     Provider(
         name="google",
@@ -189,21 +290,29 @@ PROVIDERS: tuple[Provider, ...] = (
         ),
         env_key=r"GEMINI_API_KEY|GOOGLE_GENERATIVE_AI_API_KEY",
         base_url=r"generativelanguage\.googleapis\.com",
+        dist=_dist_boundary("google-generativeai", "google-genai"),
     ),
     Provider(
         name="groq",
         env_key=r"GROQ_API_KEY",
         base_url=r"api\.groq\.com",
+        dist=_dist_boundary("groq"),
     ),
     Provider(
         name="mistral",
         env_key=r"MISTRAL_API_KEY",
         base_url=r"api\.mistral\.ai",
+        # The PyPI dist is "mistralai", not "mistral" -- the bare name
+        # collides with unrelated packages (mistral-common et al. are a
+        # different concern; "mistral" bare is too generic a token to
+        # boundary-match safely).
+        dist=_dist_boundary("mistralai"),
     ),
     Provider(
         name="zhipu",
         env_key=r"GLM_API_KEY|ZHIPU_API_KEY",
         base_url=r"open\.bigmodel\.cn",
+        dist=_dist_boundary("zhipuai"),
     ),
     Provider(
         # Bedrock is a rented provider like any other under
@@ -211,6 +320,11 @@ PROVIDERS: tuple[Provider, ...] = (
         # is linkage even when the vendor is AWS. AWS is an accepted fleet
         # lock-in for INFRASTRUCTURE, which is a different question from
         # addressing a model by vendor at a call site.
+        # No `dist`: the SDK is `boto3`, generic across every AWS service --
+        # boundary-matching "boto3" as a distribution name would fire on
+        # every repo using AWS for anything, which is not this guard's
+        # question. The `sdk_client` pattern above stays call-site-shaped
+        # (the literal "bedrock-runtime" client name) for that reason.
         name="bedrock",
         sdk_client=r"bedrock-runtime",
     ),
@@ -219,6 +333,7 @@ PROVIDERS: tuple[Provider, ...] = (
         # router by another name (a "parallel setup" in Brian's words). It is
         # listed here so a TypeScript surface adopting it is a visible,
         # justified decision rather than a silent one.
+        # No `dist`: npm-only, no PyPI distribution.
         name="vercel_ai_sdk",
         sdk_client=r"@ai-sdk/",
     ),
@@ -233,19 +348,26 @@ def pattern_class(provider: str, klass: str) -> str:
     return f"{provider}:{klass}"
 
 
-def compile_patterns(providers: tuple[str, ...]) -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """``(namespaced_class, regex)`` for every declared shape of every selected provider."""
+def compile_patterns(
+    providers: tuple[str, ...],
+    classes: tuple[str, ...] = PATTERN_CLASSES,
+) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """``(namespaced_class, regex)`` for every declared shape of every selected
+    provider, restricted to `classes` (default: all -- pass
+    `DEFAULT_PATTERN_CLASSES` to exclude `dist` the way the CLI does without
+    `--include-dist`)."""
     out: list[tuple[str, re.Pattern[str]]] = []
     for name in providers:
         p = PROVIDERS_BY_NAME[name]
-        for klass in PATTERN_CLASSES:
+        for klass in classes:
             raw = getattr(p, klass)
             if raw is None:
                 continue
             # Hostnames match case-insensitively (a URL authority is not
-            # case-sensitive); env-var names and SDK symbols match EXACTLY,
-            # because case is meaning there.
-            flags = re.IGNORECASE if klass == CLASS_BASE_URL else 0
+            # case-sensitive), and so does `dist` (PEP 503 normalization
+            # lowercases a distribution name); env-var names and SDK symbols
+            # match EXACTLY, because case is meaning there.
+            flags = re.IGNORECASE if klass in (CLASS_BASE_URL, CLASS_DIST) else 0
             out.append((pattern_class(name, klass), re.compile(raw, flags)))
     return tuple(out)
 
@@ -272,6 +394,16 @@ DEFAULT_EXTENSIONS = frozenset({
 })
 DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt"})
 
+# Dependency/lock files, matched by FILENAME rather than extension -- see the
+# module docstring's DEPENDENCY FILES section for why. Only consulted when
+# `--include-dist` is passed (the `dist` pattern class is the only one
+# meaningfully found in these files). ``requirements.txt`` shares its suffix
+# with every other doc ``.txt`` file in a repo, so this is deliberately NOT
+# a change to `DOC_EXTENSIONS`.
+DEPENDENCY_FILENAME_RE = re.compile(
+    r"^(requirements[\w.-]*\.(?:txt|in)|pyproject\.toml|uv\.lock|poetry\.lock|Pipfile\.lock)$"
+)
+
 
 # -- comments are not linkage ------------------------------------------------
 #
@@ -290,6 +422,14 @@ DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt"})
 
 _COMMENT_HASH_EXTENSIONS = frozenset({
     ".sh", ".bash", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".service", ".timer",
+    # requirements*.txt/.in and the TOML-shaped lock files all use `#` for
+    # comments (pip's requirements format, and TOML). These only enter the
+    # scan at all via DEPENDENCY_FILENAME_RE (--include-dist), never through
+    # DEFAULT_EXTENSIONS/DOC_EXTENSIONS -- listing the suffixes here only
+    # controls comment-stripping once a file is in scope, so a bare ``.txt``
+    # doc file scanned under ``--include-docs`` is unaffected in practice
+    # (comments there are prose either way).
+    ".in", ".lock", ".txt",
 })
 _COMMENT_SLASH_EXTENSIONS = frozenset({".ts", ".tsx", ".js", ".mjs"})
 
@@ -511,7 +651,17 @@ class GuardError(RuntimeError):
 # -- scanning ---------------------------------------------------------------
 
 
-def _tracked_files(repo: Path, extensions: frozenset[str]) -> list[Path]:
+def _tracked_files(
+    repo: Path,
+    extensions: frozenset[str],
+    extra_filename_re: re.Pattern[str] | None = None,
+) -> list[Path]:
+    """Tracked files matching `extensions` by suffix, plus, if given, any
+    tracked file whose BASENAME matches `extra_filename_re` regardless of
+    suffix (see DEPENDENCY_FILENAME_RE -- ``requirements.txt`` must enter
+    scope on its filename, independent of whatever `extensions`/`--include-
+    docs` says about ``.txt``).
+    """
     git = shutil.which("git")
     if git is None:
         raise GuardError("`git` not found on PATH")
@@ -526,7 +676,10 @@ def _tracked_files(repo: Path, extensions: frozenset[str]) -> list[Path]:
         rel = rel.strip()
         if not rel:
             continue
-        if Path(rel).suffix.lower() not in extensions:
+        p = Path(rel)
+        by_ext = p.suffix.lower() in extensions
+        by_name = extra_filename_re is not None and extra_filename_re.match(p.name) is not None
+        if not (by_ext or by_name):
             continue
         out.append(repo / rel)
     return out
@@ -671,6 +824,7 @@ def scan(
     strip: bool = True,
     registry_aware: bool = True,
     absence_aware: bool = True,
+    extra_filename_re: re.Pattern[str] | None = None,
 ) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
 
@@ -694,8 +848,26 @@ def scan(
     entry on ``main`` with no commit in that repo.
     """
     registry_names = _registry_filenames(repo, extensions) if registry_aware else frozenset()
+
+    # `dist` is meaningful ONLY inside a dependency/lock file -- a bare
+    # distribution name like "anthropic" is a real word that shows up
+    # constantly in ordinary prose, JSON test fixtures and shell scripts (a
+    # gitleaks baseline naming "anthropic" as a credential-prefix vendor, a
+    # DLP script's help text). Applying the `dist` regex fleet-wide over
+    # every file `extensions` already selects would flood findings with
+    # exactly that noise -- measured, not hypothetical: an early version of
+    # this class applied uniformly and produced 79 findings on
+    # claude-code-config alone, nearly all inside .sh/.json prose. So `dist`
+    # patterns are matched ONLY against files that ALSO match
+    # `extra_filename_re` (dependency-file shaped by name); every other
+    # pattern class still applies to the full `extensions`-selected set, same
+    # as before this class existed.
+    dist_suffix = f":{CLASS_DIST}"
+    other_patterns = tuple((k, r) for k, r in patterns if not k.endswith(dist_suffix))
+    dist_patterns = tuple((k, r) for k, r in patterns if k.endswith(dist_suffix))
+
     matches: list[Match] = []
-    for fp in _tracked_files(repo, extensions):
+    for fp in _tracked_files(repo, extensions, extra_filename_re):
         rel = str(fp.relative_to(repo))
         if rel in skip:
             continue
@@ -712,9 +884,13 @@ def scan(
             continue
         if absence_aware and _is_asserts_absence(text):
             continue
+        is_dependency_file = (
+            extra_filename_re is not None and extra_filename_re.match(fp.name) is not None
+        )
+        applicable = other_patterns + (dist_patterns if is_dependency_file else ())
         body = strip_comments(rel, text) if strip else text
         for lineno, line in enumerate(body.splitlines(), 1):
-            for klass, regex in patterns:
+            for klass, regex in applicable:
                 if regex.search(line):
                     matches.append(Match(rel, lineno, klass, line.strip()))
     return matches
@@ -899,6 +1075,14 @@ def main(argv: list[str] | None = None) -> int:
         help="also scan markdown/rst/txt files (off by default)",
     )
     ap.add_argument(
+        "--include-dist", action="store_true",
+        help=(
+            "also scan requirements/lock/pyproject files for a bare "
+            "distribution-name pin (the `dist` pattern class; off by "
+            "default -- see the module docstring's DEPENDENCY FILES section)"
+        ),
+    )
+    ap.add_argument(
         "--list-providers", action="store_true",
         help="print the provider table and exit 0",
     )
@@ -917,20 +1101,23 @@ def main(argv: list[str] | None = None) -> int:
         else repo / ".provider-linkage-allowlist.yaml"
     )
     extensions = DEFAULT_EXTENSIONS | (DOC_EXTENSIONS if args.include_docs else frozenset())
+    classes = PATTERN_CLASSES if args.include_dist else DEFAULT_PATTERN_CLASSES
+    dep_re = DEPENDENCY_FILENAME_RE if args.include_dist else None
 
     try:
         providers = _selected_providers(args.providers)
-        patterns = compile_patterns(providers)
+        patterns = compile_patterns(providers, classes)
         allowlist_rel = None
         try:
             allowlist_rel = str(allowlist_path.resolve().relative_to(repo))
         except ValueError:
             pass  # allowlist lives outside the repo (a test fixture) -- nothing to skip
         skip = frozenset({allowlist_rel}) if allowlist_rel else frozenset()
-        matches = scan(repo, extensions, patterns, skip=skip)
+        matches = scan(repo, extensions, patterns, skip=skip, extra_filename_re=dep_re)
         raw_matches = scan(
             repo, extensions, patterns, skip=skip,
             strip=False, registry_aware=False, absence_aware=False,
+            extra_filename_re=dep_re,
         )
         allowlist = load_allowlist(allowlist_path, all_pattern_classes())
     except GuardError as exc:
