@@ -163,6 +163,13 @@ class RowState(str, Enum):
     #: Outside the denominator, reported so the reader can see the shape of
     #: the run rather than a silently smaller world.
     NOT_ENTERED = "not_entered"
+    #: Declared, not entered, and the CALLER declared this cycle deliberately
+    #: does not run it (a cadence declaration, a recorded operator flag).
+    #: Outside the denominator and outside every not-entered count — a
+    #: declared skip and a stage nobody ran must never produce the same
+    #: number, or the exclusion mechanism becomes a way to quiet a real
+    #: absence (``alpha-engine-config-I10199``, ``-I10175``).
+    DECLARED_SKIP = "declared_skip"
     #: The sweep's OWN stage. It is executing at the moment it grades, so it
     #: has not completed and cannot have written a verdict about its own
     #: completion. Outside the denominator, reported — never ``ABSENT``, which
@@ -233,9 +240,20 @@ class CoverageSweep:
     cycle: CycleShape | None = field(default=None, repr=False)
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD
     swept_at: str = ""
+    #: Stages the CALLER declared this cycle deliberately does not run. A
+    #: declaration, never an inference: this module has no reader for
+    #: ``run_scope.json`` and must not grow one (``nousergon-lib-PR392``).
+    declared_skips: tuple[str, ...] = ()
+    #: Declared skips the graph nevertheless ENTERED. The declaration and the
+    #: run disagree; the sweep says so rather than reconciling them.
+    declared_skips_entered: tuple[str, ...] = ()
+    #: Declared skips naming no stage the registry declares — a typo or a
+    #: rename. Without this, ``declared_skips`` is a mechanism for making a
+    #: real absence invisible by misspelling it.
+    declared_skips_unknown: tuple[str, ...] = ()
 
     #: States that are reported but sit OUTSIDE the coverage denominator.
-    _OUT_OF_DENOMINATOR = (RowState.NOT_ENTERED, RowState.SELF)
+    _OUT_OF_DENOMINATOR = (RowState.NOT_ENTERED, RowState.SELF, RowState.DECLARED_SKIP)
 
     def _in_denominator(self) -> tuple[StageRow, ...]:
         return tuple(r for r in self.rows if r.state not in self._OUT_OF_DENOMINATOR)
@@ -265,8 +283,48 @@ class CoverageSweep:
         return sum(1 for r in self.rows if r.state is RowState.NOT_ENTERED)
 
     @property
+    def declared_skip(self) -> int:
+        return sum(1 for r in self.rows if r.state is RowState.DECLARED_SKIP)
+
+    @property
     def self_stage(self) -> int:
         return sum(1 for r in self.rows if r.state is RowState.SELF)
+
+    @property
+    def not_entered_stages(self) -> tuple[str, ...]:
+        return tuple(r.stage for r in self.rows if r.state is RowState.NOT_ENTERED)
+
+    @property
+    def spine(self) -> tuple[str, ...]:
+        """The cycle's EFFECTIVE substantive spine, or ``()``.
+
+        Taken from the cycle rather than from the registry, so a caller that
+        excluded deliberately-skipped stages (``nousergon-lib-PR392``) is
+        honoured here too. ``()`` when no cycle could be read — a sweep in
+        that state already pages under ``denominator_unestablished`` and must
+        not also assert a spine claim it has no spine for.
+        """
+        return self.cycle.stage_spine if self.cycle else ()
+
+    @property
+    def spine_not_entered_stages(self) -> tuple[str, ...]:
+        """Not-entered stages that are DECLARED SUBSTANTIVE for this pipeline.
+
+        The discriminator that makes ``not_entered`` alertable at all.
+        ``not_entered`` in the raw is 9-12 rows on a perfectly healthy weekly
+        run — the monthly judge-submit fork, the parity branch, every
+        degraded-path twin — so paging on the raw count would page on every
+        healthy week, which is the chronic-false-positive class this fleet
+        already carries an incident register for. The spine is the standing
+        declaration of which stages' entry is what "the pipeline ran" MEANS,
+        so a spine stage nobody entered is work that was due and was not done.
+        """
+        spine = set(self.spine)
+        return tuple(s for s in self.not_entered_stages if s in spine)
+
+    @property
+    def spine_not_entered(self) -> int:
+        return len(self.spine_not_entered_stages)
 
     @property
     def counts(self) -> dict[str, int]:
@@ -277,6 +335,7 @@ class CoverageSweep:
             "absent": self.absent,
             "unmeasured": self.unmeasured,
             "not_entered": self.not_entered,
+            "declared_skip": self.declared_skip,
             "self": self.self_stage,
         }
 
@@ -375,6 +434,33 @@ class CoverageSweep:
                 f"absent_verdicts={self.absent} ({names}) — expected, entered, and no "
                 "verdict object; indistinguishable from a stage that never ran"
             )
+        if not self.deferred and self.spine_not_entered_stages:
+            # alpha-engine-config-I10199. Declared substantive, entered by no
+            # contributing execution, and covered by no declared skip: the
+            # cycle did not do that work, and before this nothing said so —
+            # NOT_ENTERED was outside the denominator, published no metric and
+            # listed no condition. Deferred cycles are excluded because a
+            # stage that has not been entered YET is not a stage that was
+            # never entered; the deferral already pages, naming the cycle.
+            names = ", ".join(self.spine_not_entered_stages)
+            conditions.append(
+                f"spine_not_entered={self.spine_not_entered} ({names}) — declared "
+                "substantive stage(s) no contributing execution entered and no declared "
+                "skip covers; the cycle did not do that work"
+            )
+        if self.declared_skips_unknown:
+            names = ", ".join(self.declared_skips_unknown)
+            conditions.append(
+                f"declared_skip_unknown: {names} — the caller declared a skip for "
+                "stage(s) the registry does not declare; a misspelled skip silently "
+                "suppresses nothing, it pages"
+            )
+        if self.declared_skips_entered:
+            names = ", ".join(self.declared_skips_entered)
+            conditions.append(
+                f"declared_skip_entered: {names} — declared a deliberate skip and "
+                "ENTERED anyway; the caller's declaration and the graph disagree"
+            )
         if self.findings > self.finding_threshold:
             names = ", ".join(r.stage for r in self.rows if r.state is RowState.FINDING)
             conditions.append(
@@ -393,7 +479,10 @@ class CoverageSweep:
             f"{c['covered']} covered / {c['findings']} findings / {c['absent']} absent "
             f"of {c['expected']} expected"
         )
-        extra = f" ({c['unmeasured']} unmeasured, {c['not_entered']} not entered)"
+        extra = f" ({c['unmeasured']} unmeasured, {c['not_entered']} not entered"
+        if c["declared_skip"]:
+            extra += f", {c['declared_skip']} declared skip"
+        extra += ")"
         if len(self.partitions_read) > 1:
             extra += (
                 f" [partitions unioned: {', '.join(self.partitions_read)}; "
@@ -419,6 +508,11 @@ class CoverageSweep:
             "coverage_established": self.coverage_established,
             "deferral_reason": self.deferral_reason,
             "absent_stages": list(self.absent_stages),
+            "not_entered_stages": list(self.not_entered_stages),
+            "spine_not_entered_stages": list(self.spine_not_entered_stages),
+            "declared_skips": list(self.declared_skips),
+            "declared_skips_entered": list(self.declared_skips_entered),
+            "declared_skips_unknown": list(self.declared_skips_unknown),
             "should_alert": self.should_alert,
             "alert_conditions": list(self.alert_conditions),
             "rows": [r.to_dict() for r in self.rows],
@@ -451,6 +545,7 @@ def sweep_coverage(
     cycle: CycleShape | None = None,
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD,
     observer_stage: str | None = None,
+    declared_skips: Iterable[str] | None = None,
     now: datetime | None = None,
 ) -> CoverageSweep:
     """Compare the declared stage set against the verdicts that landed. Pure.
@@ -468,6 +563,16 @@ def sweep_coverage(
     A verdict that DOES exist for it (written by an earlier execution of the
     same cycle) is graded normally: the carve-out covers the impossible case
     only, never a real absence.
+
+    ``declared_skips`` names the stages the CALLER declared this cycle
+    deliberately does not run — a cadence declaration or a recorded operator
+    flag, read from ``run_scope.json`` by the caller, never inferred here
+    (``alpha-engine-config-I10175``). They get :attr:`RowState.DECLARED_SKIP`
+    rather than :attr:`RowState.NOT_ENTERED`, so a deliberate exclusion and a
+    stage nobody ran are never the same number
+    (``alpha-engine-config-I10199``). Two things keep the mechanism from
+    becoming a way to quiet a real absence, and both PAGE: a declared skip
+    naming no declared stage, and a declared skip the graph entered anyway.
     """
     now = now or datetime.now(timezone.utc)
     partitions = tuple(partitions_read) if partitions_read else (run_date,)
@@ -481,6 +586,8 @@ def sweep_coverage(
         entered = {str(s) for s in entered_states}
         denominator_source = "entered_states"
         denominator_reason = ""
+
+    skips = {str(s) for s in (declared_skips or ())}
 
     rows: list[StageRow] = []
     for row in declared:
@@ -500,6 +607,20 @@ def sweep_coverage(
                         reason=(
                             "the sweep's own stage — it is executing while it grades and "
                             "cannot have recorded a verdict about its own completion"
+                        ),
+                    )
+                )
+            elif entered is not None and stage not in entered and stage in skips:
+                rows.append(
+                    StageRow(
+                        stage=stage,
+                        state=RowState.DECLARED_SKIP,
+                        stage_class=stage_class,
+                        declared_output=declared_output,
+                        reason=(
+                            f"declared, not entered, and the caller declared {stage} a "
+                            "deliberate skip for this cycle — outside the denominator "
+                            "and outside the not-entered count"
                         ),
                     )
                 )
@@ -528,6 +649,12 @@ def sweep_coverage(
                                 "entered and recorded nothing"
                                 if entered is not None
                                 else "may have entered and recorded nothing"
+                            )
+                            + (
+                                " — AND the caller declared it a deliberate skip, "
+                                "which the graph contradicts"
+                                if stage in skips
+                                else ""
                             )
                         ),
                     )
@@ -589,6 +716,11 @@ def sweep_coverage(
         pipeline=pipeline,
         run_date=run_date,
         rows=tuple(rows),
+        declared_skips=tuple(sorted(skips)),
+        declared_skips_entered=tuple(
+            sorted(s for s in skips if entered is not None and s in entered)
+        ),
+        declared_skips_unknown=tuple(sorted(s for s in skips if s not in declared_names)),
         denominator_source=denominator_source,
         denominator_reason=denominator_reason,
         partitions_read=partitions,
@@ -693,6 +825,7 @@ def read_coverage_sweep(
     observer_execution_arn: str | None = None,
     observer_stage: str | None = None,
     stage_spine: Sequence[str] | None = None,
+    declared_skips: Iterable[str] | None = None,
     now: datetime | None = None,
 ) -> CoverageSweep:
     """Read the registry, the verdicts and the cycle, and sweep them.
@@ -725,6 +858,12 @@ def read_coverage_sweep(
     The caller (not this function) is responsible for deriving which stages
     a given cycle deliberately excludes — this module has no reader for
     ``run_scope.json`` and must not grow one just to answer this.
+
+    ``declared_skips`` is the same declaration expressed on the COVERAGE
+    surface: those stages are reported ``declared_skip`` rather than
+    ``not_entered``, so a deliberate exclusion never lands in the count that
+    pages (``alpha-engine-config-I10199``). Pass both, from the same source,
+    or the two surfaces will disagree about the same cycle.
     """
     if s3_client is None:  # pragma: no cover — production path
         import boto3
@@ -789,6 +928,7 @@ def read_coverage_sweep(
         cycle=cycle,
         finding_threshold=finding_threshold,
         observer_stage=observer_stage,
+        declared_skips=declared_skips,
         now=now,
     )
 
@@ -832,6 +972,13 @@ def publish_sweep(
             # StageCoverageSweepRan, and neither is ever inferred from the
             # other's silence (alpha-engine-config-I10161, principles.md 2.7).
             ("StageCoverageSweepDeferred", 1.0 if sweep.deferred else 0.0),
+            # The caller's DECLARATION, not a claim about the cycle's shape —
+            # nothing about a still-running cycle makes it unsupportable, so
+            # it publishes on every sweep. It is the denominator against which
+            # a rising NotEntered is read: a week that moved a stage from
+            # "declared skip" to "nobody ran it" shows as one falling and the
+            # other rising, which neither number says alone.
+            ("StageCoverageSweepDeclaredSkip", sweep.declared_skip),
         ]
         if sweep.coverage_established:
             # WITHHELD, not zeroed, when the cycle cannot support the claim.
@@ -840,6 +987,16 @@ def publish_sweep(
             # false page of 13 absences on a cycle the same artifact declared
             # in_flight. The deferred metric above is what stays loud.
             emitted.append(("StageCoverageSweepAbsent", sweep.absent))
+            # alpha-engine-config-I10199. Withheld on the same condition and
+            # for the same reason as the absent count: a stage that has not
+            # been entered YET is not a stage that was never entered, and a 0
+            # published on an unestablished sweep renders the surface green.
+            # StageCoverageSweepDeferred (above, every sweep) and
+            # StageCoverageSweepRan (below, every sweep) are what separate
+            # "clean" from "withheld" from "the reader is dead" — no data is
+            # never inferred from another metric's silence (principles.md 2.7).
+            emitted.append(("StageCoverageSweepNotEntered", sweep.not_entered))
+            emitted.append(("StageCoverageSweepSpineNotEntered", sweep.spine_not_entered))
         for name, value in emitted:
             data.append(
                 {"MetricName": name, "Dimensions": dims, "Value": float(value), "Unit": "Count"}
@@ -873,6 +1030,7 @@ _STATE_GLYPH = {
     RowState.ABSENT: "GONE",
     RowState.UNMEASURED: "????",
     RowState.NOT_ENTERED: "----",
+    RowState.DECLARED_SKIP: "SKIP",
     RowState.SELF: "SELF",
 }
 
@@ -890,7 +1048,8 @@ def render_rows(sweep: CoverageSweep, *, include_not_entered: bool = True) -> st
         RowState.UNMEASURED: 2,
         RowState.COVERED: 3,
         RowState.NOT_ENTERED: 4,
-        RowState.SELF: 5,
+        RowState.DECLARED_SKIP: 5,
+        RowState.SELF: 6,
     }
     rows = [r for r in sweep.rows if include_not_entered or r.state is not RowState.NOT_ENTERED]
     rows.sort(key=lambda r: (order[r.state], r.stage))
@@ -941,6 +1100,19 @@ def _main(argv: Sequence[str] | None = None) -> int:
             "its own completion, so it is reported 'self' rather than 'absent'."
         ),
     )
+    parser.add_argument(
+        "--declared-skip",
+        action="append",
+        default=None,
+        metavar="STAGE",
+        dest="declared_skips",
+        help=(
+            "a stage this cycle DELIBERATELY does not run (repeatable). Reported "
+            "'declared_skip', outside the denominator and outside the not-entered "
+            "count that pages. A skip naming no declared stage, or one the graph "
+            "entered anyway, PAGES (alpha-engine-config-I10199)."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
         "--publish", action="store_true", help="write the sweep artifact and publish its metrics"
@@ -985,6 +1157,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
             finding_threshold=args.finding_threshold,
             observer_execution_arn=args.observer_execution_arn,
             observer_stage=args.observer_stage,
+            declared_skips=args.declared_skips,
         )
     except Exception as exc:  # noqa: BLE001 — a sweep that cannot run says so
         print(
