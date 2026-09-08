@@ -790,6 +790,18 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "§2.7). Writing an artifact here would be the defect: an object whose "
         "presence implies the surface was observed.",
     ),
+    # alpha-engine-config-I10170: the fourth outcome. The sweep RAN and
+    # withheld a claim its own cycle could not support.
+    "WeeklyCoverageSweepDeferred": ArtifactReason(
+        reason="Coverage was NOT ESTABLISHED — an SNS page, no artifact of its "
+        "own. The sweep ran, found the cycle non-terminal (or its contributor "
+        "walk truncated on a non-COMPLETED verdict) and WITHHELD the absent "
+        "count rather than asserting an absence a still-changing cycle cannot "
+        "support. Distinct from -Unavailable (the sweep did not run) and from "
+        "the clean terminal: writing an artifact here would be an object whose "
+        "presence implies coverage was measured. The sweep artifact it points "
+        "at carries deferral_reason and absent_stages.",
+    ),
     "ReportCard": ArchivePageRef(
         page="Report_Card",
         artifact_label="System Report Card",

@@ -163,6 +163,12 @@ class RowState(str, Enum):
     #: Outside the denominator, reported so the reader can see the shape of
     #: the run rather than a silently smaller world.
     NOT_ENTERED = "not_entered"
+    #: The sweep's OWN stage. It is executing at the moment it grades, so it
+    #: has not completed and cannot have written a verdict about its own
+    #: completion. Outside the denominator, reported — never ``ABSENT``, which
+    #: it would otherwise be on every single run by construction
+    #: (``alpha-engine-config-I10161``).
+    SELF = "self"
 
 
 @dataclass(frozen=True)
@@ -228,8 +234,11 @@ class CoverageSweep:
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD
     swept_at: str = ""
 
+    #: States that are reported but sit OUTSIDE the coverage denominator.
+    _OUT_OF_DENOMINATOR = (RowState.NOT_ENTERED, RowState.SELF)
+
     def _in_denominator(self) -> tuple[StageRow, ...]:
-        return tuple(r for r in self.rows if r.state is not RowState.NOT_ENTERED)
+        return tuple(r for r in self.rows if r.state not in self._OUT_OF_DENOMINATOR)
 
     @property
     def expected(self) -> tuple[str, ...]:
@@ -256,6 +265,10 @@ class CoverageSweep:
         return sum(1 for r in self.rows if r.state is RowState.NOT_ENTERED)
 
     @property
+    def self_stage(self) -> int:
+        return sum(1 for r in self.rows if r.state is RowState.SELF)
+
+    @property
     def counts(self) -> dict[str, int]:
         return {
             "expected": len(self.expected),
@@ -264,6 +277,7 @@ class CoverageSweep:
             "absent": self.absent,
             "unmeasured": self.unmeasured,
             "not_entered": self.not_entered,
+            "self": self.self_stage,
         }
 
     @property
@@ -282,6 +296,59 @@ class CoverageSweep:
         )
 
     @property
+    def deferral_reason(self) -> str:
+        """Why an ABSENCE cannot yet be asserted about this cycle, or ``""``.
+
+        ``alpha-engine-config-I10161``. ``ABSENT`` means *"expected, entered,
+        and recorded nothing"* — a claim only a cycle that has stopped
+        changing can support. Two conditions make the claim unsupportable,
+        and before this property existed the sweep paged on both anyway:
+
+        1. **the cycle is still IN_FLIGHT** — a stage that has not finished is
+           indistinguishable from one that finished and wrote nothing;
+        2. **the contributor walk was truncated on a non-COMPLETED cycle** —
+           :attr:`CycleShape.verdict_trustworthy`, the downgrade
+           ``cycle_shape`` documents and no caller applied.
+
+        Deferral is NOT silence and never renders green: the sweep still
+        pages (see :attr:`alert_conditions`), the artifact still names every
+        would-be-absent stage in ``rows``, and ``publish_sweep`` emits
+        ``StageCoverageSweepDeferred=1`` while WITHHOLDING the absent count —
+        an absent datapoint the alarm would page on is a number the sweep
+        cannot stand behind, and publishing one anyway is what produced the
+        2026-09-04 false page.
+        """
+        if self.cycle is None:
+            return ""
+        if not self.cycle.is_terminal:
+            return (
+                f"the cycle's own verdict is {self.cycle.verdict.value} "
+                f"({self.cycle.reason}) — a stage that has not finished cannot be "
+                "distinguished from one that finished and recorded nothing"
+            )
+        if not self.cycle.verdict_trustworthy:
+            return self.cycle.untrustworthy_reason
+        return ""
+
+    @property
+    def coverage_established(self) -> bool:
+        """Can this sweep stand behind its absent count? Inverse of deferral.
+
+        ``True`` when there is no cycle to check against: a sweep run without
+        a state machine ARN already pages under ``denominator_unestablished``,
+        and adding a second reason for the same fact would double-report it.
+        """
+        return not self.deferral_reason
+
+    @property
+    def deferred(self) -> bool:
+        return not self.coverage_established
+
+    @property
+    def absent_stages(self) -> tuple[str, ...]:
+        return tuple(r.stage for r in self.rows if r.state is RowState.ABSENT)
+
+    @property
     def alert_conditions(self) -> tuple[str, ...]:
         """Every reason this sweep pages, named. Empty ⇒ it does not page."""
         conditions: list[str] = []
@@ -289,8 +356,21 @@ class CoverageSweep:
             conditions.append(
                 f"denominator_unestablished: {self.denominator_reason or 'entered set unreadable'}"
             )
-        if self.absent:
-            names = ", ".join(r.stage for r in self.rows if r.state is RowState.ABSENT)
+        if self.deferred:
+            # Loud, and about the RIGHT thing. The would-be-absent stages are
+            # named so the page is still diagnosable, but they are named as
+            # UNESTABLISHED rather than asserted as absences the sweep cannot
+            # support.
+            names = ", ".join(self.absent_stages) or "none"
+            conditions.append(
+                f"coverage_deferred: {self.deferral_reason}; the absent count is "
+                f"WITHHELD, not zero — {len(self.absent_stages)} stage(s) had no verdict "
+                f"at sweep time ({names}). Re-sweep this cycle once it is terminal: "
+                "invoke alpha-engine-weekly-coverage-sweep with this run_date and "
+                "state_machine_arn."
+            )
+        elif self.absent:
+            names = ", ".join(self.absent_stages)
             conditions.append(
                 f"absent_verdicts={self.absent} ({names}) — expected, entered, and no "
                 "verdict object; indistinguishable from a stage that never ran"
@@ -336,6 +416,9 @@ class CoverageSweep:
             "legacy_partition_rows": self.legacy_partition_rows,
             "finding_threshold": self.finding_threshold,
             "counts": self.counts,
+            "coverage_established": self.coverage_established,
+            "deferral_reason": self.deferral_reason,
+            "absent_stages": list(self.absent_stages),
             "should_alert": self.should_alert,
             "alert_conditions": list(self.alert_conditions),
             "rows": [r.to_dict() for r in self.rows],
@@ -367,6 +450,7 @@ def sweep_coverage(
     partitions_read: Sequence[str] | None = None,
     cycle: CycleShape | None = None,
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD,
+    observer_stage: str | None = None,
     now: datetime | None = None,
 ) -> CoverageSweep:
     """Compare the declared stage set against the verdicts that landed. Pure.
@@ -375,6 +459,15 @@ def sweep_coverage(
     ``verdicts`` but absent from the registry is **reported**, not dropped —
     a verdict for a stage nobody declared means the two declarations have
     drifted, and silently ignoring it is how the drift stays invisible.
+
+    ``observer_stage`` names the pipeline state the sweep is ITSELF running
+    as. It is executing while it grades, so it can never have written its own
+    verdict — reporting it ``ABSENT`` is a false positive guaranteed on every
+    run, and it was one of the 13 on 2026-09-04. It gets
+    :attr:`RowState.SELF`, outside the denominator and visible in the rows.
+    A verdict that DOES exist for it (written by an earlier execution of the
+    same cycle) is graded normally: the carve-out covers the impossible case
+    only, never a real absence.
     """
     now = now or datetime.now(timezone.utc)
     partitions = tuple(partitions_read) if partitions_read else (run_date,)
@@ -397,7 +490,20 @@ def sweep_coverage(
         verdict = verdicts.get(stage)
 
         if verdict is None:
-            if entered is not None and stage not in entered:
+            if observer_stage and stage == observer_stage:
+                rows.append(
+                    StageRow(
+                        stage=stage,
+                        state=RowState.SELF,
+                        stage_class=stage_class,
+                        declared_output=declared_output,
+                        reason=(
+                            "the sweep's own stage — it is executing while it grades and "
+                            "cannot have recorded a verdict about its own completion"
+                        ),
+                    )
+                )
+            elif entered is not None and stage not in entered:
                 rows.append(
                     StageRow(
                         stage=stage,
@@ -584,6 +690,8 @@ def read_coverage_sweep(
     s3_client: Any = None,
     sfn_client: SFNClient | None = None,
     finding_threshold: int = DEFAULT_FINDING_THRESHOLD,
+    observer_execution_arn: str | None = None,
+    observer_stage: str | None = None,
     now: datetime | None = None,
 ) -> CoverageSweep:
     """Read the registry, the verdicts and the cycle, and sweep them.
@@ -594,6 +702,13 @@ def read_coverage_sweep(
     (:func:`~.partition.dual_partition_active`). Passing it after the cutover
     is a no-op rather than an error: the window is closed by
     :data:`~.partition.CUTOVER_DATE`, not by every caller remembering.
+
+    ``observer_execution_arn`` and ``observer_stage`` are the caller's answer
+    to "where am I running from?" — the execution and the pipeline state the
+    sweep is itself inside. Both default to ``None``, the correct answer for
+    an out-of-band re-sweep, a backfill or the CLI: those observe from
+    OUTSIDE the cycle and have no self to exclude
+    (``alpha-engine-config-I10161``).
     """
     if s3_client is None:  # pragma: no cover — production path
         import boto3
@@ -627,6 +742,7 @@ def read_coverage_sweep(
                 run_date,
                 calendar_date=calendar_date,
                 client=sfn_client,
+                observer_execution_arn=observer_execution_arn,
             )
         except Exception as exc:  # noqa: BLE001 — degrades LOUDLY, never silently
             entered_reason = f"{type(exc).__name__}: {exc}"
@@ -655,6 +771,7 @@ def read_coverage_sweep(
         partitions_read=partitions,
         cycle=cycle,
         finding_threshold=finding_threshold,
+        observer_stage=observer_stage,
         now=now,
     )
 
@@ -687,13 +804,26 @@ def publish_sweep(
             {"Name": "Pipeline", "Value": sweep.pipeline},
         ]
         data = [{"MetricName": "StageCoverageSweepRan", "Dimensions": dims, "Value": 1.0, "Unit": "None"}]
-        for name, value in (
+        emitted: list[tuple[str, float]] = [
             ("StageCoverageSweepExpected", sweep.counts["expected"]),
             ("StageCoverageSweepCovered", sweep.covered),
             ("StageCoverageSweepFindings", sweep.findings),
-            ("StageCoverageSweepAbsent", sweep.absent),
             ("StageCoverageSweepUnmeasured", sweep.unmeasured),
-        ):
+            # 1 exactly when the absent count below is WITHHELD. Published on
+            # EVERY sweep, so the alarm on it separates "not deferred" from
+            # "the sweep stopped running" — that second fact belongs to
+            # StageCoverageSweepRan, and neither is ever inferred from the
+            # other's silence (alpha-engine-config-I10161, principles.md 2.7).
+            ("StageCoverageSweepDeferred", 1.0 if sweep.deferred else 0.0),
+        ]
+        if sweep.coverage_established:
+            # WITHHELD, not zeroed, when the cycle cannot support the claim.
+            # Publishing 0 would render an unestablished surface green;
+            # publishing the count anyway is what produced the 2026-09-04
+            # false page of 13 absences on a cycle the same artifact declared
+            # in_flight. The deferred metric above is what stays loud.
+            emitted.append(("StageCoverageSweepAbsent", sweep.absent))
+        for name, value in emitted:
             data.append(
                 {"MetricName": name, "Dimensions": dims, "Value": float(value), "Unit": "Count"}
             )
@@ -726,6 +856,7 @@ _STATE_GLYPH = {
     RowState.ABSENT: "GONE",
     RowState.UNMEASURED: "????",
     RowState.NOT_ENTERED: "----",
+    RowState.SELF: "SELF",
 }
 
 
@@ -742,6 +873,7 @@ def render_rows(sweep: CoverageSweep, *, include_not_entered: bool = True) -> st
         RowState.UNMEASURED: 2,
         RowState.COVERED: 3,
         RowState.NOT_ENTERED: 4,
+        RowState.SELF: 5,
     }
     rows = [r for r in sweep.rows if include_not_entered or r.state is not RowState.NOT_ENTERED]
     rows.sort(key=lambda r: (order[r.state], r.stage))
@@ -775,6 +907,23 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--bucket", default="alpha-engine-research")
     parser.add_argument("--registry-path", default=None, help="read the registry from disk")
     parser.add_argument("--finding-threshold", type=int, default=DEFAULT_FINDING_THRESHOLD)
+    parser.add_argument(
+        "--observer-execution-arn",
+        default=None,
+        help=(
+            "the execution this sweep is running INSIDE, when it is running inside one. "
+            "Its RUNNING status does not make its own cycle in_flight "
+            "(alpha-engine-config-I10161). An out-of-band re-sweep leaves this unset."
+        ),
+    )
+    parser.add_argument(
+        "--observer-stage",
+        default=None,
+        help=(
+            "the pipeline state this sweep IS. It cannot have recorded a verdict about "
+            "its own completion, so it is reported 'self' rather than 'absent'."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
         "--publish", action="store_true", help="write the sweep artifact and publish its metrics"
@@ -817,6 +966,8 @@ def _main(argv: Sequence[str] | None = None) -> int:
             bucket=args.bucket,
             s3_client=s3_client,
             finding_threshold=args.finding_threshold,
+            observer_execution_arn=args.observer_execution_arn,
+            observer_stage=args.observer_stage,
         )
     except Exception as exc:  # noqa: BLE001 — a sweep that cannot run says so
         print(

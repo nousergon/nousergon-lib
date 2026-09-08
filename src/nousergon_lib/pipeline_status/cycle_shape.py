@@ -77,6 +77,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -123,6 +124,23 @@ CONTRIBUTING_ROLES = CADENCE_ROLES | RECOVERY_ROLES
 #: machine is an unpriced API bill, and a cycle whose contributors fall off
 #: the end is reported as ``walk_exhausted`` rather than silently truncated.
 DEFAULT_WALK_CAP: int = 60
+
+#: How far BEFORE a cycle's own date ``read_cycle_shape`` keeps walking.
+#: ``ListExecutions`` returns newest-first by ``startDate``, and no execution
+#: that started before this window can belong to the cycle: an execution's
+#: cycle key resolves from its input ``run_date``, its name, or its
+#: ``startDate`` — all three of which are on or after the cycle's own day for
+#: a contributor, never a fortnight before it. So the walk has a CORRECT
+#: termination condition and does not need to rely on the count cap.
+#:
+#: ``alpha-engine-config-I10161``. Measured 2026-09-08: every weekly sweep
+#: since the mechanism shipped reported ``walk_exhausted: true`` — 60 was
+#: smaller than the number of executions this state machine accumulates in a
+#: week, so the *documented* downgrade ("an INCOMPLETE verdict under an
+#: exhausted walk is not trustworthy") applied on EVERY run and was
+#: implemented by no caller. A date bound makes exhaustion exceptional again,
+#: which is the precondition for the downgrade meaning anything.
+DEFAULT_LOOKBACK_DAYS: int = 14
 
 
 def cycle_key_for(describe_resp: Mapping[str, Any]) -> str | None:
@@ -171,6 +189,11 @@ class CycleExecution:
     #: coverage sweep intersects against the artifact registry's stage set.
     #: Kept out of ``repr`` because it runs to a few hundred names.
     all_states_entered: tuple[str, ...] = field(default=(), repr=False)
+    #: This execution is the one PERFORMING the observation — the sweep runs
+    #: as a state inside it. Its entered states are real and count toward the
+    #: union; its RUNNING status does not, because it cannot terminate before
+    #: the thing it is running. See :func:`build_cycle_shape`.
+    is_observer: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -183,6 +206,7 @@ class CycleExecution:
             "duration_sec": self.duration_sec,
             "stages_entered": list(self.stages_entered),
             "stages_entered_count": len(self.stages_entered),
+            "is_observer": self.is_observer,
         }
 
 
@@ -206,6 +230,10 @@ class CycleShape:
     #: verdict is still trustworthy (the union only grows) but an INCOMPLETE
     #: one is not, and is downgraded to a stated uncertainty by the caller.
     walk_exhausted: bool = False
+    #: The execution the sweep itself is running inside, when the observer was
+    #: named. Empty when the cycle was read from outside any of its own
+    #: executions (the CLI, a backfill, an out-of-band re-sweep).
+    observer_execution_arn: str = ""
 
     @property
     def execution_count(self) -> int:
@@ -229,6 +257,44 @@ class CycleShape:
     @property
     def did_work(self) -> bool:
         return self.verdict is CycleVerdict.COMPLETED
+
+    @property
+    def is_terminal(self) -> bool:
+        """The cycle has reached a verdict that will not change by waiting.
+
+        ``IN_FLIGHT`` is the only non-terminal verdict. A consumer that grades
+        a non-terminal cycle is grading a partial fact and reporting it as a
+        whole one — which is what produced the 2026-09-04 false page (13
+        stages called ``absent`` on a cycle the same artifact declared
+        ``in_flight``).
+        """
+        return self.verdict is not CycleVerdict.IN_FLIGHT
+
+    @property
+    def verdict_trustworthy(self) -> bool:
+        """Is this verdict safe to act on?
+
+        The downgrade :attr:`walk_exhausted` documents and no caller applied.
+        The union only GROWS with more contributors, so a ``COMPLETED``
+        verdict survives a truncated walk; ``INCOMPLETE`` and its
+        ``stages_missing`` do not — an unseen contributor is
+        indistinguishable from a stage that never ran.
+        """
+        if not self.walk_exhausted:
+            return True
+        return self.verdict in (CycleVerdict.COMPLETED, CycleVerdict.SKIPPED)
+
+    @property
+    def untrustworthy_reason(self) -> str:
+        """Why :attr:`verdict_trustworthy` is False, or ``""``."""
+        if self.verdict_trustworthy:
+            return ""
+        return (
+            f"the ListExecutions walk hit its cap before the cycle window closed, so the "
+            f"contributor set may be incomplete and a {self.verdict.value} verdict "
+            f"(missing {', '.join(self.stages_missing) or 'nothing'}) cannot be distinguished "
+            f"from an unseen contributor that entered those stages"
+        )
 
     def explain(self) -> str:
         head = f"{self.pipeline} cycle {self.run_date}: {self.verdict.value} ({self.reason})"
@@ -259,6 +325,9 @@ class CycleShape:
             "stages_missing": list(self.stages_missing),
             "stage_coverage": self.stage_coverage,
             "walk_exhausted": self.walk_exhausted,
+            "observer_execution_arn": self.observer_execution_arn,
+            "is_terminal": self.is_terminal,
+            "verdict_trustworthy": self.verdict_trustworthy,
             "explain": self.explain(),
         }
 
@@ -270,6 +339,7 @@ def build_cycle_shape(
     outcomes: Sequence[tuple[WorkOutcome, str | None, Sequence[str]]],
     stage_spine: Sequence[str] | None = None,
     walk_exhausted: bool = False,
+    observer_execution_arn: str | None = None,
 ) -> CycleShape:
     """Fold one cycle's executions into a single verdict. Pure.
 
@@ -280,6 +350,37 @@ def build_cycle_shape(
     Only :data:`CONTRIBUTING_ROLES` are folded in. A contributor with **no**
     role is included: an untagged manual run is legitimate and common
     (``roles.py``), and excluding it would drop real work from the union.
+
+    ## The observer (``alpha-engine-config-I10161``)
+
+    ``observer_execution_arn`` names the execution the CALLER is running
+    inside. Its entered states still count toward the union — they are real
+    work — but its ``RUNNING`` status does **not** make the cycle
+    ``IN_FLIGHT``, because it cannot possibly have terminated: the caller is
+    a state within it.
+
+    Without this, a sweep invoked as a tail state of its own pipeline reads
+    ``in_flight (still_running)`` on **every single run**, forever. Measured
+    on the live 2026-09-04 cycle: the sweep at ``21:39:18Z`` graded a cycle it
+    declared in-flight because ``watch-rerun-2026-09-04-4`` was RUNNING — and
+    that execution terminated one second later, at ``21:39:19Z``, on the
+    Succeed state two hops past the sweep. The same shape appears on the
+    2026-08-28 cycle's artifact, so this was chronic and not an incident. Two
+    consequences, and the second is the one that reaches other systems:
+
+    1. ``IN_FLIGHT`` is structurally unreachable as a *signal* — a cycle that
+       is genuinely still running is indistinguishable from every healthy one;
+    2. :func:`~.completion_marker.augment_marker` stamps ``cycle_verdict:
+       in_flight`` and ``did_work: false`` onto the completion marker of a
+       cycle that COMPLETED — the object every ``gate:*`` ``Verified-when:``
+       predicate reads. That is ``alpha-engine-config-I8186`` re-created with
+       the sign flipped, which is exactly what :func:`~.partition.cycle_keys`
+       warned about for the mirror-image bug.
+
+    Excluding only the observer is safe in the direction that matters: any
+    OTHER running execution of the same cycle still yields ``IN_FLIGHT``, so
+    the honest "not yet gradeable" answer is preserved for the case that
+    actually means it.
     """
     spine = tuple(stage_spine) if stage_spine is not None else stage_order_for(pipeline)
 
@@ -289,6 +390,8 @@ def build_cycle_shape(
             # Real work, real writes, but not this cycle's deliverable.
             continue
         contributors.append((outcome, role, states))
+
+    observer = (observer_execution_arn or "").strip()
 
     executions = tuple(
         CycleExecution(
@@ -301,6 +404,7 @@ def build_cycle_shape(
             duration_sec=outcome.duration_sec,
             stages_entered=outcome.stages_entered,
             all_states_entered=tuple(states),
+            is_observer=bool(observer) and (outcome.execution_arn or "") == observer,
         )
         for outcome, role, states in contributors
     )
@@ -319,6 +423,7 @@ def build_cycle_shape(
         "stages_entered": entered,
         "stages_missing": missing,
         "walk_exhausted": walk_exhausted,
+        "observer_execution_arn": observer,
     }
 
     if not contributors:
@@ -334,9 +439,15 @@ def build_cycle_shape(
     if all(o.verdict is WorkVerdict.SKIPPED for o, _r, _s in contributors):
         return CycleShape(verdict=CycleVerdict.SKIPPED, reason="declared_skip", **common)
 
-    if any(o.verdict is WorkVerdict.IN_FLIGHT for o, _r, _s in contributors):
-        # Not yet complete and something is still running. A run that has not
-        # finished has not failed.
+    if any(
+        o.verdict is WorkVerdict.IN_FLIGHT
+        and not (observer and (o.execution_arn or "") == observer)
+        for o, _r, _s in contributors
+    ):
+        # Not yet complete and something OTHER THAN THE OBSERVER is still
+        # running. A run that has not finished has not failed — but the
+        # execution the caller is running inside can never have finished, and
+        # counting it here made IN_FLIGHT the permanent answer.
         return CycleShape(verdict=CycleVerdict.IN_FLIGHT, reason="still_running", **common)
 
     return CycleShape(verdict=CycleVerdict.INCOMPLETE, reason="partial_cycle", **common)
@@ -350,6 +461,8 @@ def read_cycle_shape(
     client: SFNClient | None = None,
     walk_cap: int = DEFAULT_WALK_CAP,
     stage_spine: Sequence[str] | None = None,
+    observer_execution_arn: str | None = None,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
 ) -> CycleShape:
     """Read every execution of ``run_date`` and fold them into one verdict.
 
@@ -365,6 +478,18 @@ def read_cycle_shape(
     :attr:`CycleShape.run_date` is always the CANONICAL ``run_date``, so the
     completion marker this shape augments keeps its canonical key.
 
+    The walk terminates on a DATE BOUND, not on the count cap: executions come
+    back newest-first by ``startDate``, and once one started more than
+    ``lookback_days`` before the cycle's own day, no later page can hold a
+    contributor. :data:`DEFAULT_WALK_CAP` remains as a hard stop and is still
+    reported as :attr:`CycleShape.walk_exhausted`, but reaching it is now the
+    exception rather than — as measured on every weekly sweep since the
+    mechanism shipped — the norm (``alpha-engine-config-I10161``).
+
+    ``observer_execution_arn`` is passed straight to :func:`build_cycle_shape`;
+    see its docstring for why the execution a sweep runs inside must not make
+    its own cycle ``IN_FLIGHT``.
+
     Raises :class:`~.read.SFNAccessDenied` / :class:`~.read.SFNThrottled`
     rather than returning an empty cycle: a transport or authorization
     failure rendered as "no executions" is a verdict manufactured from a
@@ -379,6 +504,8 @@ def read_cycle_shape(
     next_token: str | None = None
     collected: list[tuple[WorkOutcome, str | None, list[str]]] = []
     exhausted = False
+    floor = _walk_floor(keys, lookback_days)
+    before_floor = False
 
     while inspected < walk_cap:
         kwargs: dict[str, Any] = {
@@ -401,6 +528,14 @@ def read_cycle_shape(
             arn = str(row.get("executionArn") or "")
             if not arn:
                 continue
+            if floor is not None:
+                started = _parse_ts(row.get("startDate"))
+                if started is not None and started < floor:
+                    # Newest-first ordering: everything from here back is
+                    # older still, so the cycle's contributor set is CLOSED.
+                    # A correct termination condition, not a budget.
+                    before_floor = True
+                    break
             try:
                 desc = client.describe_execution(executionArn=arn)
             except Exception as exc:  # noqa: BLE001
@@ -423,6 +558,9 @@ def read_cycle_shape(
             )
             collected.append((outcome, _extract_pipeline_role(desc), states))
 
+        if before_floor:
+            break
+
         next_token = page.get("nextToken")
         if not next_token:
             break
@@ -436,6 +574,30 @@ def read_cycle_shape(
         outcomes=collected,
         stage_spine=stage_spine,
         walk_exhausted=exhausted,
+        observer_execution_arn=observer_execution_arn,
+    )
+
+
+def _walk_floor(keys: set[str], lookback_days: int) -> datetime | None:
+    """The oldest ``startDate`` that could still belong to this cycle.
+
+    ``None`` when no key parses as a date — the walk then falls back to the
+    count cap alone rather than guessing a bound, because a wrong floor would
+    silently DROP contributors, which is the one direction that manufactures
+    absences.
+    """
+    if lookback_days < 0:
+        return None
+    parsed: list[date] = []
+    for key in keys:
+        try:
+            parsed.append(date.fromisoformat(key))
+        except (TypeError, ValueError):
+            continue
+    if not parsed:
+        return None
+    return datetime.combine(
+        min(parsed) - timedelta(days=lookback_days), time.min, tzinfo=timezone.utc
     )
 
 
