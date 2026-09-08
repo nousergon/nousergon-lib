@@ -91,20 +91,18 @@ A distribution appearing only in a **compiled lock file**, never in
 this reason: a bare ``requirements.in`` scan alone would recreate the exact
 blind spot ``I7723`` occupied.
 
-**Enforcement flipped 2026-09-08 (alpha-engine-config-I10225).** The
-reusable workflow (``.github/workflows/provider-linkage-guard.yml``) now
-invokes this script WITH ``--include-dist`` unconditionally -- every one of
-the fleet's 15 callers is scanned for this class on every run (the workflow
-is checked out unpinned, so this took effect fleet-wide the moment this PR
-merged, with no commit required in any caller repo). The rollout that
-preceded the flip: alpha-engine-config-I10032 landed the class warn-only
-(flag off by default) so merging it did not re-verdict any caller; I10225
-then measured the baseline against all 15 callers (6 with legitimate
-pre-existing matches -- crucible-dashboard, crucible-research,
-crucible-evaluator, crucible-backtester, telos, flow-doctor -- 9 clean),
-got each of the 6 allowlisted with a reason and an expiry, and flipped the
-flag last, in that order, so no caller's `main` ever saw an unallowlisted
-finding.
+**Rollout is warn-only until each caller's baseline is allowlisted.** The
+reusable workflow (``.github/workflows/provider-linkage-guard.yml``) invokes
+this script WITHOUT ``--include-dist`` for now -- merging this class lands it
+in the library without re-verdicting any of the fleet's callers on merge (the
+workflow is checked out unpinned; see the module-level note on
+``evaluate()`` for why a guard-side widening must not by itself redden a
+consumer). The enforcement flip -- adding ``--include-dist`` to the reusable
+workflow step -- is a separate, later change, once each caller's baseline is
+measured and any legitimate match is allowlisted with an expiry. Tracked:
+alpha-engine-config-I10032 (this class), alpha-engine-config-I10225 (the
+flip -- baseline measured 2026-09-08 against all 15 current callers, 6 with
+legitimate pre-existing matches, 9 clean).
 
 Docs and markdown are excluded by default (``--include-docs`` to override),
 same rationale both predecessor guards carried: this fleet's policy library
@@ -165,7 +163,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -181,12 +179,10 @@ CLASS_DIST = "dist"
 PATTERN_CLASSES = (CLASS_SDK_CLIENT, CLASS_ENV_KEY, CLASS_BASE_URL, CLASS_BASE_URL_ENV, CLASS_DIST)
 
 # Pattern classes scanned by DEFAULT, without `--include-dist`. `dist` is
-# excluded here -- the CLI flag's default is unchanged by the I10225
-# enforcement flip; only the reusable workflow's own invocation now passes
-# `--include-dist` explicitly (see the module docstring's "Enforcement
-# flipped" section). `all_pattern_classes()` still reports `dist` as a KNOWN
-# class (an allowlist entry naming it is valid), independent of whether a
-# given run scans for it.
+# excluded here -- see the module docstring's DEPENDENCY FILES /
+# "warn-only until baseline is allowlisted" sections. `all_pattern_classes()`
+# still reports `dist` as a KNOWN class (an allowlist entry naming it is
+# valid), independent of whether a given run scans for it.
 DEFAULT_PATTERN_CLASSES = tuple(k for k in PATTERN_CLASSES if k != CLASS_DIST)
 
 
@@ -949,6 +945,7 @@ class Report:
     expired: list[AllowlistEntry]
     stale: list[AllowlistEntry]
     covered: int
+    disabled: list[AllowlistEntry] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -960,8 +957,32 @@ def evaluate(
     allowlist: list[AllowlistEntry],
     today: _dt.date,
     raw_matches: list[Match] | None = None,
+    *,
+    enabled_classes: frozenset[str] | None = None,
 ) -> Report:
     """Findings from ``matches``; STALENESS from ``raw_matches``.
+
+    ``enabled_classes`` is the set of bare pattern-class names (``sdk_client``,
+    ``env_key``, ... -- NOT the namespaced ``<provider>:<class>`` form) actually
+    scanned in this invocation, e.g. `DEFAULT_PATTERN_CLASSES` without
+    `--include-dist`. Pass ``None`` (the default) to mean "every class is
+    enabled" -- the historical behaviour, still correct for a caller that
+    scans unconditionally.
+
+    An allowlist entry for a class this invocation did NOT scan is neither
+    matched nor genuinely unmatched -- its usefulness is unknowable, because
+    the class it names was never looked at. alpha-engine-config-I10225:
+    reporting "unknowable" as `stale` deadlocked six consumer PRs against
+    `nousergon-lib-PR397`, which enables the `dist` class fleet-wide -- their
+    new `dist` allowlist entries were reported stale by the reusable
+    workflow's pre-flip run (no `--include-dist`), a red required check no PR
+    may merge past, while the flip that would make the class scanned could
+    not itself land first without reddening those six repos' `main` with
+    unallowlisted findings the instant it merged. Such an entry moves to
+    ``disabled`` (a distinct, non-erroring bucket) instead of ``stale``, and
+    is reported as skipped rather than silently dropped. This does NOT relax
+    detection for a class this invocation DOES scan: an unused entry for an
+    ENABLED class is still `stale`, unchanged.
 
     The two are deliberately different match sets (alpha-engine-config-I9295).
     ``matches`` is comment-stripped, because a comment is not a call site.
@@ -1002,17 +1023,34 @@ def evaluate(
     matched_keys |= {k for k in seen_keys if k in by_key}
 
     expired = [e for e in allowlist if e.expires < today]
-    stale = [
+    unmatched = [
         e for e in allowlist
         if e.expires >= today and (e.path, e.pattern_class) not in matched_keys
     ]
-    return Report(unallowlisted=unallowlisted, expired=expired, stale=stale, covered=covered)
+    disabled = [
+        e for e in unmatched
+        if enabled_classes is not None
+        and e.pattern_class.rsplit(":", 1)[-1] not in enabled_classes
+    ]
+    disabled_keys = {(e.path, e.pattern_class) for e in disabled}
+    stale = [e for e in unmatched if (e.path, e.pattern_class) not in disabled_keys]
+    return Report(
+        unallowlisted=unallowlisted, expired=expired, stale=stale,
+        covered=covered, disabled=disabled,
+    )
 
 
 # -- reporting --------------------------------------------------------------
 
 
 def render(report: Report, total_matches: int) -> int:
+    for e in sorted(report.disabled, key=lambda e: (e.path, e.pattern_class)):
+        print(
+            f"::notice file={e.path}::skipping staleness check for pattern="
+            f"{e.pattern_class} -- this pattern class is not enabled for this "
+            f"invocation, so whether the entry still matches anything is "
+            f"unknowable here, not stale"
+        )
     if report.ok:
         print(
             f"No unallowlisted direct provider linkage. "
@@ -1128,7 +1166,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::could not complete provider linkage guard scan: {exc}")
         return 2
 
-    report = evaluate(matches, allowlist, _dt.date.today(), raw_matches=raw_matches)
+    report = evaluate(
+        matches, allowlist, _dt.date.today(), raw_matches=raw_matches,
+        enabled_classes=frozenset(classes),
+    )
     return render(report, len(matches))
 
 
