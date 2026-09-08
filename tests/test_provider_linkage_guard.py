@@ -787,6 +787,140 @@ def test_a_test_file_without_the_marker_still_trips_the_guard(tmp_path):
     assert "anthropic:sdk_client" in _classes(matches)
 
 
+# -- dist: dependency/lock files (alpha-engine-config-I10032) ---------------
+#
+# I7723: the `anthropic` SDK sat in the trading box's venv for three months,
+# pulled transitively through krepis's old `flow-doctor[diagnosis]` extra,
+# with zero `import anthropic` anywhere in `crucible-executor`'s tree --
+# undetectable by every call-site-shaped class above. `dist` closes that gap
+# by reading dependency/lock files for a bare PEP 503 distribution name.
+# Off by default (mirrors `--include-docs`) -- see DEPENDENCY_FILENAME_RE.
+
+
+def _dist_patterns():
+    return plg.compile_patterns(plg.ALL_PROVIDER_NAMES, (plg.CLASS_DIST,))
+
+
+def test_dist_is_excluded_from_the_default_cli_run(tmp_path):
+    """The class exists, but a plain `--repo .` run must not see it -- the
+    fleet's reusable workflow calls the script without `--include-dist`
+    until each caller's baseline is measured and allowlisted."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "anthropic==0.34.0\n")
+    assert plg.main(["--repo", str(repo)]) == 0
+
+
+def test_dist_catches_a_pinned_requirements_txt_line(tmp_path):
+    """The literal acceptance scenario: a planted `anthropic==<version>` pin
+    in a consuming repo's requirements.txt fails the guard, once enabled."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "boto3==1.34.0\nanthropic==0.34.0\n")
+    assert plg.main(["--repo", str(repo), "--include-dist"]) == 1
+
+
+def test_dist_catches_requirements_in_and_extras(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.in", "anthropic[bedrock]>=0.30\n")
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert "anthropic:dist" in _classes(matches)
+
+
+def test_dist_catches_a_pyproject_dependency_string(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "pyproject.toml", '[project]\ndependencies = ["openai>=1.0"]\n')
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert "openai:dist" in _classes(matches)
+
+
+def test_dist_catches_a_uv_lock_package_table(tmp_path):
+    """A TRANSITIVE dependency never named in requirements.in at all -- only
+    the compiled lock names it. Skipping lock files would recreate I7723's
+    exact blind spot."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "uv.lock", '[[package]]\nname = "anthropic"\nversion = "0.34.0"\n')
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert "anthropic:dist" in _classes(matches)
+
+
+def test_dist_catches_a_pipfile_lock_json_key(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "Pipfile.lock", '{"default": {"anthropic": {"version": "==0.34.0"}}}\n')
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert "anthropic:dist" in _classes(matches)
+
+
+def test_dist_matches_underscore_and_dot_variants_of_a_hyphenated_name(tmp_path):
+    """PEP 503 normalizes -/_/. to one separator; a requirement author can
+    spell the google SDK any of the three ways."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "google_generativeai==0.3.0\n")
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert "google:dist" in _classes(matches)
+
+
+def test_dist_does_not_false_positive_on_an_unrelated_bare_word(tmp_path):
+    """The regex is a real word, not a substring: mentioning "an anthropic
+    argument" as a requirements comment is prose, and an unrelated package
+    name is not a match either."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "# anthropic-adjacent tooling notes\nsomeotherpkg==1.0\n")
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert matches == []
+
+
+def test_dependency_filename_matches_a_nested_requirements_file(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "backend/requirements-dev.txt", "anthropic==0.34.0\n")
+    matches = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert "anthropic:dist" in _classes(matches)
+
+
+def test_a_bare_requirements_txt_stays_out_of_scope_without_the_filename_pattern(tmp_path):
+    """requirements.txt is `.txt`, a DOC_EXTENSION -- confirms it never enters
+    scope through the ordinary extension path, only through the filename
+    match. Regression guard for "cleaner, preferred" per the issue."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "anthropic==0.34.0\n")
+    assert plg.scan(repo, plg.DEFAULT_EXTENSIONS, _dist_patterns()) == []
+    assert plg.scan(repo, plg.DEFAULT_EXTENSIONS | plg.DOC_EXTENSIONS, _dist_patterns()) == []
+
+
+def test_dist_is_a_known_allowlist_pattern_class():
+    assert "anthropic:dist" in plg.all_pattern_classes()
+
+
+def test_every_provider_with_a_known_pypi_sdk_declares_dist():
+    for name in ("anthropic", "openai", "google", "mistral", "groq", "zhipu", "xai"):
+        assert plg.PROVIDERS_BY_NAME[name].dist is not None, name
+
+
+def test_cli_list_providers_shows_dist_shape(capsys):
+    assert plg.main(["--list-providers"]) == 0
+    out = capsys.readouterr().out
+    assert "anthropic: sdk_client, env_key, base_url, base_url_env, dist" in out
+
+
 def test_asserts_absence_exemption_does_not_redden_a_consumer(tmp_path):
     repo = _git_repo(tmp_path)
     _add(repo, "tests/test_no_anthropic.py", (
