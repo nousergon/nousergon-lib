@@ -423,9 +423,12 @@ def test_the_sweep_hands_the_calendar_identity_to_the_cycle_lookup():
     must pass BOTH down, or the fix above is unreachable in production."""
     seen: dict[str, object] = {}
 
-    def _fake_read_cycle_shape(arn, run_date, *, calendar_date=None, client=None):
+    def _fake_read_cycle_shape(
+        arn, run_date, *, calendar_date=None, client=None, observer_execution_arn=None
+    ):
         seen["run_date"] = run_date
         seen["calendar_date"] = calendar_date
+        seen["observer_execution_arn"] = observer_execution_arn
         raise RuntimeError("stop here — the call signature is what is under test")
 
     original = cov.read_cycle_shape
@@ -442,7 +445,14 @@ def test_the_sweep_hands_the_calendar_identity_to_the_cycle_lookup():
     finally:
         cov.read_cycle_shape = original
 
-    assert seen == {"run_date": "2026-08-28", "calendar_date": "2026-08-29"}
+    assert seen == {
+        "run_date": "2026-08-28",
+        "calendar_date": "2026-08-29",
+        # alpha-engine-config-I10161: absent here, because a caller that does
+        # not name its observer has none — the CLI and out-of-band re-sweeps
+        # observe from OUTSIDE the cycle.
+        "observer_execution_arn": None,
+    }
 
 
 class _EmptyS3:
