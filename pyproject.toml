@@ -208,3 +208,8 @@ ignore = ["E501", "S603"]
 # src/, not tests/, so it needs its own per-file-ignore rather than inheriting
 # the tests/** one above.
 "src/nousergon_lib/quant/selftest_perturbation.py" = ["S101"]
+# load_allowlist's schema_version assert is a fail-loud config-shape guard
+# raised at import/collection time in every consumer's own test run, not a
+# security-sensitive check disabled by `python -O` in production — mirrors
+# selftest_perturbation.py's rationale above (alpha-engine-config-I10226).
+"src/nousergon_lib/testing/debug_swallow_guard.py" = ["S101"]
