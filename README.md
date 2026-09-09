@@ -316,6 +316,19 @@ from nousergon_lib.arena import ArenaConfig, ArmRegister, ArmSeries, run_cycle
 
 `nousergon_lib.egress.routes` publishes, as a versioned artifact with a JSON Schema beside it, **which upstream hosts a multi-tenant LLM egress-proxy deployment serves and how each is authenticated** — `box_upstream_hosts()`, `laptop_upstream_hosts()`, `upstream_hosts(table)`, `table(name)`, `load_contract()`, `load_schema()`. A request naming a host absent from the table is refused by the proxy with `unknown upstream host`, so anything deciding which model rows are *servable* has to know the table; publishing it here is what lets a consumer read it with **no credential** instead of checking out the private repo that configures the proxy (alpha-engine-config-I8337). The artifact carries upstream host, path prefix and auth mode only — no key-environment names, no ports, no host of ours — and `tests/test_egress_routes_contract.py` asserts that. Deployments are never unioned: `box` and `laptop` are different tables. Stdlib only.
 
+### `testing.debug_swallow_guard` — class guard for invisible exception swallows
+
+`find_debug_only_swallows(source_dir)` AST-walks a directory of `*.py` files for `except Exception`
+handlers whose entire body is a bare `pass` or a `logger.debug(...)` call — the shape that goes
+unrecorded anywhere when a repo's root logger runs at INFO (alpha-engine-config-I10031,
+`crucible-executor-PR547`). `load_allowlist`, `check_against_allowlist` and
+`check_allowlist_entries_self_contained` diff the live sites against a repo-local
+`.debug-swallow-allowlist.yaml` (same `schema_version: 1` shape as `.provider-linkage-allowlist.yaml`)
+so a consumer's own `tests/test_no_debug_only_swallows.py` is a few lines calling these four
+functions rather than a copy of the AST walk (alpha-engine-config-I10226 — lifted on second
+adoption per `policy-shared-code` once the class was measured in five sibling repos). Stdlib +
+`pyyaml` only.
+
 ### `http_retry` — bounded-backoff transient-API retry chokepoint
 
 `request_with_retry(url, *, params, session, transient_status, ...)` returns the final `requests.Response` after retrying the transient class — 429 + 5xx responses (honoring `Retry-After`) and `Timeout`/`ConnectionError` network errors — with exponential backoff + full jitter; an exhausted network error raises `HttpRetryError` (api-key-scrubbed), while a persistent transient-status response is returned for the caller to interpret (so a 403, not in the transient set, is handed back for e.g. polygon's `PolygonForbiddenError` conversion). Also exposes the low-level `backoff_delay(attempt, *, base, cap, retry_after)` and `scrub_api_keys(msg)` (masks `api_key=`/`apiKey=` querystring values) for consumers with bespoke loops (the rate-limited `polygon_client` keeps its own loop + 403 + JSON parse and reuses just the delay math + scrubber). Consolidates the four mirrored alpha-engine-data retry sites (FRED fetch, polygon client, preflight reachability, FRED repair) into one policy so they stop drifting (L4499). Stdlib + `requests` only.
