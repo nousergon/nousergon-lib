@@ -79,8 +79,22 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
+
+_ALLOWED_SCHEMES = ("http", "https")
+
+
+def _validate_url(url: str) -> str:
+    """Refuse a `file:`/custom scheme before it reaches `urlopen` (S310)."""
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(
+            f"refusing to open {url!r}: scheme {scheme!r} is not one of {_ALLOWED_SCHEMES}"
+        )
+    return url
+
 
 # ── wire contract ──────────────────────────────────────────────────────────
 
@@ -143,14 +157,14 @@ def request(
     if headers:
         hdrs.update(headers)
 
-    req = urllib.request.Request(
-        base_url.rstrip("/") + path,
+    req = urllib.request.Request(  # noqa: S310 -- scheme validated by _validate_url
+        _validate_url(base_url.rstrip("/") + path),
         data=json.dumps(body).encode(),
         headers=hdrs,
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 -- see above
             return resp.status, resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")

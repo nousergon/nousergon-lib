@@ -20,7 +20,6 @@ import pytest
 
 from nousergon_lib import llm_endpoint_probe as probe
 
-
 # ── vocabulary is closed ──────────────────────────────────────────────────
 
 
@@ -76,14 +75,18 @@ class TestParityWithFundedDepthProbe:
     def test_a_model_the_proxy_just_listed_but_will_not_serve(self):
         assert probe.classify(404, "model not found") == "not_served"
 
-    #: The dashboard box, s3://alpha-engine-research/ops/router-funded-depth/
-    #: latest.json, ran_at 2026-08-25T11:31:47Z — an openrouter entry.
+    #: Shape reproduced from the dashboard box's
+    #: s3://alpha-engine-research/ops/router-funded-depth/latest.json,
+    #: ran_at 2026-08-25T11:31:47Z (a live "unknown upstream host" refusal),
+    #: with the provider hostnames replaced by placeholders — this test
+    #: exercises `classify()`'s marker match, not any specific provider, and
+    #: a literal upstream host here would trip this repo's own
+    #: provider-linkage guards.
     LIVE_400 = (
         '{"error":{"message":"litellm.BadRequestError: OpenAIException - '
-        "unknown upstream host 'openrouter.ai' — configured: "
-        "['api.deepseek.com', 'api.x.ai', 'api.moonshot.ai', 'api.z.ai', "
-        "'generativelanguage.googleapis.com']No fallback model group found for "
-        'original model_group=claude-haiku-4-5."}}'
+        "unknown upstream host 'upstream-example.test' — configured: "
+        "['configured-a.example', 'configured-b.example']No fallback model "
+        'group found for original model_group=example-model."}}'
     )
 
     def test_an_upstream_the_proxy_will_not_route_is_its_own_verdict(self):
@@ -119,7 +122,7 @@ class TestParityWithFundedDepthProbe:
     (402, "payment required", "unfunded"),
     (400, "insufficient balance", "unfunded"),
     (401, "invalid api key", "unauthorized"),
-    (400, "unknown upstream host 'openrouter.ai' — configured: []", "route_unconfigured"),
+    (400, "unknown upstream host 'upstream-example.test' — configured: []", "route_unconfigured"),
     (404, "not found", "not_served"),
     (400, "blocked by DLP: secret detected", "dlp_blocked"),
     (500, "upstream exploded", "error"),
@@ -223,9 +226,9 @@ def test_caller_headers_are_merged_never_silently_dropped():
          patch("nousergon_lib.llm_endpoint_probe.urllib.request.Request") as req_cls:
         mocked.return_value = _urlopen_ok()
         probe.request("http://127.0.0.1:8990", wire="openai", model="m",
-                      headers={"X-Upstream-Host": "api.deepseek.com"}, timeout=1)
+                      headers={"X-Upstream-Host": "upstream-example.test"}, timeout=1)
         headers = req_cls.call_args.kwargs["headers"]
-        assert headers["X-Upstream-Host"] == "api.deepseek.com"
+        assert headers["X-Upstream-Host"] == "upstream-example.test"
         assert headers["Content-Type"] == "application/json"
 
 
