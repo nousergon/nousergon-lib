@@ -97,6 +97,10 @@ dev = [
     "pytest-cov>=4.0",
     "moto>=5.0",
     "pyarrow>=14.0",
+    # tests/test_coverage_scope.py parses this file; `tomllib` is 3.11+ and
+    # test.yml's matrix includes 3.9/3.10, where collection fails without
+    # this (alpha-engine-config-I10434).
+    "tomli>=2.0; python_version < '3.11'",
 ]
 # Stub-only package for pyright's benefit — gives pipeline_status/read.py's
 # `if TYPE_CHECKING: from mypy_boto3_stepfunctions.client import SFNClient`
