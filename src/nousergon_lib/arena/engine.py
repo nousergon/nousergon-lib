@@ -200,6 +200,14 @@ class ArenaConfig:
     cap: int = 5
     #: An arm younger than this is never retired, whatever its ranking.
     grace_weeks: int = 4
+    #: Brian's ruling, 2026-09-01: a new arm is promotable only after this many
+    #: paired weeks (20 paired trading days at the default of 4) against the
+    #: incumbent. Scored and laddered from week one; the pointer cannot move
+    #: to the arm before this threshold — within eligibility the decision is
+    #: the confidence sequence alone. Previously carried on crucible's
+    #: `SlotSpec` as a declared second place because this field did not exist
+    #: here (`alpha-engine-config-I9763`, `-I10504`).
+    promote_min_weeks: int = 4
     #: Never retire below this many active arms. Two arms are the bare
     #: minimum for a comparison to exist at all; three leaves slack for one
     #: arm to miss a cycle or fail a serving precondition and still leave a
@@ -235,6 +243,12 @@ class ArenaConfig:
             )
         if self.grace_weeks < 1:
             raise ArenaConfigError(f"grace_weeks must be >= 1; got {self.grace_weeks}")
+        if self.promote_min_weeks < 1:
+            raise ArenaConfigError(
+                f"promote_min_weeks must be >= 1; got {self.promote_min_weeks}. Zero "
+                "would promote an arm on its first cycle, which is the eligibility "
+                "age Brian's 2026-09-01 ruling exists to set."
+            )
         if self.retire_evidence not in (EVIDENCE_POINT, EVIDENCE_ANYTIME_VALID):
             raise ArenaConfigError(
                 "retire_evidence must be 'point' or 'anytime_valid'; got "

@@ -317,6 +317,19 @@ def test_a_floor_above_the_cap_is_refused():
         _config(cap=3, min_active_arms=4)
 
 
+def test_promote_min_weeks_defaults_to_four():
+    """Brian's 2026-09-01 ruling: 4 paired weeks against the incumbent.
+
+    Previously carried on crucible's `SlotSpec` because `ArenaConfig` had no
+    such field (`alpha-engine-config-I9763`, `-I10504`)."""
+    assert _config().promote_min_weeks == 4
+
+
+def test_promote_min_weeks_below_one_is_refused():
+    with pytest.raises(ArenaConfigError, match="promote_min_weeks"):
+        _config(promote_min_weeks=0)
+
+
 # --------------------------------------------------------------------------
 # Pointer decision
 # --------------------------------------------------------------------------
