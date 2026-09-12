@@ -11,6 +11,14 @@ to persist.
 - The pointer goes to the arm leading the incumbent on the **longest window
   the two of them share**, among arms whose lead the **anytime-valid
   sequence** supports. If no arm's lead is supported, the incumbent holds.
+- A challenger is promotable only once its **paired** window with the
+  incumbent reaches ``promote_min_weeks`` (Brian ruling 2026-09-01). The
+  evidence bar itself is per-slot: ``promote_evidence`` is the anytime-valid
+  sequence by default, or ``point`` — the largest positive mean paired
+  difference among age-eligible challengers — where a slot has declared that
+  delta (Brian ruling 2026-09-12, `alpha-engine-config-I10546`). Under
+  ``point`` the sequence is still computed and emitted; it just does not
+  decide.
 - The pointer moves **freely, in both directions, with no cooldown and no
   hysteresis** — "if for a time period version 1 beats version 2, but over
   time version 2 regains the edge, then version 1 should be champion while it
@@ -208,6 +216,20 @@ class ArenaConfig:
     #: `SlotSpec` as a declared second place because this field did not exist
     #: here (`alpha-engine-config-I9763`, `-I10504`).
     promote_min_weeks: int = 4
+    #: Evidence bar for SERVING. The anytime-valid sequence is the policy
+    #: default (`champion-challenger-policy.md` §5.0): a lead promotes only
+    #: when the confidence sequence's lower bound clears zero. ``point``
+    #: promotes the age-eligible challenger with the largest positive mean
+    #: paired difference instead, and is a PER-SLOT DECLARED DELTA — never a
+    #: fleet default — recorded under §5.2(B) with its skipped-SOTA rationale
+    #: (Brian ruling 2026-09-12, `alpha-engine-config-I10546`: the
+    #: ``universe_cut`` slot promotes the point-estimate leader after two
+    #: paired weeks, because a paper account re-deciding weekly makes a
+    #: reversible false promotion cheaper than never promoting at all). The
+    #: confidence sequence is still computed and emitted on every comparison
+    #: under ``point``, so the evidence the sequence would have required stays
+    #: on the record even when it did not decide.
+    promote_evidence: str = EVIDENCE_ANYTIME_VALID
     #: Never retire below this many active arms. Two arms are the bare
     #: minimum for a comparison to exist at all; three leaves slack for one
     #: arm to miss a cycle or fail a serving precondition and still leave a
@@ -254,6 +276,11 @@ class ArenaConfig:
                 "retire_evidence must be 'point' or 'anytime_valid'; got "
                 f"{self.retire_evidence!r}"
             )
+        if self.promote_evidence not in (EVIDENCE_POINT, EVIDENCE_ANYTIME_VALID):
+            raise ArenaConfigError(
+                "promote_evidence must be 'point' or 'anytime_valid'; got "
+                f"{self.promote_evidence!r}"
+            )
         if self.slot_kind in SELECTION_SLOT_KINDS and self.benchmark != BENCHMARK_POPULATION:
             raise ArenaConfigError(
                 f"slot {self.slot!r} is a selection-stage slot ({self.slot_kind}) and must be graded "
@@ -262,6 +289,31 @@ class ArenaConfig:
                 "2026-08-17, when SPY trailed the drawn-from population by "
                 "140bp at 21d."
             )
+
+    def to_dict(self) -> dict[str, Any]:
+        """The decision-governing knobs, for the cycle record.
+
+        ``slot``, ``slot_kind`` and ``benchmark`` are deliberately omitted:
+        they are already top-level fields of :class:`ArenaCycle` and a fact
+        emitted twice is a fact that can disagree with itself. Everything
+        here is a parameter that changed an outcome — a reader reconstructing
+        why the pointer did what it did needs the thresholds that were in
+        force, not the thresholds in today's config (`principles.md` §2.1).
+        """
+        return {
+            "alpha": self.alpha,
+            "diff_clip": self.diff_clip,
+            "variance_mode": self.variance_mode,
+            "opt_n": self.opt_n,
+            "min_paired_dates": self.min_paired_dates,
+            "cap": self.cap,
+            "grace_weeks": self.grace_weeks,
+            "promote_min_weeks": self.promote_min_weeks,
+            "promote_evidence": self.promote_evidence,
+            "min_active_arms": self.min_active_arms,
+            "retired_trailing_cycles": self.retired_trailing_cycles,
+            "retire_evidence": self.retire_evidence,
+        }
 
 
 @dataclass(frozen=True)
@@ -378,6 +430,11 @@ class ArenaCycle:
     retirements: tuple[RetirementVerdict, ...]
     scored_arms: tuple[str, ...]
     active_arms: tuple[str, ...]
+    #: The parameters in force for THIS cycle. Emitted so a reader can
+    #: reconstruct the decision without the current config, which may since
+    #: have changed — `promote_evidence` and `promote_min_weeks` in particular
+    #: change what a given set of comparisons decides.
+    config: ArenaConfig
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -386,6 +443,7 @@ class ArenaCycle:
             "slot_kind": self.slot_kind,
             "benchmark": self.benchmark,
             "as_of": self.as_of,
+            "config": self.config.to_dict(),
             "scored_arms": list(self.scored_arms),
             "active_arms": list(self.active_arms),
             "ladders": [ladder.to_dict() for ladder in self.ladders],
@@ -395,6 +453,92 @@ class ArenaCycle:
         }
 
 
+def _age_eligible(config: ArenaConfig, window: PairedWindow) -> bool:
+    """Has this pair been measured together for long enough to promote on?
+
+    The bar is the PAIRED window — the dates on which both arms produced —
+    not either arm's own age. An arm registered months ago that has shared
+    one week with the incumbent has one week of evidence against it.
+    """
+    return window.weeks >= config.promote_min_weeks
+
+
+def _measured_reason(
+    config: ArenaConfig, window: PairedWindow, bound: ConfSeqBound
+) -> str:
+    """Why this measured comparison can or cannot take the pointer.
+
+    A comparison below the age bar keeps status ``measured`` and stays in the
+    record: it WAS measured, and a reader must be able to see the lead that
+    was not acted on. Dropping it, or restating it as ``unmeasurable``, would
+    make a deliberate hold indistinguishable from an absent comparison —
+    §7.2's dominant bug class.
+    """
+    if not _age_eligible(config, window):
+        return (
+            f"below promote_min_weeks: {window.weeks} paired week(s) < "
+            f"{config.promote_min_weeks}; measured but not promotable this cycle"
+        )
+    if config.promote_evidence == EVIDENCE_POINT:
+        return (
+            "leads the incumbent on point estimate (promote_evidence=point)"
+            if window.mean_diff > 0
+            else "does not lead the incumbent on point estimate (promote_evidence=point)"
+        )
+    return (
+        "lead supported by the anytime-valid sequence"
+        if bound.supported
+        else "lead not supported by the anytime-valid sequence"
+    )
+
+
+def _promotable(
+    config: ArenaConfig, comparisons: Sequence[Comparison]
+) -> list[tuple[float, Comparison]]:
+    """``(rank key, comparison)`` for every challenger allowed to take the pointer.
+
+    Two bars, both hard: the paired-week age (``promote_min_weeks``) and the
+    configured evidence mode. The rank key is the quantity the mode decided
+    on — the confidence-sequence lower bound under ``anytime_valid``, the
+    mean paired difference under ``point`` — so that ranking and eligibility
+    can never be computed from two different statistics.
+    """
+    eligible = [
+        c
+        for c in comparisons
+        if c.status == "measured" and c.window.measurable and _age_eligible(config, c.window)
+    ]
+    if config.promote_evidence == EVIDENCE_POINT:
+        return [(c.window.mean_diff, c) for c in eligible if c.window.mean_diff > 0]
+    return [(c.bound.lower, c) for c in eligible if c.bound is not None and c.bound.supported]
+
+
+def _hold_reason(config: ArenaConfig, comparisons: Sequence[Comparison]) -> str:
+    """Why the incumbent held: which bar nothing cleared, and what was below it.
+
+    A hold caused entirely by the age bar reads differently from a hold on
+    the evidence — the first clears itself with time and the second may not —
+    so the reason names the blocked challengers rather than reporting a bare
+    "no challenger qualified".
+    """
+    measured = [c for c in comparisons if c.status == "measured" and c.window.measurable]
+    too_young = [c for c in measured if not _age_eligible(config, c.window)]
+    mode = (
+        "no age-eligible challenger leads the incumbent on point estimate "
+        "(promote_evidence=point)"
+        if config.promote_evidence == EVIDENCE_POINT
+        else "no age-eligible challenger's lead is supported by the anytime-valid sequence"
+    )
+    if too_young:
+        detail = "; ".join(
+            f"{c.challenger}: {c.window.weeks} paired week(s)" for c in sorted(too_young, key=lambda c: c.challenger)
+        )
+        return (
+            f"{mode}. Below promote_min_weeks={config.promote_min_weeks}: {detail}"
+        )
+    return mode
+
+
 def decide_pointer(
     config: ArenaConfig,
     as_of: str,
@@ -402,11 +546,24 @@ def decide_pointer(
     series_by_arm: Mapping[str, ArmSeries],
     preconditions: Mapping[str, Sequence[ServingPrecondition]] | None = None,
 ) -> PointerDecision:
-    """Move the pointer to the best supported lead, or hold the incumbent.
+    """Move the pointer to the best promotable lead, or hold the incumbent.
 
     Free movement in both directions, no cooldown, no hysteresis margin
     (Brian ruling 2026-08-29). The self-damping property that makes this safe
     is that the comparison window is cumulative, not trailing.
+
+    Two bars stand between a lead and the pointer:
+
+    - **Age.** A challenger whose PAIRED window with the incumbent is shorter
+      than ``config.promote_min_weeks`` can never be chosen. Its comparison is
+      still measured, still carries its confidence bound, and stays in
+      ``comparisons`` with status ``measured`` and a reason naming the
+      shortfall — a lead held back is a fact about this cycle, not an absence.
+    - **Evidence**, per ``config.promote_evidence``: the anytime-valid
+      sequence's lower bound above zero (the policy default), or the largest
+      positive mean paired difference (``point``, a per-slot declared delta —
+      Brian ruling 2026-09-12, `alpha-engine-config-I10546`). The bound is
+      computed and emitted either way.
     """
     checks = {arm: tuple(preconditions.get(arm, ())) for arm in series_by_arm} if preconditions else dict.fromkeys(series_by_arm, ())
     ineligible = {arm: c for arm, c in checks.items() if not _eligible(c)}
@@ -495,30 +652,40 @@ def decide_pointer(
                 window=window,
                 bound=bound,
                 status="measured",
-                reason=(
-                    "lead supported by the anytime-valid sequence"
-                    if bound.supported
-                    else "lead not supported by the anytime-valid sequence"
-                ),
+                reason=_measured_reason(config, window, bound),
             )
         )
 
-    # (lower bound, comparison) pairs. Building the tuple here rather than
-    # reaching through `c.bound` at the ranking site keeps the bound's
-    # presence a fact of the list's construction instead of an invariant a
-    # reader has to hold in their head.
-    supported: list[tuple[float, Comparison]] = [
-        (c.bound.lower, c) for c in comparisons if c.bound is not None and c.bound.supported
-    ]
+    # (rank key, comparison) pairs for the challengers this cycle is allowed
+    # to promote. Building the tuple here rather than reaching through
+    # `c.bound` at the ranking site keeps the bound's presence a fact of the
+    # list's construction instead of an invariant a reader has to hold in
+    # their head. `_promotable` applies BOTH bars — the paired-week age and
+    # the configured evidence mode — so there is exactly one place a
+    # challenger can become choosable.
+    supported: list[tuple[float, Comparison]] = _promotable(config, comparisons)
 
     if not incumbent_eligible:
         # The incumbent is not permitted to serve. The pointer MUST move, and
         # a supported lead is not required — continuing to serve a known-unfit
         # arm is never the safer option.
+        #
+        # The age bar and the evidence bar are PROMOTION bars, so they rank
+        # this branch's candidates but cannot empty it: with the incumbent
+        # barred from serving, "nothing clears the bar" must still yield an
+        # arm, or the slot serves an arm it knows is unfit. The ordered
+        # fallback — promotable first, then any measured comparison, then the
+        # first eligible arm — is why the age rule is applied here as a
+        # PREFERENCE and everywhere else as a veto.
         candidates = supported or [
-            (c.bound.lower if c.bound else float("-inf"), c)
+            (
+                c.window.mean_diff
+                if config.promote_evidence == EVIDENCE_POINT
+                else (c.bound.lower if c.bound else float("-inf")),
+                c,
+            )
             for c in comparisons
-            if c.status == "measured"
+            if c.status == "measured" and c.window.measurable
         ]
         if candidates:
             chosen = max(candidates, key=lambda item: (item[0], item[1].challenger))[1].challenger
@@ -588,16 +755,24 @@ def decide_pointer(
             champion=incumbent,
             moved=False,
             status="held",
-            reason="no challenger's lead is supported by the anytime-valid sequence",
+            reason=_hold_reason(config, comparisons),
             comparisons=tuple(comparisons),
             ineligible=ineligible,
         )
 
-    # Rank supported challengers by the SUPPORTED lead — the confidence
-    # sequence's lower bound. This is what makes leads on windows of different
-    # lengths comparable without a cross-window aggregation: a short window
-    # produces a wide interval and therefore a small lower bound on its own.
-    winner_lower, winner = max(supported, key=lambda item: (item[0], item[1].challenger))
+    # Rank promotable challengers by the statistic the evidence mode decided
+    # on. Under `anytime_valid` that is the confidence sequence's lower bound,
+    # which is what makes leads on windows of different lengths comparable
+    # without a cross-window aggregation: a short window produces a wide
+    # interval and therefore a small lower bound on its own. Under `point` it
+    # is the mean paired difference, and `promote_min_weeks` is the only thing
+    # standing between a one-week fluke and the pointer — which is why that
+    # mode is declared per slot with its minimum, never on its own.
+    winner_key, winner = max(supported, key=lambda item: (item[0], item[1].challenger))
+    if config.promote_evidence == EVIDENCE_POINT:
+        evidence = f"point estimate, mean paired difference {winner_key:.6g} > 0"
+    else:
+        evidence = f"anytime-valid sequence, lower bound {winner_key:.6g} > 0"
     return PointerDecision(
         slot=config.slot,
         as_of=as_of,
@@ -607,7 +782,8 @@ def decide_pointer(
         status="decided",
         reason=(
             f"{winner.challenger} leads {incumbent} by {winner.window.mean_diff:.6g} over {winner.window.n_dates} paired date(s) ({winner.window.weeks} week(s)); "
-            f"confidence-sequence lower bound {winner_lower:.6g} > 0"
+            f"decided on the {evidence} "
+            f"(promote_evidence={config.promote_evidence}, promote_min_weeks={config.promote_min_weeks})"
         ),
         comparisons=tuple(comparisons),
         ineligible=ineligible,
@@ -862,4 +1038,5 @@ def run_cycle(
         retirements=retirements,
         scored_arms=tuple(sorted(series_by_arm)),
         active_arms=active,
+        config=config,
     )
