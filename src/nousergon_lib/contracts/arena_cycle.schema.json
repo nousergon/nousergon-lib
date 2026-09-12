@@ -26,6 +26,27 @@
       "description": "The population an arm is graded against. Default 'population' — the set the arm selected FROM. A selection-stage slot graded against SPY inverts wins and losses (measured 2026-08-17)."
     },
     "as_of": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+    "config": {
+      "type": "object",
+      "description": "The ArenaConfig parameters in force for THIS cycle, so the decision can be reconstructed from the artifact alone rather than from the config as it stands today (principles.md §2.1) — `promote_evidence` and `promote_min_weeks` in particular change what a given set of comparisons decides. `slot`, `slot_kind` and `benchmark` are deliberately NOT repeated here: they are top-level fields, and a fact emitted twice is a fact that can disagree with itself. ABSENT — as opposed to present — means the document was written before this block existed, which is why it is optional rather than required; same convention as `dimensions` on an arm series.",
+      "properties": {
+        "alpha": {"type": "number", "description": "Two-sided level of the anytime-valid sequence governing PROMOTION."},
+        "diff_clip": {"type": "number", "description": "Declared bound on a per-date score DIFFERENCE, in the score's units; the sub-Gaussian scale is derived from it."},
+        "variance_mode": {"type": "string"},
+        "opt_n": {"type": "integer"},
+        "min_paired_dates": {"type": "integer", "description": "Minimum paired dates before a comparison is attempted at all. NOT a thin-evidence gate."},
+        "cap": {"type": "integer", "description": "Brian's cap, applied as a RETIREMENT criterion, never as an admission gate."},
+        "grace_weeks": {"type": "integer", "description": "An arm younger than this is never retired, whatever its ranking."},
+        "promote_min_weeks": {"type": "integer", "minimum": 1, "description": "Minimum PAIRED weeks a challenger must share with the incumbent before it can take the pointer (Brian ruling 2026-09-01). A comparison below it stays in `decision.comparisons` with status `measured` and a reason naming the shortfall — never dropped, because a lead that was measured and held back is a fact about the cycle, not an absence."},
+        "promote_evidence": {
+          "enum": ["anytime_valid", "point"],
+          "description": "Evidence bar for SERVING. `anytime_valid` (the policy default, champion-challenger-policy.md §5.0) promotes only a lead the confidence sequence's lower bound supports. `point` promotes the age-eligible challenger with the largest positive mean paired difference, and is a PER-SLOT DECLARED DELTA recorded under §5.2(B) — never a fleet default (Brian ruling 2026-09-12, alpha-engine-config-I10546). The confidence sequence is computed and emitted on every comparison under both modes; under `point` it simply does not decide."
+        },
+        "min_active_arms": {"type": "integer", "description": "Never retire below this many active arms."},
+        "retired_trailing_cycles": {"type": "integer", "description": "Cycles a retired arm keeps being scored for past retirement (§3)."},
+        "retire_evidence": {"enum": ["anytime_valid", "point"], "description": "Evidence bar for a pairwise loss in the RETIREMENT ranking."}
+      }
+    },
     "scored_arms": {"type": "array", "items": {"type": "string"}},
     "active_arms": {"type": "array", "items": {"type": "string"}},
     "ladders": {

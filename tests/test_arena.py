@@ -33,6 +33,7 @@ from nousergon_lib.arena import (
 from nousergon_lib.arena.engine import ArenaConfigError
 from nousergon_lib.arena.ranking import (
     EVIDENCE_ANYTIME_VALID,
+    EVIDENCE_POINT,
     ArmStanding,
     PairwiseRanking,
 )
@@ -328,6 +329,146 @@ def test_promote_min_weeks_defaults_to_four():
 def test_promote_min_weeks_below_one_is_refused():
     with pytest.raises(ArenaConfigError, match="promote_min_weeks"):
         _config(promote_min_weeks=0)
+
+
+def test_promote_evidence_defaults_to_the_anytime_valid_sequence():
+    """`champion-challenger-policy.md` §5.0's bar is the FLEET DEFAULT, and
+    `point` is a per-slot declared delta (Brian ruling 2026-09-12,
+    `alpha-engine-config-I10546`). A default of `point` would silently lower
+    the promotion bar for every slot that never declared one."""
+    assert _config().promote_evidence == EVIDENCE_ANYTIME_VALID
+
+
+def test_promote_evidence_rejects_anything_but_the_two_declared_modes():
+    with pytest.raises(ArenaConfigError, match="promote_evidence"):
+        _config(promote_evidence="bootstrap")
+
+
+def test_the_emitted_cycle_records_the_evidence_mode_that_was_in_force():
+    """§2.1: the artifact must be reconstructable without today's config.
+    `promote_evidence` changes what a given set of comparisons decides, so a
+    record omitting it cannot explain its own pointer."""
+    reg, ids, series = _cycle_fixture()
+    cycle = run_cycle(
+        _config(promote_evidence=EVIDENCE_POINT, promote_min_weeks=2),
+        AS_OF,
+        reg,
+        series,
+        incumbent=ids["b"],
+    )
+    emitted = cycle.to_dict()["config"]
+    assert emitted["promote_evidence"] == EVIDENCE_POINT
+    assert emitted["promote_min_weeks"] == 2
+
+
+# --------------------------------------------------------------------------
+# promote_min_weeks and promote_evidence (Brian rulings 2026-09-01, 2026-09-12)
+# --------------------------------------------------------------------------
+
+
+def test_a_supported_lead_below_promote_min_weeks_cannot_take_the_pointer():
+    """Brian's 2026-09-01 ruling, which the engine did not enforce at all
+    until `alpha-engine-config-I10546`: `promote_min_weeks` existed on
+    `ArenaConfig` and nothing in `decide_pointer` read it, so a v1 research
+    slot had no promotion age whatever its config said."""
+    # 40 consecutive dates — a lead the anytime-valid sequence DOES support,
+    # spanning six paired weeks against a slot that requires eight.
+    inc = _series("inc", [0.00] * 40, step=1)
+    chal = _series("chal", [0.03] * 40, step=1)
+    decision = decide_pointer(
+        _config(promote_min_weeks=8), AS_OF, "inc", {"inc": inc, "chal": chal}
+    )
+    assert decision.champion == "inc"
+    assert not decision.moved
+    assert decision.status == "held"
+    assert "promote_min_weeks=8" in decision.reason
+    # Measured, kept, and visibly held back — never dropped and never
+    # restyled as unmeasurable (§7.2).
+    (comparison,) = decision.comparisons
+    assert comparison.status == "measured"
+    assert comparison.bound is not None
+    assert comparison.bound.supported, "fixture must clear the EVIDENCE bar, so only age holds it"
+    assert "below promote_min_weeks: 6 paired week(s) < 8" in comparison.reason
+
+
+def test_point_mode_promotes_a_positive_mean_lead_the_sequence_does_not_support():
+    """The whole point of the `universe_cut` delta: at two paired weeks the
+    confidence sequence supports nothing, and Brian ruled the slot promotes
+    anyway — "we will keep promoting any losing challenger on a weekly basis
+    so we aren't losing anything" (2026-09-12)."""
+    inc = _series("inc", [0.00, 0.00, 0.00])
+    chal = _series("chal", [0.02, -0.01, 0.03])
+    config = _config(promote_evidence=EVIDENCE_POINT, promote_min_weeks=2)
+    decision = decide_pointer(config, AS_OF, "inc", {"inc": inc, "chal": chal})
+
+    (comparison,) = decision.comparisons
+    assert not comparison.supported, "fixture must NOT clear the anytime-valid bar"
+    assert comparison.bound is not None, "the bound is still computed and carried"
+    assert decision.champion == "chal"
+    assert decision.moved
+    assert decision.status == "decided"
+    assert "point estimate" in decision.reason
+    assert "promote_evidence=point" in decision.reason
+
+
+def test_point_mode_holds_when_no_age_eligible_challenger_leads():
+    inc = _series("inc", [0.02, 0.02, 0.02])
+    chal = _series("chal", [0.01, 0.00, 0.02])
+    decision = decide_pointer(
+        _config(promote_evidence=EVIDENCE_POINT, promote_min_weeks=2),
+        AS_OF,
+        "inc",
+        {"inc": inc, "chal": chal},
+    )
+    assert decision.champion == "inc"
+    assert not decision.moved
+    assert decision.status == "held"
+    assert "point estimate" in decision.reason
+
+
+def test_point_mode_picks_the_largest_positive_mean_difference():
+    inc = _series("inc", [0.00, 0.00, 0.00])
+    small = _series("small", [0.01, 0.01, 0.01])
+    large = _series("large", [0.03, 0.03, 0.03])
+    decision = decide_pointer(
+        _config(promote_evidence=EVIDENCE_POINT, promote_min_weeks=2),
+        AS_OF,
+        "inc",
+        {"inc": inc, "small": small, "large": large},
+    )
+    assert decision.champion == "large"
+    assert decision.status == "decided"
+
+
+def test_point_mode_still_refuses_a_challenger_below_the_promotion_age():
+    """The age bar binds under BOTH evidence modes. Under `point` it is the
+    only thing standing between a one-week fluke and the pointer, which is
+    why the mode is never declared without its minimum."""
+    inc = _series("inc", [0.00, 0.00, 0.00])
+    old = _series("old", [0.01, 0.01, 0.01])
+    young = _series("young", [0.09, 0.09])
+    decision = decide_pointer(
+        _config(promote_evidence=EVIDENCE_POINT, promote_min_weeks=3),
+        AS_OF,
+        "inc",
+        {"inc": inc, "old": old, "young": young},
+    )
+    assert decision.champion == "old", "the younger arm leads by 9x and must not win"
+    by_arm = {c.challenger: c for c in decision.comparisons}
+    assert "below promote_min_weeks" in by_arm["young"].reason
+    assert by_arm["young"].status == "measured"
+
+
+def test_anytime_mode_is_unchanged_for_a_window_past_the_promotion_age():
+    """The age rule is the ONLY change to `anytime_valid` behaviour."""
+    inc = _series("inc", [0.00] * 60)
+    chal = _series("chal", [0.03] * 60)
+    decision = decide_pointer(
+        _config(promote_min_weeks=4), AS_OF, "inc", {"inc": inc, "chal": chal}
+    )
+    assert decision.champion == "chal"
+    assert decision.status == "decided"
+    assert "anytime-valid sequence" in decision.reason
 
 
 # --------------------------------------------------------------------------
