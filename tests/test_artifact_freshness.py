@@ -45,15 +45,22 @@ from nousergon_lib.artifact_freshness import (
     CompletenessCheck,
     CycleCompletion,
     DependencyGraph,
+    KeyTemplateError,
     _format_key,  # noqa: PLC2701 — unit-test the key axis split
     build_dependency_graph,
     check_completeness,
     check_freshness,
     cycle_completion,
+    has_wildcard_segment,
+    key_pattern,
+    key_suffix,
     leaf_alert_decisions,
+    listable_prefix,
     localize_root_causes,
+    matches_key_template,
     resolve_current_cycle,
     resolve_dedup_key,
+    validate_key_template,
 )
 from nousergon_lib.trading_calendar import last_closed_trading_day
 
@@ -2031,3 +2038,207 @@ def test_a_different_cap_pages_is_a_different_cache_entry():
     assert err_full is None
     assert key == "market_data/weekly/2026-08-14/short_interest.json"
     assert lm == datetime(2026, 8, 15, 9, 49, 5, tzinfo=timezone.utc)
+
+
+# ── The producer-chosen ``*`` segment (alpha-engine-config-I10200) ───────────
+#
+# `crucible-predictor` rescoped `predictor/diagnostics/oos_rows/…` by a model-
+# FAMILY segment under alpha-engine-config-I9378 so a parallel zoo spec could
+# not overwrite the champion's diagnostic. The registry had no way to say
+# "one producer-chosen segment here": `{model_version}` resolved nowhere, and
+# the flat template made the freshness monitor page CRITICAL daily
+# (sla_violated_by_minutes 5771 at the 2026-09-12T12:00Z sweep) for an
+# artifact that had existed since 2026-09-05.
+#
+# These tests pin the whole grammar, including the forms that must be
+# REJECTED — a wildcard that can match a directory, or two of them, is a row
+# that stops naming an artifact, and the three resolvers in this cascade must
+# agree about that independently.
+
+_OOS_DATED = "predictor/diagnostics/oos_rows/*/{date}.parquet"
+_OOS_LATEST = "predictor/diagnostics/oos_rows/*/latest.parquet"
+# The live instance, measured 2026-09-08 by head-object: model_version=v3.0-meta,
+# training_run_date=2026-09-04, n_rows=14940.
+_LIVE_KEY = "predictor/diagnostics/oos_rows/v3.0-meta/2026-09-04.parquet"
+_LIVE_LM = datetime(2026, 9, 5, 18, 28, 43, tzinfo=timezone.utc)
+# A Saturday inside the 10-calendar-day saturday_sf freshness floor of _LIVE_LM.
+_NOW = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+
+
+class TestKeyTemplateGrammar:
+    """The template grammar, independent of S3."""
+
+    def test_wildcard_detected_and_prefix_stops_before_it(self):
+        assert has_wildcard_segment(_OOS_DATED)
+        assert has_wildcard_segment(_OOS_LATEST)
+        assert not has_wildcard_segment("path/{date}/file.json")
+        assert listable_prefix(_OOS_DATED) == "predictor/diagnostics/oos_rows/"
+        assert listable_prefix(_OOS_LATEST) == "predictor/diagnostics/oos_rows/"
+
+    def test_existing_templates_resolve_exactly_as_before(self):
+        """The wildcard clause must not move a single existing row's verdict."""
+        assert listable_prefix("signals/{trading_day}/signals.json") == "signals/"
+        assert key_suffix("signals/{trading_day}/signals.json") == "/signals.json"
+        assert key_suffix("predictor/predictions/{trading_day}.json") == ".json"
+        assert key_suffix("health/predictor_inference.json") == (
+            "health/predictor_inference.json"
+        )
+
+    def test_suffix_of_a_placeholderless_wildcard_template(self):
+        """`oos_rows/*/latest.parquet` carries no brace at all — the suffix
+        comes from after the ``*`` or the LIST filter would be the whole key
+        including a literal ``*`` and match nothing."""
+        assert key_suffix(_OOS_LATEST) == "/latest.parquet"
+
+    def test_dated_pattern_matches_the_live_key(self):
+        assert matches_key_template(_LIVE_KEY, _OOS_DATED)
+
+    def test_dated_pattern_does_not_claim_the_latest_pointer(self):
+        """`{date}` narrows to an ISO date, so the dated row cannot take
+        `latest.parquet` as its freshest instance — the two rows are separate
+        registry entries with separate verdicts."""
+        latest = "predictor/diagnostics/oos_rows/v3.0-meta/latest.parquet"
+        assert not matches_key_template(latest, _OOS_DATED)
+        assert matches_key_template(latest, _OOS_LATEST)
+
+    def test_wildcard_matches_exactly_one_segment(self):
+        assert not matches_key_template(
+            "predictor/diagnostics/oos_rows/v3.0/meta/2026-09-04.parquet",
+            _OOS_DATED,
+        )
+        assert not matches_key_template(
+            "predictor/diagnostics/oos_rows/2026-09-04.parquet", _OOS_DATED,
+        )
+
+    def test_pattern_does_not_reach_a_sibling_diagnostic(self):
+        assert not matches_key_template(
+            "predictor/diagnostics/xsec_sd/v3.0-meta/2026-09-04.parquet",
+            _OOS_DATED,
+        )
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "a/**/b.json",          # the habitual form
+            "a/*/b/*/c.json",       # two producer-chosen segments
+            "a/v*/b.json",          # partial segment
+            "a/b/*",                # trailing wildcard = a directory
+            "a/b/*.parquet",        # partial + terminal
+            "*/a/b.json",           # partial? no — whole segment, but see below
+        ],
+    )
+    def test_illegal_wildcard_forms_are_rejected(self, template):
+        if template == "*/a/b.json":
+            # A leading whole-segment wildcard is LEGAL grammar; it is only
+            # useless (its listable prefix is empty, so it lists the bucket).
+            validate_key_template(template)
+            return
+        with pytest.raises(KeyTemplateError):
+            validate_key_template(template)
+
+    def test_unresolvable_placeholder_in_a_wildcard_template_raises(self):
+        with pytest.raises(KeyTemplateError):
+            key_pattern("a/*/{model_version}.parquet")
+
+    def test_templates_without_a_wildcard_are_always_valid(self):
+        validate_key_template("path/{date}/file.json")
+        validate_key_template("health/predictor_inference.json")
+
+    def test_spec_construction_rejects_an_illegal_template(self):
+        """A row that cannot be resolved must never reach the sweep and
+        quietly become a verdict."""
+        with pytest.raises(KeyTemplateError):
+            _spec(s3_key_template="predictor/diagnostics/oos_rows/*")
+        with pytest.raises(KeyTemplateError):
+            _spec(
+                s3_key_template=_OOS_DATED,
+                recovery_key_template="a/*/b/*/c.parquet",
+            )
+
+
+class TestWildcardSegmentFreshness:
+    """`check_freshness` over the producer-chosen segment."""
+
+    def test_resolves_the_2026_09_04_shaped_case(self):
+        """The Closes-when of alpha-engine-config-I10200: the dated row reads
+        FRESH off `oos_rows/v3.0-meta/2026-09-04.parquet` rather than paging
+        CRITICAL for an artifact that was there the whole time."""
+        s3 = _fake_s3(objects={_LIVE_KEY: _LIVE_LM})
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_DATED), _NOW)
+        assert result.state == "fresh"
+        assert result.observed_key == _LIVE_KEY
+        assert result.sla_violated_by_minutes == 0
+        # The probe LISTed; it never HEADed a key containing a literal "*".
+        assert s3.head_object.call_count == 0
+
+    def test_latest_pointer_row_lists_instead_of_heading_a_star(self):
+        """`oos_rows/*/latest.parquet` carries no brace, so before I10200 the
+        probe HEADed a literal `*`, 404'd, and reported `missing` forever."""
+        key = "predictor/diagnostics/oos_rows/v3.0-meta/latest.parquet"
+        s3 = _fake_s3(objects={key: _LIVE_LM})
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_LATEST), _NOW)
+        assert result.state == "fresh"
+        assert result.observed_key == key
+        assert s3.head_object.call_count == 0
+
+    def test_two_families_present_freshest_wins(self):
+        """Parallel zoo specs write side by side — the verdict is taken over
+        the newest matching instance, exactly as the date-templated rows do."""
+        older = "predictor/diagnostics/oos_rows/v3.0-meta/2026-09-04.parquet"
+        newer = "predictor/diagnostics/oos_rows/v4.0-zoo/2026-09-11.parquet"
+        s3 = _fake_s3(objects={
+            older: datetime(2026, 9, 5, 18, 28, tzinfo=timezone.utc),
+            newer: datetime(2026, 9, 12, 3, 15, tzinfo=timezone.utc),
+        })
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_DATED), _NOW)
+        assert result.state == "fresh"
+        assert result.observed_key == newer
+
+    def test_no_match_is_missing_and_never_falls_back_to_the_flat_key(self):
+        """The unscoped key is what I9378 removed to stop a zoo run
+        overwriting the champion's diagnostic. Finding it must NOT clear the
+        scoped row."""
+        flat = "predictor/diagnostics/oos_rows/2026-09-04.parquet"
+        s3 = _fake_s3(objects={flat: _LIVE_LM})
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_DATED), _NOW)
+        assert result.state == "missing"
+        assert result.observed_key == ""
+        assert "predictor/diagnostics/oos_rows/" in result.reason
+        assert _OOS_DATED in result.reason
+
+    def test_empty_prefix_is_missing(self):
+        s3 = _fake_s3(objects={})
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_DATED), _NOW)
+        assert result.state == "missing"
+
+    def test_stale_instance_still_reads_stale(self):
+        old_key = "predictor/diagnostics/oos_rows/v3.0-meta/2026-07-04.parquet"
+        s3 = _fake_s3(objects={
+            old_key: datetime(2026, 7, 5, 18, 28, tzinfo=timezone.utc),
+        })
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_DATED), _NOW)
+        assert result.state == "stale"
+        assert result.observed_key == old_key
+        assert result.sla_violated_by_minutes > 0
+
+    def test_list_probe_failure_is_not_a_missing_verdict(self):
+        s3 = _fake_s3(
+            objects={},
+            list_raises={"predictor/diagnostics/oos_rows/": RuntimeError("boom")},
+        )
+        result = check_freshness(s3, _spec(s3_key_template=_OOS_DATED), _NOW)
+        assert result.state == "probe_failed"
+
+    def test_canonical_key_reports_the_pattern_and_completeness_refuses_it(self):
+        """`canonical_key` is a reporting hint for a wildcard row, not a
+        gettable key — so the heavier second probe must refuse it by name
+        rather than 404 and report an S3-shaped error."""
+        s3 = _fake_s3(objects={_LIVE_KEY: _LIVE_LM})
+        spec = _spec(
+            s3_key_template=_OOS_DATED,
+            completeness=CompletenessCheck(kind="parquet_row_count", min_count=1),
+        )
+        result = check_freshness(s3, spec, _NOW)
+        assert "*" in result.canonical_key
+        with pytest.raises(ValueError, match="observed_key"):
+            check_completeness(s3, spec, result.canonical_key)

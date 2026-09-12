@@ -47,6 +47,13 @@ ships the freshness-monitor Lambda that wires the two together.
   stable per-cycle dedup key used by ``alerts.publish``.
 - :func:`resolve_current_cycle` — pure helper exposing the
   ``(cycle_start_utc, cycle_window_label)`` for testability.
+- :data:`WILDCARD_SEGMENT`, :func:`validate_key_template`,
+  :func:`has_wildcard_segment`, :func:`key_pattern`,
+  :func:`matches_key_template`, :func:`listable_prefix`, :func:`key_suffix`
+  — the ``s3_key_template`` grammar and its resolver, public so the
+  stage-output sweep and the registry validator resolve the SAME shapes
+  instead of each re-deriving them (alpha-engine-config-I10200,
+  ``policy-shared-code``).
 
 **Design invariants** (mirror the plan doc at
 ``~/Development/alpha-engine-docs/private/artifact-freshness-monitor-260527.md``):
@@ -82,6 +89,7 @@ ships the freshness-monitor Lambda that wires the two together.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -396,6 +404,12 @@ class ArtifactSpec:
                 )
         self._validate_active_window()
         self._validate_lineage()
+        # alpha-engine-config-I10200 — an unresolvable wildcard shape is
+        # rejected at spec construction, not at probe time. A row that cannot
+        # be resolved must never reach the sweep and quietly become a verdict.
+        validate_key_template(self.s3_key_template)
+        if self.recovery_key_template is not None:
+            validate_key_template(self.recovery_key_template)
 
     def _validate_liveness_via(self) -> None:
         """Validate the ``event_driven`` ↔ ``liveness_via`` coupling.
@@ -549,7 +563,17 @@ class CheckResult:
             ``fresh`` / ``grace_period`` / ``probe_failed``.
         reason: Human-readable diagnostic; routed into the alert body
             and the dashboard surface.
-        canonical_key: The resolved canonical key the probe HEADed.
+        canonical_key: The resolved canonical key the probe HEADed. For a
+            template carrying the producer-chosen ``*`` segment
+            (alpha-engine-config-I10200) this is the PATTERN, ``*`` and all —
+            it is a reporting hint about where the artifact was expected, and
+            it is not a key any client can GET. Use ``observed_key`` for that.
+        observed_key: The key of the freshest matching instance actually
+            found, or ``""`` when none was (``missing`` / ``probe_failed`` /
+            a short-circuit). Always a real S3 key when non-empty, so a
+            second, heavier probe (``check_completeness``) can read the same
+            object the freshness verdict was taken over instead of
+            re-deriving one from the template.
         recovery_substituted: ``True`` when the canonical key was
             missing / stale but the recovery key was fresh (i.e. the
             recovery-SF-substitution semantic kicked in).
@@ -560,6 +584,7 @@ class CheckResult:
     sla_violated_by_minutes: int = 0
     reason: str = ""
     canonical_key: str = ""
+    observed_key: str = ""
     recovery_substituted: bool = False
 
 
@@ -837,27 +862,201 @@ def _head_object(
 # reads STALE; nothing at all reads MISSING.
 
 
+# ── The producer-chosen segment: one literal ``*`` path segment ─────────────
+#
+# Some producers scope a key by a segment whose VALUE they choose at write
+# time and no consumer can derive. The live instance is the predictor's OOS
+# diagnostic: ``predictor/diagnostics/oos_rows/{model_version}/{date}.parquet``
+# (alpha-engine-config-I9378), where ``model_version`` is the model FAMILY the
+# producer trained, chosen so a parallel zoo spec cannot overwrite the
+# champion's diagnostic. The registry cannot resolve that value — and a fourth
+# ``{placeholder}`` would have had to, so the registry declares the segment's
+# EXISTENCE instead of its value:
+#
+#     predictor/diagnostics/oos_rows/*/{date}.parquet
+#     predictor/diagnostics/oos_rows/*/latest.parquet
+#
+# A single literal ``*`` occupying one whole path segment means "exactly one
+# producer-chosen segment here". Resolution is prefix-plus-shape: LIST the
+# fixed prefix before the ``*``, then keep the objects whose key MATCHES the
+# template's shape, and the freshness verdict is taken over the newest
+# survivor — the same recency model every date-templated row already uses, one
+# segment wider. Zero matches is ``missing``, loud, and NEVER a fallback to
+# the unscoped key: falling back would resurrect the overwrite hazard I9378
+# exists to prevent (alpha-engine-config-I10200).
+#
+# Nothing here knows what a predictor is. The mechanism is the registry's, and
+# the next producer to scope a key the same way declares it the same way.
+WILDCARD_SEGMENT: Final[str] = "*"
+
+# A wildcard segment matches one non-empty path segment. ``{date}`` /
+# ``{trading_day}`` are date-shaped by the registry's own convention, so they
+# narrow to an ISO date rather than to "anything": it is what keeps
+# ``oos_rows/*/{date}.parquet`` from claiming ``oos_rows/v3.0-meta/latest.parquet``
+# as its freshest instance. ``{cycle_label}`` has no fixed shape.
+_SEGMENT_RE: Final[str] = r"[^/]+"
+_ISO_DATE_RE: Final[str] = r"\d{4}-\d{2}-\d{2}"
+_PLACEHOLDER_SHAPES: Final[dict[str, str]] = {
+    "date": _ISO_DATE_RE,
+    "trading_day": _ISO_DATE_RE,
+    "cycle_label": _SEGMENT_RE,
+}
+_TEMPLATE_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\{([a-zA-Z_]+)\}|\*")
+
+
+class KeyTemplateError(ValueError):
+    """An ``s3_key_template`` whose wildcard use cannot be resolved."""
+
+
+def has_wildcard_segment(template: str) -> bool:
+    """True when ``template`` carries the producer-chosen ``*`` segment."""
+    return WILDCARD_SEGMENT in template
+
+
+def validate_key_template(template: str) -> None:
+    """Raise :class:`KeyTemplateError` unless ``template``'s wildcard use is
+    resolvable.
+
+    The rules are deliberately narrow, because every relaxation is a shape the
+    three resolvers (this module, ``nousergon-data``'s stage-output sweep,
+    ``alpha-engine-config``'s registry validator) would each have to agree
+    about independently:
+
+    * **At most one** ``*``. Two producer-chosen segments in one key is a
+      cardinality this mechanism does not claim to express, and a template
+      that silently matched a cross-product of them would report the newest
+      object of a set nobody declared.
+    * ``*`` **occupies a whole segment.** ``oos_rows/*/latest.parquet`` is
+      legal; ``oos_rows/v*/latest.parquet`` and ``oos_rows/*.parquet`` are
+      not — a partial-segment glob makes the fixed prefix and the shape match
+      disagree about where the producer's choice begins.
+    * ``*`` **is never the last segment.** A trailing wildcard matches every
+      object under the prefix, so the row would stop naming an artifact and
+      start naming a directory; the terminal segment stays literal (or a
+      resolvable placeholder) so the shape match can still tell the artifact
+      from its siblings.
+    * ``**`` is rejected by the first two rules and named here because it is
+      the form a reader reaches for out of habit.
+    """
+    count = template.count(WILDCARD_SEGMENT)
+    if count == 0:
+        return
+    if count > 1:
+        raise KeyTemplateError(
+            f"s3_key_template={template!r} carries {count} '*' segments — at "
+            f"most one producer-chosen segment is expressible (and '**' is "
+            f"never legal); see nousergon_lib.artifact_freshness."
+            f"validate_key_template (alpha-engine-config-I10200)"
+        )
+    segments = template.split("/")
+    wildcard_at = [
+        i for i, seg in enumerate(segments) if WILDCARD_SEGMENT in seg
+    ][0]
+    if segments[wildcard_at] != WILDCARD_SEGMENT:
+        raise KeyTemplateError(
+            f"s3_key_template={template!r} uses '*' inside the path segment "
+            f"{segments[wildcard_at]!r} — the wildcard must occupy one WHOLE "
+            f"segment (…/*/…), never part of one "
+            f"(alpha-engine-config-I10200)"
+        )
+    if wildcard_at == len(segments) - 1:
+        raise KeyTemplateError(
+            f"s3_key_template={template!r} ends in '*' — a trailing wildcard "
+            f"names a directory rather than an artifact and would match every "
+            f"object under the prefix; the last segment must stay literal or "
+            f"a resolvable placeholder (alpha-engine-config-I10200)"
+        )
+
+
+def key_pattern(template: str) -> re.Pattern[str]:
+    """Compile ``template`` to the regex its instances must fully match.
+
+    ``*`` and ``{cycle_label}`` become one non-empty path segment;
+    ``{date}`` / ``{trading_day}`` become an ISO date; every other character
+    is matched literally. Used ONLY for wildcard templates — a template
+    without a ``*`` keeps the historical fixed-suffix filter byte for byte,
+    so this function can never change an existing row's verdict.
+    """
+    validate_key_template(template)
+    out: list[str] = []
+    pos = 0
+    for match in _TEMPLATE_TOKEN_RE.finditer(template):
+        out.append(re.escape(template[pos:match.start()]))
+        name = match.group(1)
+        if name is None:
+            out.append(_SEGMENT_RE)
+        else:
+            shape = _PLACEHOLDER_SHAPES.get(name)
+            if shape is None:
+                raise KeyTemplateError(
+                    f"s3_key_template={template!r} carries placeholder "
+                    f"{{{name}}}, which this module cannot resolve — allowed: "
+                    f"{sorted(_PLACEHOLDER_SHAPES)}"
+                )
+            out.append(shape)
+        pos = match.end()
+    out.append(re.escape(template[pos:]))
+    return re.compile("".join(out) + r"\Z")
+
+
+def matches_key_template(key: str, template: str) -> bool:
+    """True when ``key`` is an instance of the wildcard ``template``."""
+    return key_pattern(template).match(key) is not None
+
+
 def _is_templated(template: str) -> bool:
-    """True when the key carries a per-cycle ``{...}`` placeholder."""
-    return "{" in template
+    """True when the key carries a per-cycle ``{...}`` placeholder or the
+    producer-chosen ``*`` segment — i.e. when the probe must LIST the prefix
+    and pick the newest instance rather than HEAD one fixed key.
+
+    The ``*`` clause matters on its own: ``oos_rows/*/latest.parquet`` carries
+    no brace at all, so without it the probe would HEAD a key containing a
+    literal ``*``, 404, and report ``missing`` forever
+    (alpha-engine-config-I10200).
+    """
+    return "{" in template or has_wildcard_segment(template)
+
+
+def listable_prefix(template: str) -> str:
+    """The fixed prefix of a templated key — everything before the first
+    ``{`` placeholder or ``*`` segment, whichever comes first.
+    ``signals/{trading_day}/signals.json`` -> ``signals/``;
+    ``market_data/weekly/{date}/manifest.json`` -> ``market_data/weekly/``;
+    ``predictor/diagnostics/oos_rows/*/{date}.parquet`` ->
+    ``predictor/diagnostics/oos_rows/``.
+    """
+    return re.split(r"[{*]", template, maxsplit=1)[0]
 
 
 def _listable_prefix(template: str) -> str:
-    """The fixed prefix of a templated key — everything before the first
-    ``{`` placeholder. ``signals/{trading_day}/signals.json`` -> ``signals/``;
-    ``market_data/weekly/{date}/manifest.json`` -> ``market_data/weekly/``.
+    """Backwards-compatible private alias for :func:`listable_prefix`."""
+    return listable_prefix(template)
+
+
+def key_suffix(template: str) -> str:
+    """The fixed suffix used to filter listed objects to the artifact (not its
+    siblings under the same prefix) — everything after the last ``}``
+    placeholder, or after the ``*`` segment when the template carries no
+    placeholder at all.
+
+    ``signals/{trading_day}/signals.json`` -> ``/signals.json``;
+    ``predictor/predictions/{trading_day}.json`` -> ``.json``;
+    ``predictor/diagnostics/oos_rows/*/latest.parquet`` -> ``/latest.parquet``.
+    Empty string when the placeholder is terminal (rare).
+
+    For a wildcard template this suffix is only a LIST-side coarse filter;
+    the authoritative test is :func:`matches_key_template`.
     """
-    return template.split("{", 1)[0]
+    if "}" in template:
+        return template.rsplit("}", 1)[-1]
+    if has_wildcard_segment(template):
+        return template.rsplit(WILDCARD_SEGMENT, 1)[-1]
+    return template
 
 
 def _key_suffix(template: str) -> str:
-    """The fixed suffix after the last ``}`` placeholder — used to filter
-    listed objects to the artifact (not its siblings under the same prefix).
-    ``signals/{trading_day}/signals.json`` -> ``/signals.json``;
-    ``predictor/predictions/{trading_day}.json`` -> ``.json``. Empty string
-    when the placeholder is terminal (rare).
-    """
-    return template.rsplit("}", 1)[-1]
+    """Backwards-compatible private alias for :func:`key_suffix`."""
+    return key_suffix(template)
 
 
 def _list_prefix(
@@ -948,6 +1147,7 @@ def _newest_under_prefix(
     *,
     cap_pages: int = 64,
     cache: dict | None = None,
+    pattern: re.Pattern[str] | None = None,
 ) -> tuple[str, datetime | None, str | None]:
     """Return ``(newest_key, newest_last_modified, probe_error)`` for the
     most-recently-modified object under ``prefix`` whose key ends with
@@ -1005,6 +1205,14 @@ def _newest_under_prefix(
 
     ``cache=None`` (the default) is today's behaviour exactly: one LIST per
     call, no sharing.
+
+    **``pattern`` — the wildcard-segment filter** (alpha-engine-config-I10200).
+    When given it REPLACES the ``suffix`` filter: a listed key survives only
+    if it fully matches the compiled template shape. Passed only for templates
+    carrying the producer-chosen ``*`` segment, where a bare suffix filter is
+    too loose (``.parquet`` under ``predictor/diagnostics/`` would sweep in
+    every sibling diagnostic). ``pattern=None`` is the historical suffix
+    filter, unchanged.
     """
     key_ = (bucket, prefix, cap_pages)
     entry = None if cache is None else cache.get(key_)
@@ -1019,7 +1227,10 @@ def _newest_under_prefix(
     newest_lm: datetime | None = None
     newest_key = ""
     for key, lm in objects:
-        if suffix and not key.endswith(suffix):
+        if pattern is not None:
+            if pattern.match(key) is None:
+                continue
+        elif suffix and not key.endswith(suffix):
             continue
         if newest_lm is None or lm > newest_lm:
             newest_lm, newest_key = lm, key
@@ -1457,8 +1668,9 @@ def check_freshness(
         if _is_templated(tmpl):
             return _newest_under_prefix(
                 s3_client, spec.s3_bucket,
-                _listable_prefix(tmpl), _key_suffix(tmpl),
+                listable_prefix(tmpl), key_suffix(tmpl),
                 cache=list_cache,
+                pattern=key_pattern(tmpl) if has_wildcard_segment(tmpl) else None,
             )
         state, lm, reason = _head_object(s3_client, spec.s3_bucket, tmpl)
         if state == "probe_failed":
@@ -1499,7 +1711,8 @@ def check_freshness(
             ),
             reason=(
                 f"no instance found under "
-                f"{_listable_prefix(spec.s3_key_template)!r} "
+                f"{listable_prefix(spec.s3_key_template)!r} "
+                f"matching {spec.s3_key_template!r} "
                 f"(expected ~{expected_key})"
             ),
             canonical_key=expected_key,
@@ -1510,6 +1723,7 @@ def check_freshness(
         return CheckResult(
             state="fresh",
             last_modified=newest_lm,
+            observed_key=newest_key,
             reason=(
                 f"freshest instance {newest_key} "
                 f"last_modified={newest_lm.isoformat()} (age {age_min}min) "
@@ -1522,6 +1736,7 @@ def check_freshness(
     return CheckResult(
         state="stale",
         last_modified=newest_lm,
+        observed_key=newest_key,
         sla_violated_by_minutes=int(
             max(0, (floor - newest_lm).total_seconds() // 60)
         ),
@@ -1556,6 +1771,18 @@ def check_completeness(
     if spec.completeness is None:
         raise ValueError(
             "check_completeness called on a spec with no completeness predicate"
+        )
+    if has_wildcard_segment(canonical_key):
+        # A wildcard PATTERN is not a key. GET-ing it would 404 and this
+        # function would report probe_failed with an error that reads like an
+        # S3 problem. Callers pass ``CheckResult.observed_key`` — the instance
+        # the freshness verdict was actually taken over
+        # (alpha-engine-config-I10200).
+        raise ValueError(
+            f"check_completeness called with the wildcard PATTERN "
+            f"{canonical_key!r} rather than a resolved key — pass "
+            f"CheckResult.observed_key, which names the instance the "
+            f"freshness verdict was taken over"
         )
     check = spec.completeness
     try:
