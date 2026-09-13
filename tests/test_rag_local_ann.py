@@ -21,6 +21,22 @@ from nousergon_lib.rag.parquet_mirror import mirror_document_to_parquet
 
 BUCKET = "alpha-engine-research"
 
+# nousergon-lib-I265: the `corpus` fixture below writes through
+# mirror_document_to_parquet, whose except-Exception swallow (deliberate —
+# see parquet_mirror.py's module docstring) turns a missing pandas/pyarrow
+# into a silent no-op write rather than a raised error. Every test here
+# ultimately depends on that write having actually happened, so without this
+# explicit skip a missing [rag-parquet] extra reads as a broken mirror
+# (empty corpus, failing assertions) instead of an absent dependency.
+pytest.importorskip(
+    "pandas",
+    reason="requires the nousergon-lib[rag-parquet] extra (pandas)",
+)
+pytest.importorskip(
+    "pyarrow",
+    reason="requires the nousergon-lib[rag-parquet] extra (pyarrow)",
+)
+
 _hnswlib_available = (
     subprocess.run(
         [sys.executable, "-c", "import hnswlib"],

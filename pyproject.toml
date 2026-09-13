@@ -78,6 +78,29 @@ rag = [
     "pgvector>=0.2",
     "numpy>=1.24",
 ]
+# S3 parquet batch-tier mirror (nousergon_lib.rag.parquet_mirror, config#2958).
+# Referenced by that module's own docstring and by test.yml's install step —
+# added here to make the reference true (nousergon-lib-I265): it did not
+# previously exist, so `pip install nousergon-lib[rag-parquet]` silently
+# installed nothing extra and mirror writes failed via the module's
+# best-effort except-Exception swallow (missing pyarrow -> None return,
+# indistinguishable from a real mirror bug without this extra to name it).
+rag-parquet = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+]
+# In-process HNSW batch index over the parquet mirror
+# (nousergon_lib.rag.local_ann, config#2958). Needs [rag-parquet]'s
+# pandas/pyarrow (reads the mirror back) plus hnswlib for the index itself.
+# hnswlib's pre-compiled wheel can SIGILL on some CI runners (see
+# tests/test_rag_local_ann.py's subprocess-probe comment) — that's a runtime
+# concern for the test suite, not a reason to leave the extra undeclared.
+rag-local-ann = [
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "hnswlib>=0.8",
+    "numpy>=1.24",
+]
 # Cross-encoder rerank dependency. Pulls torch + transformers + the
 # ~600MB BAAI bge-reranker-v2-m3 model on first use. Kept as a
 # separate extra so vector/hybrid-only consumers don't pay the install
