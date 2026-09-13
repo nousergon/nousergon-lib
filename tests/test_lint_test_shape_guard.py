@@ -150,6 +150,41 @@ def test_accepts_test_class_method(tmp_path):
     assert _rc(tmp_path) == 0
 
 
+def test_accepts_unittest_testcase_class_not_named_test_star(tmp_path):
+    """pytest collects ANY unittest.TestCase subclass regardless of its
+    name -- the `Test*` prefix is a pytest-native heuristic, not a unittest
+    rule. Reproduces nousergon-data
+    tests/test_sf_pipeline_status_console_link_wiring.py's
+    `PipelineStatusConsoleLinkWiringTest(unittest.TestCase)`, which a first
+    revision of this guard false-flagged."""
+    _write(
+        tmp_path,
+        "tests/test_unittest_style.py",
+        "import unittest\n"
+        "\n"
+        "\n"
+        "class PipelineStatusConsoleLinkWiringTest(unittest.TestCase):\n"
+        "    def test_each_template_has_terminal_notify_states(self):\n"
+        "        self.assertTrue(True)\n",
+    )
+    assert _rc(tmp_path) == 0
+
+
+def test_accepts_bare_testcase_import_not_named_test_star(tmp_path):
+    """`from unittest import TestCase` spelling, same rule."""
+    _write(
+        tmp_path,
+        "tests/test_bare_testcase.py",
+        "from unittest import TestCase\n"
+        "\n"
+        "\n"
+        "class ConsoleLinkWiring(TestCase):\n"
+        "    def test_it(self):\n"
+        "        self.assertTrue(True)\n",
+    )
+    assert _rc(tmp_path) == 0
+
+
 def test_accepts_nested_test_class_inside_test_class(tmp_path):
     """`Test*` classes may legally nest inside another `Test*` class."""
     _write(

@@ -117,11 +117,38 @@ def _describe(node: Optional[ast.AST]) -> str:
     return type(node).__name__
 
 
+def _is_unittest_testcase_base(base: ast.expr) -> bool:
+    """`class Foo(unittest.TestCase)` or `class Foo(TestCase)`.
+
+    pytest's unittest integration collects ANY `unittest.TestCase` subclass
+    regardless of class name — the `Test*` naming convention is a pytest-native
+    heuristic, not a rule unittest-style suites follow. A guard that only
+    recognises `Test*` names flags every legitimately-collected
+    `FooBarTest(unittest.TestCase)` class as an illegal container for its own
+    `test_*` methods. Measured live: `nousergon-data`
+    `tests/test_sf_pipeline_status_console_link_wiring.py`'s
+    `PipelineStatusConsoleLinkWiringTest(unittest.TestCase)`.
+
+    Syntactic only (no import resolution) — matches the common spellings:
+    a bare `TestCase` name (``from unittest import TestCase``) or an
+    attribute access ending in ``TestCase`` (``unittest.TestCase``,
+    ``unittest.case.TestCase``).
+    """
+    if isinstance(base, ast.Name):
+        return base.id == "TestCase"
+    if isinstance(base, ast.Attribute):
+        return base.attr == "TestCase"
+    return False
+
+
 def _is_legal_container(node: Optional[ast.AST]) -> bool:
     if isinstance(node, ast.Module):
         return True
-    if isinstance(node, ast.ClassDef) and node.name.startswith(_TEST_CLASS_PREFIX):
-        return True
+    if isinstance(node, ast.ClassDef):
+        if node.name.startswith(_TEST_CLASS_PREFIX):
+            return True
+        if any(_is_unittest_testcase_base(base) for base in node.bases):
+            return True
     return False
 
 
