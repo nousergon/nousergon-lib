@@ -46,8 +46,9 @@ champion-challenger-policy.md §5.1).
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 __all__ = [
     "ConfSeqBound",
@@ -110,6 +111,30 @@ class ConfSeqBound:
             "n_clipped": self.n_clipped,
             "supported": self.supported,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ConfSeqBound:
+        """The inverse of :meth:`to_dict`.
+
+        Every field ``to_dict`` emits except ``supported`` is a real
+        constructor argument here — ``supported`` is a derived property
+        (``lower > 0.0``) and is recomputed from the restored ``lower``
+        rather than read back, so a caller that hand-edited ``supported``
+        without touching ``lower`` cannot smuggle a disagreement between the
+        two into a reconstructed bound.
+        """
+        return cls(
+            mean=float(data["mean"]),
+            lower=float(data["lower"]),
+            upper=float(data["upper"]),
+            radius=float(data["radius"]),
+            n=int(data["n"]),
+            alpha=float(data["alpha"]),
+            sigma=float(data["sigma"]),
+            variance_mode=str(data["variance_mode"]),
+            method=str(data["method"]),
+            n_clipped=int(data["n_clipped"]),
+        )
 
 
 def _sample_sigma(values: Sequence[float], mean: float) -> float:

@@ -315,6 +315,46 @@ class ArenaConfig:
             "retire_evidence": self.retire_evidence,
         }
 
+    @classmethod
+    def from_dict(
+        cls, data: Mapping[str, Any], *, slot: str, slot_kind: str, benchmark: str
+    ) -> ArenaConfig:
+        """The inverse of :meth:`to_dict`.
+
+        ``slot``, ``slot_kind`` and ``benchmark`` are required KEYWORD
+        arguments rather than read off ``data``, because :meth:`to_dict`
+        deliberately omits them — they already live on the enclosing
+        :class:`ArenaCycle` and a fact emitted twice is a fact that can
+        disagree with itself. A caller reconstructing a whole cycle passes
+        the cycle's own top-level fields; :meth:`ArenaCycle.from_dict` does
+        exactly that.
+
+        ``max_ladder_weeks`` is NOT recoverable — :meth:`to_dict` never
+        emits it ("never affects a decision") — so it is left at its
+        dataclass default (``None``, no cap) rather than guessed. That is
+        the one field on which a reconstructed ``ArenaConfig`` can
+        legitimately differ from the config a cycle was actually produced
+        under; nothing it governs (ladder emission size) is read by a
+        decision.
+        """
+        return cls(
+            slot=slot,
+            slot_kind=slot_kind,
+            benchmark=benchmark,
+            alpha=float(data["alpha"]),
+            diff_clip=float(data["diff_clip"]),
+            variance_mode=str(data["variance_mode"]),
+            opt_n=int(data["opt_n"]),
+            min_paired_dates=int(data["min_paired_dates"]),
+            cap=int(data["cap"]),
+            grace_weeks=int(data["grace_weeks"]),
+            promote_min_weeks=int(data["promote_min_weeks"]),
+            promote_evidence=str(data["promote_evidence"]),
+            min_active_arms=int(data["min_active_arms"]),
+            retired_trailing_cycles=int(data["retired_trailing_cycles"]),
+            retire_evidence=str(data["retire_evidence"]),
+        )
+
 
 @dataclass(frozen=True)
 class ServingPrecondition:
@@ -326,6 +366,15 @@ class ServingPrecondition:
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "passed": self.passed, "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ServingPrecondition:
+        """The inverse of :meth:`to_dict`. Every field is stored directly."""
+        return cls(
+            name=str(data["name"]),
+            passed=bool(data["passed"]),
+            reason=str(data.get("reason") or ""),
+        )
 
 
 def _eligible(preconditions: Sequence[ServingPrecondition]) -> bool:
@@ -361,6 +410,29 @@ class Comparison:
         )
         return payload
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Comparison:
+        """The inverse of :meth:`to_dict`.
+
+        ``window`` is reconstructed from the SAME dict: ``to_dict`` starts
+        from ``self.window.to_dict()`` and layers ``challenger``/
+        ``incumbent``/... on top rather than nesting it, so the window's own
+        keys (``arm_a``, ``arm_b``, ``n_dates``, ...) are top-level here
+        too — :meth:`PairedWindow.from_dict` reads exactly those. See that
+        method for what is and is not recoverable about the per-date series.
+        ``supported`` is not read back: it is the ``bound.supported``
+        property, recomputed from the restored bound.
+        """
+        bound = data.get("confidence_sequence")
+        return cls(
+            challenger=str(data["challenger"]),
+            incumbent=str(data["incumbent"]),
+            window=PairedWindow.from_dict(data),
+            bound=ConfSeqBound.from_dict(bound) if bound is not None else None,
+            status=str(data["status"]),
+            reason=str(data.get("reason") or ""),
+        )
+
 
 @dataclass(frozen=True)
 class PointerDecision:
@@ -392,6 +464,24 @@ class PointerDecision:
             },
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PointerDecision:
+        """The inverse of :meth:`to_dict`."""
+        return cls(
+            slot=str(data["slot"]),
+            as_of=str(data["as_of"]),
+            incumbent=data.get("incumbent"),
+            champion=data.get("champion"),
+            moved=bool(data["moved"]),
+            status=str(data["status"]),
+            reason=str(data.get("reason") or ""),
+            comparisons=tuple(Comparison.from_dict(c) for c in data.get("comparisons") or ()),
+            ineligible={
+                str(arm): tuple(ServingPrecondition.from_dict(p) for p in checks)
+                for arm, checks in (data.get("ineligible") or {}).items()
+            },
+        )
+
 
 @dataclass(frozen=True)
 class RetirementVerdict:
@@ -413,6 +503,18 @@ class RetirementVerdict:
             "pairwise_losses": self.pairwise_losses,
             "is_champion": self.is_champion,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> RetirementVerdict:
+        """The inverse of :meth:`to_dict`. Every field is stored directly."""
+        return cls(
+            arm_id=str(data["arm_id"]),
+            retire=bool(data["retire"]),
+            reason=str(data.get("reason") or ""),
+            age_weeks=int(data["age_weeks"]),
+            pairwise_losses=int(data["pairwise_losses"]),
+            is_champion=bool(data["is_champion"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -466,6 +568,48 @@ class ArenaCycle:
             "decision": self.decision.to_dict(),
             "retirements": [verdict.to_dict() for verdict in self.retirements],
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ArenaCycle:
+        """The inverse of :meth:`to_dict` — the whole `arena_cycle` artifact.
+
+        This is the entry point a consumer that only ever reads the artifact
+        (never recomputes it) actually calls; every sibling ``from_dict`` in
+        this package exists to make this one possible. ``ArenaConfig`` is
+        reconstructed from the nested ``config`` payload PLUS this cycle's
+        own ``slot``/``slot_kind``/``benchmark`` — see
+        :meth:`ArenaConfig.from_dict` for why those three are not inside
+        ``config`` at all.
+
+        Round-trips exactly through :meth:`to_dict` for every field this
+        artifact actually serialises. The one documented exception is
+        ``ArenaConfig.max_ladder_weeks``, which ``to_dict`` never emits
+        (see that method) and which this cycle's own decision never reads.
+        """
+        config = ArenaConfig.from_dict(
+            data["config"],
+            slot=str(data["slot"]),
+            slot_kind=str(data["slot_kind"]),
+            benchmark=str(data["benchmark"]),
+        )
+        ranking = data.get("ranking")
+        return cls(
+            schema_version=int(data["schema_version"]),
+            slot=str(data["slot"]),
+            slot_kind=str(data["slot_kind"]),
+            benchmark=str(data["benchmark"]),
+            as_of=str(data["as_of"]),
+            ladders=tuple(ScoreLadder.from_dict(d) for d in data.get("ladders") or ()),
+            ranking=PairwiseRanking.from_dict(ranking) if ranking is not None else None,
+            decision=PointerDecision.from_dict(data["decision"]),
+            retirements=tuple(
+                RetirementVerdict.from_dict(v) for v in data.get("retirements") or ()
+            ),
+            scored_arms=tuple(str(a) for a in data.get("scored_arms") or ()),
+            active_arms=tuple(str(a) for a in data.get("active_arms") or ()),
+            promotable_arms=tuple(str(a) for a in data.get("promotable_arms") or ()),
+            config=config,
+        )
 
 
 def _age_eligible(config: ArenaConfig, window: PairedWindow) -> bool:

@@ -91,6 +91,28 @@ class PairVerdict:
         payload["confidence_sequence"] = self.bound.to_dict() if self.bound else None
         return payload
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PairVerdict:
+        """The inverse of :meth:`to_dict`.
+
+        ``window`` is reconstructed from the SAME dict — ``to_dict`` starts
+        from ``window.to_dict()`` and adds keys onto it rather than nesting,
+        so ``arm_a``/``arm_b``/``n_dates``/... are top-level here too, and
+        :meth:`PairedWindow.from_dict` reads exactly the keys it needs off
+        this same mapping. See that method for what is and is not
+        recoverable about the window's per-date series.
+        """
+        bound = data.get("confidence_sequence")
+        return cls(
+            arm_a=str(data["arm_a"]),
+            arm_b=str(data["arm_b"]),
+            window=PairedWindow.from_dict(data),
+            bound=ConfSeqBound.from_dict(bound) if bound is not None else None,
+            winner=data.get("winner"),
+            loser=data.get("loser"),
+            reason=str(data.get("reason") or ""),
+        )
+
 
 @dataclass(frozen=True)
 class ArmStanding:
@@ -120,6 +142,22 @@ class ArmStanding:
             "created_date": self.created_date,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ArmStanding:
+        """The inverse of :meth:`to_dict`. ``copeland`` is not a constructor
+        argument — it is the ``wins - losses`` property — so it is dropped
+        rather than read back; a caller that hand-edited it without touching
+        ``wins``/``losses`` cannot smuggle a disagreement into the result."""
+        return cls(
+            arm_id=str(data["arm_id"]),
+            wins=int(data["wins"]),
+            losses=int(data["losses"]),
+            ties=int(data["ties"]),
+            unmeasurable=int(data["unmeasurable"]),
+            mean_margin=float(data["mean_margin"]),
+            created_date=str(data["created_date"]),
+        )
+
 
 @dataclass(frozen=True)
 class PairwiseRanking:
@@ -144,6 +182,29 @@ class PairwiseRanking:
             "standings": [self.standings[a].to_dict() for a in self.ordering],
             "verdicts": [v.to_dict() for v in self.verdicts],
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PairwiseRanking:
+        """The inverse of :meth:`to_dict`.
+
+        ``standings`` is serialised as a LIST ordered by ``ordering``, not a
+        mapping — reconstructed here keyed by each standing's own
+        ``arm_id``, which ``to_dict`` re-derives the same list from via
+        ``ordering`` again, so the round trip is exact regardless of dict
+        ordering.
+        """
+        ordering = tuple(str(a) for a in data.get("ordering") or ())
+        standings = {
+            (s := ArmStanding.from_dict(row)).arm_id: s for row in data.get("standings") or ()
+        }
+        return cls(
+            as_of=str(data["as_of"]),
+            evidence_mode=str(data["evidence_mode"]),
+            verdicts=tuple(PairVerdict.from_dict(v) for v in data.get("verdicts") or ()),
+            standings=standings,
+            ordering=ordering,
+            cycles_present=bool(data["cycles_present"]),
+        )
 
 
 def _verdict(

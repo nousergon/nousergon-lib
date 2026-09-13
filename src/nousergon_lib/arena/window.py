@@ -255,6 +255,70 @@ class PairedWindow:
             "unmeasurable_reason": self.unmeasurable_reason,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> PairedWindow:
+        """The inverse of :meth:`to_dict` — for a READER, not a re-scorer.
+
+        ``to_dict`` never serialises the per-date ``dates``/``diffs``/
+        ``scores_a``/``scores_b`` — only the aggregates a decision reader
+        needs (``n_dates``, ``weeks``, ``start_date``, ``end_date``,
+        ``mean_diff``). Every property this class exposes (``n_dates``,
+        ``weeks``, ``start_date``, ``end_date``, ``mean_diff``,
+        ``measurable``) is derived from those four sequences, so
+        reconstructing a window that answers them identically requires
+        *some* sequence to sit behind each property — not the original one,
+        which was never retained.
+
+        The reconstruction is synthetic and deliberately documented as such:
+        ``dates`` is filled with ``start_date`` repeated up to ``end_date``
+        so ``len(dates) == n_dates`` and ``dates[0]``/``dates[-1]`` match
+        (``weeks`` is computed from those two endpoints alone — see
+        :func:`span_weeks` — so the filler in between never affects it).
+        ``diffs`` is the single-element tuple ``(mean_diff,)`` rather than
+        ``n_dates`` values that would have to average to it: a caller
+        cannot recover the original per-date differences from an artifact
+        that never stored them, and re-deriving a *plausible* per-date series
+        would be a fabrication. A one-element series makes ``mean_diff``
+        exact (``sum((x,)) / 1 == x``) without pretending to be the real
+        one. ``scores_a``/``scores_b`` are never read by anything outside
+        this class's own construction and are left empty.
+
+        Callers that need the real per-date series must recompute it from
+        the underlying score series (`nousergon_lib.arena.window
+        .pair_on_common_window`), never from this artifact.
+        """
+        unmeasurable_reason = data.get("unmeasurable_reason")
+        if unmeasurable_reason is not None:
+            return cls(
+                arm_a=str(data["arm_a"]),
+                arm_b=str(data["arm_b"]),
+                dates=(),
+                diffs=(),
+                scores_a=(),
+                scores_b=(),
+                unmeasurable_reason=str(unmeasurable_reason),
+            )
+        n_dates = int(data["n_dates"])
+        start_date = data.get("start_date")
+        end_date = data.get("end_date")
+        if n_dates <= 0 or start_date is None or end_date is None:
+            dates: tuple[str, ...] = ()
+        elif n_dates == 1:
+            dates = (str(start_date),)
+        else:
+            dates = (str(start_date),) + (str(start_date),) * (n_dates - 2) + (str(end_date),)
+        mean_diff = data.get("mean_diff")
+        diffs = (float(mean_diff),) if mean_diff is not None else ()
+        return cls(
+            arm_a=str(data["arm_a"]),
+            arm_b=str(data["arm_b"]),
+            dates=dates,
+            diffs=diffs,
+            scores_a=(),
+            scores_b=(),
+            unmeasurable_reason=None,
+        )
+
 
 def pair_on_common_window(
     series_a: ArmSeries,

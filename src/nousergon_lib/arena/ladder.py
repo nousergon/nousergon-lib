@@ -67,6 +67,19 @@ class LadderRung:
             "mean_score": self.mean_score,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> LadderRung:
+        """The inverse of :meth:`to_dict`. Every field is stored directly —
+        none is a computed property — so this is a plain, exact reconstruction."""
+        return cls(
+            weeks=int(data["weeks"]),
+            n_dates=int(data["n_dates"]),
+            n_misses=int(data["n_misses"]),
+            start_date=str(data["start_date"]),
+            end_date=str(data["end_date"]),
+            mean_score=float(data["mean_score"]),
+        )
+
 
 @dataclass(frozen=True)
 class ScoreLadder:
@@ -106,6 +119,22 @@ class ScoreLadder:
             "lineage": {k: list(v) for k, v in sorted(self.lineage.items())},
             "rungs": [rung.to_dict() for rung in self.rungs],
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ScoreLadder:
+        """The inverse of :meth:`to_dict`. Exact: nothing here is lossy."""
+        return cls(
+            arm_id=str(data["arm_id"]),
+            as_of=str(data["as_of"]),
+            rungs=tuple(LadderRung.from_dict(r) for r in data.get("rungs") or ()),
+            total_weeks=int(data["total_weeks"]),
+            total_dates=int(data["total_dates"]),
+            total_misses=int(data["total_misses"]),
+            lineage={
+                str(k): tuple(str(v) for v in values)
+                for k, values in (data.get("lineage") or {}).items()
+            },
+        )
 
 
 def build_ladder(series: ArmSeries, as_of: str, max_weeks: int | None = None) -> ScoreLadder:
