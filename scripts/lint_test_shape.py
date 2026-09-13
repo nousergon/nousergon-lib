@@ -56,7 +56,6 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
-from typing import Optional
 
 _TEST_FUNC_PREFIX = "test_"
 _TEST_CLASS_PREFIX = "Test"
@@ -97,7 +96,7 @@ def _iter_test_files(root: Path) -> list[Path]:
     return sorted(found)
 
 
-def _describe(node: Optional[ast.AST]) -> str:
+def _describe(node: ast.AST | None) -> str:
     if node is None:
         return "<no enclosing scope>"
     if isinstance(node, ast.Module):
@@ -141,7 +140,7 @@ def _is_unittest_testcase_base(base: ast.expr) -> bool:
     return False
 
 
-def _is_legal_container(node: Optional[ast.AST]) -> bool:
+def _is_legal_container(node: ast.AST | None) -> bool:
     if isinstance(node, ast.Module):
         return True
     if isinstance(node, ast.ClassDef):
@@ -163,12 +162,8 @@ def _build_parent_map(tree: ast.Module) -> dict:
 def _check_nested_shape(path: Path, tree: ast.Module, parent: dict) -> list[str]:
     findings: list[str] = []
     for node in ast.walk(tree):
-        is_test_func = isinstance(node, _FUNC_NODE_TYPES) and node.name.startswith(
-            _TEST_FUNC_PREFIX
-        )
-        is_test_class = isinstance(node, ast.ClassDef) and node.name.startswith(
-            _TEST_CLASS_PREFIX
-        )
+        is_test_func = isinstance(node, _FUNC_NODE_TYPES) and node.name.startswith(_TEST_FUNC_PREFIX)
+        is_test_class = isinstance(node, ast.ClassDef) and node.name.startswith(_TEST_CLASS_PREFIX)
         if not (is_test_func or is_test_class):
             continue
         enclosing = parent.get(node)
@@ -234,8 +229,7 @@ def main(argv: list[str]) -> int:
 
     if problems:
         print(
-            "lint_test_shape: test-shaped def/class pytest will not collect "
-            "(alpha-engine-config-I10005):",
+            "lint_test_shape: test-shaped def/class pytest will not collect (alpha-engine-config-I10005):",
             file=sys.stderr,
         )
         for p in problems:

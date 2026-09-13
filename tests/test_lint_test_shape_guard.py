@@ -57,9 +57,7 @@ def test_this_repo_is_clean():
 
 def test_cli_contract_holds_out_of_process():
     """CI invokes this as a subprocess and gates on its exit code."""
-    result = subprocess.run(
-        [sys.executable, str(LINTER), str(REPO_ROOT)], capture_output=True, text=True
-    )
+    result = subprocess.run([sys.executable, str(LINTER), str(REPO_ROOT)], capture_output=True, text=True)
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
 
@@ -190,10 +188,7 @@ def test_accepts_nested_test_class_inside_test_class(tmp_path):
     _write(
         tmp_path,
         "tests/test_nested_ok.py",
-        "class TestOuter:\n"
-        "    class TestInner:\n"
-        "        def test_it(self):\n"
-        "            assert True\n",
+        "class TestOuter:\n    class TestInner:\n        def test_it(self):\n            assert True\n",
     )
     assert _rc(tmp_path) == 0
 
@@ -223,11 +218,7 @@ def test_rejects_dead_code_after_return_even_when_not_test_shaped(tmp_path, caps
     _write(
         tmp_path,
         "tests/test_dead_code.py",
-        "def test_something():\n"
-        "    x = 1\n"
-        "    return x\n"
-        "    x = 2\n"
-        "    assert x == 2\n",
+        "def test_something():\n    x = 1\n    return x\n    x = 2\n    assert x == 2\n",
     )
     assert _rc(tmp_path) == 1
     err = capsys.readouterr().err
