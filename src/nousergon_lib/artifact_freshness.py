@@ -353,6 +353,14 @@ class ArtifactSpec:
             only on a ``state="fresh"`` freshness result — a cheap defense
             against a well-timestamped but partial/empty write. ``None``
             (the default) means freshness-only, matching every existing row.
+        absence_expected: REQUIRES ``cadence="event_driven"`` + a
+            ``liveness_via`` anchor. Declares that this key is written only
+            when some condition fires (e.g. a violation) — never-written is
+            the HEALTHY state, not a producer gap, so the never-written probe
+            (config-I8810) skips rows carrying this flag; the anchor still
+            proves the producer runs. Default ``False`` — a plain
+            ``event_driven`` row without this flag remains eligible for the
+            never-written probe (config-I10614).
     """
 
     artifact_id: str
@@ -373,6 +381,7 @@ class ArtifactSpec:
     depends_on: tuple[str, ...] = ()
     liveness_via: str | None = None
     completeness: CompletenessCheck | None = None
+    absence_expected: bool = False
 
     def __post_init__(self) -> None:
         if self.cadence not in CADENCE_SYMBOLS:
@@ -410,6 +419,26 @@ class ArtifactSpec:
         validate_key_template(self.s3_key_template)
         if self.recovery_key_template is not None:
             validate_key_template(self.recovery_key_template)
+        self._validate_absence_expected()
+
+    def _validate_absence_expected(self) -> None:
+        """Validate the ``absence_expected`` ↔ ``event_driven`` coupling.
+
+        ``absence_expected`` declares that never-written is this row's
+        healthy state (it writes only when some condition fires), so it is
+        meaningless outside ``cadence="event_driven"`` and requires the
+        ``liveness_via`` anchor that already proves the producer runs — a
+        row cannot be exempted from the never-written probe while its
+        producer's liveness goes unverified (config-I10614).
+        """
+        if self.absence_expected and (
+            self.cadence != "event_driven" or not self.liveness_via
+        ):
+            raise ValueError(
+                f"ArtifactSpec.absence_expected=True ({self.artifact_id!r}) "
+                "requires cadence='event_driven' and a liveness_via anchor — "
+                "absence_expected is meaningless without both"
+            )
 
     def _validate_liveness_via(self) -> None:
         """Validate the ``event_driven`` ↔ ``liveness_via`` coupling.

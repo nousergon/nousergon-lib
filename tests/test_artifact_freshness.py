@@ -1430,6 +1430,36 @@ class TestEventDrivenSpecValidation:
         assert s.interval_minutes is None
 
 
+class TestAbsenceExpectedSpecValidation:
+    """absence_expected (config-I10614): a writes-only-on-violation row
+    declares never-written as its healthy state. Requires event_driven +
+    liveness_via — the anchor still proves the producer runs."""
+
+    def test_absence_expected_default_false(self):
+        s = _event_spec()
+        assert s.absence_expected is False
+
+    def test_absence_expected_valid_on_event_driven_with_anchor(self):
+        s = _event_spec(absence_expected=True)
+        assert s.absence_expected is True
+
+    def test_absence_expected_rejects_non_event_driven(self):
+        with pytest.raises(ValueError, match="requires cadence='event_driven'"):
+            _spec(cadence="saturday_sf", absence_expected=True)
+
+    def test_absence_expected_rejects_missing_liveness_via(self):
+        # cadence=event_driven without liveness_via already raises on its
+        # own coupling — construct directly to isolate the absence_expected
+        # message would require bypassing that check, so assert the
+        # event_driven+liveness_via requirement is enforced together.
+        with pytest.raises(ValueError, match="requires liveness_via"):
+            _spec(
+                cadence="event_driven",
+                liveness_via=None,
+                absence_expected=True,
+            )
+
+
 class TestEventDrivenCheckFreshness:
     """The core acceptance: an event_driven row never self-pages on age
     ('producer ran and correctly declined to write' ⇒ no alert), while a
