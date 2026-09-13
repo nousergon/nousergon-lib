@@ -873,6 +873,35 @@ def test_run_cycle_emits_a_ladder_for_every_scored_arm():
     assert all(ladder.rungs for ladder in cycle.ladders)
 
 
+def test_promotable_arms_excludes_controls_when_present():
+    """alpha-engine-config-I10645: `ArenaCycle.promotable_arms` is the
+    `min_active_arms` floor's own pool — `active_arms` with controls
+    excluded — reusing `evaluate_retirements`'s control-exclusion
+    computation rather than re-deriving it."""
+    reg, ids = ArmRegister(), {}
+    for i, name in enumerate(["a", "b", "c"]):
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        ids[name] = record.arm_id
+    reg, ctrl = reg.register(
+        slot="model", name="benchmark", spec={"k": "control"}, created_date="2026-01-05", control=True
+    )
+    ids["benchmark"] = ctrl.arm_id
+    series = {ids[n]: _series(ids[n], [0.03 - 0.01 * i] * 60) for i, n in enumerate(["a", "b", "c", "benchmark"])}
+
+    cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+
+    assert set(cycle.active_arms) == {ids["a"], ids["b"], ids["c"], ids["benchmark"]}
+    assert set(cycle.promotable_arms) == {ids["a"], ids["b"], ids["c"]}
+    assert ids["benchmark"] not in cycle.promotable_arms
+
+
+def test_promotable_arms_equals_active_arms_when_no_controls():
+    reg, ids, series = _cycle_fixture()
+    cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["a"])
+    assert set(cycle.promotable_arms) == set(cycle.active_arms)
+    assert set(cycle.active_arms) == set(ids.values())
+
+
 def test_the_emitted_cycle_conforms_to_the_arena_cycle_contract():
     pytest.importorskip("jsonschema")
     from nousergon_lib import contracts

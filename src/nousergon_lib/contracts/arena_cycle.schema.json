@@ -48,7 +48,16 @@
       }
     },
     "scored_arms": {"type": "array", "items": {"type": "string"}},
-    "active_arms": {"type": "array", "items": {"type": "string"}},
+    "active_arms": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Every live arm in the slot, controls included. Kept for backward compatibility — do not repurpose it to exclude controls; use `promotable_arms` for that."
+    },
+    "promotable_arms": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "`active_arms` with controls excluded — the pool `min_active_arms` actually governs (alpha-engine-config-I9770, alpha-engine-config-I10645). A control can never take the pointer, so it can never serve as the floor's slack; compare `len(promotable_arms)` against a slot's `min_active_arms`, not `len(active_arms)`. ABSENT — as opposed to present — means the document was written before this field existed, which is why it is optional rather than required."
+    },
     "ladders": {
       "type": "array",
       "items": {

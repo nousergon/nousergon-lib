@@ -429,7 +429,21 @@ class ArenaCycle:
     decision: PointerDecision
     retirements: tuple[RetirementVerdict, ...]
     scored_arms: tuple[str, ...]
+    #: Every live arm in the slot, CONTROLS INCLUDED. Kept for backward
+    #: compatibility with existing consumers reading arm counts off this
+    #: field — do not repurpose it to exclude controls; use
+    #: `promotable_arms` for that instead.
     active_arms: tuple[str, ...]
+    #: `active_arms` with controls excluded — the pool `min_active_arms`
+    #: actually governs (`evaluate_retirements`'s docstring,
+    #: alpha-engine-config-I9770). A control is a real point of comparison
+    #: but can never take the pointer, so it can never serve as the floor's
+    #: slack; `len(promotable_arms)` is the number a consumer should compare
+    #: against a slot's `min_active_arms` floor, not `len(active_arms)`.
+    #: Computed by the same helper (`_promotable_arms`) that
+    #: `evaluate_retirements` uses to check the floor, so the two can never
+    #: disagree about which arms count.
+    promotable_arms: tuple[str, ...]
     #: The parameters in force for THIS cycle. Emitted so a reader can
     #: reconstruct the decision without the current config, which may since
     #: have changed — `promote_evidence` and `promote_min_weeks` in particular
@@ -446,6 +460,7 @@ class ArenaCycle:
             "config": self.config.to_dict(),
             "scored_arms": list(self.scored_arms),
             "active_arms": list(self.active_arms),
+            "promotable_arms": list(self.promotable_arms),
             "ladders": [ladder.to_dict() for ladder in self.ladders],
             "ranking": self.ranking.to_dict() if self.ranking else None,
             "decision": self.decision.to_dict(),
@@ -790,6 +805,22 @@ def decide_pointer(
     )
 
 
+def _promotable_arms(register: ArmRegister) -> tuple[str, ...]:
+    """The active pool with controls excluded — the ``min_active_arms`` floor.
+
+    A control (synthetic benchmark) is a real point of comparison but can
+    never take the pointer, so it can never serve as the floor's slack
+    (`evaluate_retirements`'s docstring, alpha-engine-config-I9770). This is
+    the single computation both `evaluate_retirements` (which checks the
+    floor) and `run_cycle` (which emits it as `ArenaCycle.promotable_arms`)
+    read, so the "controls excluded" rule lives in exactly one place.
+    """
+    control_ids = frozenset(
+        a for a in register.active_arms() if register.state(a).record.control
+    )
+    return tuple(a for a in register.active_arms() if a not in control_ids)
+
+
 def evaluate_retirements(
     config: ArenaConfig,
     as_of: str,
@@ -846,7 +877,7 @@ def evaluate_retirements(
     control_ids = frozenset(
         a for a in register.active_arms() if register.state(a).record.control
     )
-    active = [a for a in register.active_arms() if a not in control_ids]
+    active = list(_promotable_arms(register))
     control_losses: dict[str, int] = dict.fromkeys(active, 0)
     for verdict in ranking.verdicts:
         if verdict.winner in control_ids and verdict.loser in control_losses:
@@ -1038,5 +1069,6 @@ def run_cycle(
         retirements=retirements,
         scored_arms=tuple(sorted(series_by_arm)),
         active_arms=active,
+        promotable_arms=_promotable_arms(register),
         config=config,
     )
