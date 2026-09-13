@@ -10,11 +10,25 @@ import io
 from datetime import date
 
 import boto3
-import pandas as pd
 import pytest
 from moto import mock_aws
 
 BUCKET = "alpha-engine-research"
+
+# nousergon-lib-I265: mirror_document_to_parquet's except-Exception swallow
+# (parquet_mirror.py, deliberate — a mirror failure must never break an
+# already-durable Neon write) turns a missing [rag-parquet] extra into a
+# silent `None` return, which then reads as a broken mirror rather than an
+# absent dependency. Fail the collection loudly and explicitly instead of
+# letting that ambiguity reach an assertion.
+pd = pytest.importorskip(
+    "pandas",
+    reason="requires the nousergon-lib[rag-parquet] extra (pandas)",
+)
+pytest.importorskip(
+    "pyarrow",
+    reason="requires the nousergon-lib[rag-parquet] extra (pyarrow)",
+)
 
 
 @pytest.fixture

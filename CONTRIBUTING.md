@@ -24,6 +24,24 @@ contribute under these terms, please open an issue instead of a pull request.
 Issues and discussions are welcome. Substantial changes should start as an
 issue before any code is written.
 
+## Running the test suite
+
+`pip install -e ".[dev]"` alone is not enough to run every test green — several
+test modules import an optional extra's dependency at module load time (or, for
+the RAG parquet/ANN tests, inside a fixture) and will fail rather than skip if
+it's absent without the extra installed too:
+
+```bash
+pip install -e ".[dev,rag,rag-parquet,rag-local-ann,arcticdb,quant,quant-xs,quant-stats,contracts,github_app]"
+PYTHONPATH=$PWD/src python3 -m pytest tests/ -q
+```
+
+That's the same extras set `.github/workflows/test.yml` installs. In
+particular, `tests/test_rag_parquet_mirror.py` and `tests/test_rag_local_ann.py`
+need `[rag-parquet]` (pandas + pyarrow) and, for the HNSW-index tests,
+`[rag-local-ann]` (adds hnswlib) — without them those tests skip explicitly
+rather than fail (nousergon-lib-I265).
+
 
 ## Date-axis review chokepoint (nousergon/alpha-engine-config#1613)
 
