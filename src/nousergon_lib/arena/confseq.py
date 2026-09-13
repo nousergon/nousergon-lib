@@ -48,6 +48,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 __all__ = [
     "ConfSeqBound",
@@ -112,7 +113,7 @@ class ConfSeqBound:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> ConfSeqBound:
+    def from_dict(cls, data: Mapping[str, Any]) -> ConfSeqBound:
         """The inverse of :meth:`to_dict`.
 
         Every field ``to_dict`` emits except ``supported`` is a real
