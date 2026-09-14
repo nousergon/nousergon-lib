@@ -21,7 +21,7 @@ import datetime as dt
 from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 __all__ = [
     "CLAUSE_FUNCTION_PREFIX",
@@ -211,7 +211,13 @@ def contain_clause_exceptions(namespace: MutableMapping[str, Any], *, prefix: st
             continue
         if getattr(value, "_contained", False):
             continue
-        namespace[name] = contained(value)
+        # `cast`, not a looser signature on `contained`: the wrapper's contract
+        # IS "a callable returning a Clause", and widening it to `object` to
+        # satisfy a walk over `globals()` would let a non-clause function be
+        # wrapped and rendered as a clause row. The narrowing is unprovable here
+        # — a namespace walk has no types — and the prefix convention is what
+        # carries it, which the module docstring states.
+        namespace[name] = contained(cast("Callable[..., Clause]", value))
         wrapped += 1
     if wrapped == 0:
         raise ClauseMisconfiguredError(
