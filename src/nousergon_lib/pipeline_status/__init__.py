@@ -81,6 +81,7 @@ from .read import (
     read_reliability_window,
 )
 from .registry import (
+    PENDING_DEFINITION_STAGES,
     PIPELINE_LABELS,
     PIPELINE_STAGE_ORDER,
     SKIP_TERMINALS,
@@ -89,8 +90,11 @@ from .registry import (
     WAIT_GROUPING,
     ArchivePageRef,
     ArtifactReason,
+    pending_definition_stages_for,
     skip_terminals_for,
     stage_order_for,
+    stale_pending_stages,
+    undefined_spine_stages,
 )
 from .roles import (
     ADHOC_ROLES,
@@ -140,6 +144,7 @@ __all__ = [
     "CADENCE_ROLES",
     "CycleReliability",
     "EXERCISE_ROLES",
+    "PENDING_DEFINITION_STAGES",
     "PIPELINE_LABELS",
     "PIPELINE_STAGE_ORDER",
     "SKIP_TERMINALS",
@@ -171,6 +176,9 @@ __all__ = [
     "read_pipeline_state",
     "read_reliability_window",
     "read_work_outcome",
+    "pending_definition_stages_for",
     "skip_terminals_for",
     "stage_order_for",
+    "stale_pending_stages",
+    "undefined_spine_stages",
 ]

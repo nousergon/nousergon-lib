@@ -90,7 +90,7 @@ from .read import (
     _raise_for_boto_error,
     _sfn_client,
 )
-from .registry import stage_order_for
+from .registry import pending_definition_stages_for, stage_order_for
 from .roles import CADENCE_ROLES, RECOVERY_ROLES
 from .work import WorkOutcome, WorkVerdict, classify_work, entered_states_from_history
 
@@ -413,7 +413,10 @@ def build_cycle_shape(
     for outcome, _role, _states in contributors:
         union.update(outcome.stages_entered)
     entered = tuple(s for s in spine if s in union)
-    missing = tuple(s for s in spine if s not in union)
+    # See work.classify_work: a pending-definition stage not entered is not
+    # missing (registry.PENDING_DEFINITION_STAGES, alpha-engine-config-I10762).
+    pending = pending_definition_stages_for(pipeline)
+    missing = tuple(s for s in spine if s not in union and s not in pending)
 
     common: dict[str, Any] = {
         "pipeline": pipeline,

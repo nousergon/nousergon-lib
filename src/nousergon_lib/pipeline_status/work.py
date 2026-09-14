@@ -81,7 +81,7 @@ from .read import (
     _raise_for_boto_error,
     _sfn_client,
 )
-from .registry import skip_terminals_for, stage_order_for
+from .registry import pending_definition_stages_for, skip_terminals_for, stage_order_for
 
 if TYPE_CHECKING:  # pragma: no cover
     from mypy_boto3_stepfunctions.client import SFNClient
@@ -256,7 +256,11 @@ def classify_work(
     terminal = entered_states[-1] if entered_states else None
     entered = set(entered_states)
     hit = tuple(s for s in spine if s in entered)
-    missing = tuple(s for s in spine if s not in entered)
+    # A stage declared ahead of its definition cannot be entered by an
+    # execution of a definition that lacks it; not entering it is not a
+    # finding (registry.PENDING_DEFINITION_STAGES, alpha-engine-config-I10762).
+    pending = pending_definition_stages_for(state_machine_name)
+    missing = tuple(s for s in spine if s not in entered and s not in pending)
 
     common = {
         "state_machine_name": state_machine_name,

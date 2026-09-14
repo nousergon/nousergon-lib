@@ -1622,6 +1622,93 @@ SKIP_TERMINALS: Final[dict[str, frozenset[str]]] = {
 }
 
 
+#: Spine stages DECLARED here ahead of the state-machine definition that will
+#: contain them — pipeline -> {stage: tracking reference}.
+#:
+#: **Why this exists (alpha-engine-config-I10762).** The spine and the
+#: definitions live in different repositories, and two consumers check one
+#: against the other from opposite sides: ``nousergon-data``'s
+#: ``tests/test_pipeline_stage_order_contract.py`` (its pinned library vs its
+#: own definitions) and ``crucible-dashboard``'s
+#: ``test_every_declared_stage_exists_in_the_live_definition`` (its pinned
+#: library vs ``nousergon-data`` ``main``). When a NEW stage is added, the
+#: library entry has to come first (``nousergon-data``'s registry-drift guard
+#: refuses a state with no registry entry), and from that moment every
+#: consumer that bumps its library pin reads a spine naming a state no
+#: definition on ``main`` has yet. Measured 2026-09-14:
+#: ``LaunchEdgarPitFundamentalsDailySpot`` (nousergon-lib-PR410) left
+#: crucible-dashboard-PR860 red on a stage nousergon-data-PR1702 had not
+#: landed, while PR1702's consumer guard was red on the dashboard's old pin —
+#: a pair of PRs each waiting on the other's ``main``.
+#:
+#: An entry here is the explicit, reviewable statement "this stage is declared
+#: and its definition is in flight". It changes exactly two things:
+#:
+#: 1. :func:`undefined_spine_stages` does not report the stage while the
+#:    definition lacks it, so a consumer's existence check tolerates EITHER
+#:    merge order instead of deadlocking.
+#: 2. :func:`~.work.classify_work` and :func:`~.cycle_shape.build_cycle_shape`
+#:    do not count the stage as MISSING when an execution did not enter it —
+#:    a definition that does not have the state yet cannot enter it, and
+#:    calling every cycle ``partial_success`` for that is a false finding.
+#:    Entering it still counts.
+#:
+#: An entry is transitional by construction. The repository that owns the
+#: definition fails its contract test on a stage that is BOTH present in its
+#: definition and still marked pending (:func:`stale_pending_stages`), so the
+#: PR landing the definition is the one that must also take a library release
+#: without the marker — the marker cannot silently outlive its reason.
+#: Every value must name the tracking issue, so a reader can find why.
+PENDING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
+    "ne-weekly-freshness-pipeline": {},
+    "ne-preopen-trading-pipeline": {},
+    "ne-postclose-trading-pipeline": {},
+}
+
+
+def _pipeline_name(state_machine: str) -> str:
+    return state_machine.rsplit(":", 1)[-1] if state_machine else ""
+
+
+def pending_definition_stages_for(state_machine: str) -> frozenset[str]:
+    """Spine stages declared ahead of their definition, for an ARN or bare name."""
+    return frozenset(PENDING_DEFINITION_STAGES.get(_pipeline_name(state_machine), {}))
+
+
+def undefined_spine_stages(
+    state_machine: str, defined_states: set[str] | frozenset[str]
+) -> tuple[str, ...]:
+    """Spine stages the definition does not contain and that are NOT pending.
+
+    ``defined_states`` must be every state name at ANY depth (Parallel
+    branches, Map iterators) — a top-level-only read reports nested spine
+    stages as undefined. An empty result means the spine is satisfiable by the
+    definition. Raises :class:`KeyError` for an undeclared pipeline: a pipeline
+    with no spine cannot be judged, never "nothing to check".
+    """
+    name = _pipeline_name(state_machine)
+    spine = PIPELINE_STAGE_ORDER[name]
+    pending = pending_definition_stages_for(name)
+    return tuple(s for s in spine if s not in defined_states and s not in pending)
+
+
+def stale_pending_stages(
+    state_machine: str, defined_states: set[str] | frozenset[str]
+) -> tuple[str, ...]:
+    """Stages still marked pending although the definition now contains them.
+
+    Only the repository that OWNS the definition should fail on a non-empty
+    result — on its own PR, which is the change that makes the marker stale.
+    A consumer reading another repository's ``main`` must tolerate it, or the
+    deadlock this marker exists to prevent comes back from the other side.
+    """
+    name = _pipeline_name(state_machine)
+    return tuple(
+        s for s in PIPELINE_STAGE_ORDER[name]
+        if s in pending_definition_stages_for(name) and s in defined_states
+    )
+
+
 def stage_order_for(state_machine: str) -> tuple[str, ...]:
     """Declared substantive spine for a state machine ARN or bare name.
 
