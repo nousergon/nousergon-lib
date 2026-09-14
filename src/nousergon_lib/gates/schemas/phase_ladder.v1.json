@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nousergon/nousergon-lib/schemas/phase_ladder.v1.json",
+  "title": "Phase ladder, v1",
+  "description": "The record at <root>/gates/ladder.json, produced by nousergon_lib.gates.build_ladder/ladder_payload and published by exactly ONE writer per adopter. A second publisher that re-evaluates every gate under its own environment will republish a false reading over the gate publisher's (crucible, alpha-engine-config-I10575); adopters publish from the gate command only. Versioned because a fleet console reads this key through an s3-records adapter, a cross-repo consumer; additionalProperties: false because a field this reader does not understand is a field the producer expected it to act on. Generalized from crucible/schemas/phase_ladder.v1.json on the second adoption: `phase` and `number` are no longer bounded to crucible's phase0..phase5, and `tracker`/`decision_id` accept any <repo>-I<N> ref, so a second ladder with its own rungs and its own tracker validates under the same contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "trading_day",
+    "generated_utc",
+    "current_phase",
+    "phases_total",
+    "phases_met",
+    "unmeasured",
+    "out_of_order",
+    "phases"
+  ],
+  "properties": {
+    "schema_version": {
+      "title": "Schema Version",
+      "description": "Version of THIS schema. A consumer that cannot read the version refuses the document rather than guessing.",
+      "const": "phase_ladder.v1",
+      "type": "string"
+    },
+    "ladder": {
+      "title": "Ladder",
+      "description": "Which ladder this is, when one store holds more than one (e.g. `crucible` and `data`). Optional so crucible's existing document validates unchanged.",
+      "type": "string",
+      "minLength": 1
+    },
+    "trading_day": {
+      "title": "Trading Day",
+      "description": "The NYSE trading day the ladder was built for. Never a wall-clock date.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "generated_utc": {
+      "title": "Generated Utc",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "current_phase": {
+      "title": "Current Phase",
+      "description": "The lowest phase whose gate is not met, or `complete`. Not the highest phase with work in it.",
+      "type": "string"
+    },
+    "phases_total": {"title": "Phases Total", "type": "integer", "minimum": 0},
+    "phases_met": {"title": "Phases Met", "type": "integer", "minimum": 0},
+    "unmeasured": {
+      "title": "Unmeasured",
+      "description": "Count of rows whose gate_state is UNMEASURED. Published rather than left for a reader to derive.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "out_of_order": {
+      "title": "Out Of Order",
+      "description": "Phase ids currently graded ahead of an earlier unmet phase.",
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "phases": {
+      "title": "Phases",
+      "type": "array",
+      "items": {"$ref": "#/$defs/PhaseLadderRow"}
+    }
+  },
+  "$defs": {
+    "PhaseLadderRow": {
+      "title": "PhaseLadderRow",
+      "description": "One phase row of the ladder's `phases` array.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "phase",
+        "number",
+        "title",
+        "tracker",
+        "tracker_url",
+        "gate",
+        "state",
+        "console_state",
+        "gate_state",
+        "detail",
+        "clauses_met",
+        "clauses_total",
+        "clauses_unmeasurable",
+        "met_ratio",
+        "read_on",
+        "blocked_by",
+        "generated_utc"
+      ],
+      "properties": {
+        "decision_id": {
+          "title": "Decision Id",
+          "description": "`console-policy` §2.1: the identifier IS the tracker ref, so a `git-host` claim about the same issue merges onto this row rather than rendering the phase twice.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*-I[0-9]+$"
+        },
+        "phase": {
+          "title": "Phase",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "number": {"title": "Number", "type": "integer", "minimum": 0},
+        "title": {"title": "Title", "type": "string", "minLength": 1},
+        "tracker": {
+          "title": "Tracker",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*-I[0-9]+$"
+        },
+        "tracker_url": {"title": "Tracker Url", "type": "string"},
+        "gate": {
+          "title": "Gate",
+          "description": "The registered gate name, or null when no gate has been written for this phase yet. Null is never a pass: the row renders UNMEASURED.",
+          "anyOf": [{"type": "string"}, {"type": "null"}]
+        },
+        "state": {
+          "title": "State",
+          "description": "nousergon_lib.gates.LADDER_STATES. Closed set.",
+          "enum": ["MET", "UNMET", "UNMEASURED", "UNMEASURABLE", "OUT_OF_ORDER"]
+        },
+        "console_state": {
+          "title": "Console State",
+          "description": "LADDER_CONSOLE_STATE's rendering, in observability-policy §8.3's vocabulary.",
+          "enum": ["HEALTHY", "DEGRADED", "UNREPORTED", "FAILED"]
+        },
+        "gate_state": {
+          "title": "Gate State",
+          "enum": ["MET", "UNMET", "UNMEASURED", "UNMEASURABLE"]
+        },
+        "detail": {"title": "Detail", "type": "string"},
+        "clauses_met": {
+          "title": "Clauses Met",
+          "description": "null when the phase has never been graded at all (no registered gate).",
+          "anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+        },
+        "clauses_total": {
+          "title": "Clauses Total",
+          "anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+        },
+        "clauses_unmeasurable": {
+          "title": "Clauses Unmeasurable",
+          "description": "Count of this phase's clauses that read UNMEASURABLE (a store access failure, distinct from a clause read and found unmet). null exactly where clauses_total is null.",
+          "anyOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+        },
+        "met_ratio": {
+          "title": "Met Ratio",
+          "description": "null when nothing was measured, or when any clause is unmeasurable. Never 0.0 for an unmeasured reading -- 0.0 is a real measurement of zero clauses met out of a nonzero total (principle 7).",
+          "anyOf": [{"type": "number", "minimum": 0, "maximum": 1}, {"type": "null"}]
+        },
+        "read_on": {
+          "title": "Read On",
+          "description": "The last trading day this gate was read, or null when never.",
+          "anyOf": [{"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, {"type": "null"}]
+        },
+        "blocked_by": {
+          "title": "Blocked By",
+          "description": "The earlier unmet phase id blocking this one, when state is OUT_OF_ORDER; null otherwise.",
+          "anyOf": [{"type": "string"}, {"type": "null"}]
+        },
+        "generated_utc": {
+          "title": "Generated Utc",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      }
+    }
+  }
+}
