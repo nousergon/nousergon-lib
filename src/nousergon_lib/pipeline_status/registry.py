@@ -1279,6 +1279,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         reason="Polygon T+1 daily aggregate write to predictor/daily_closes/; "
         "substrate-only — consumed by EODReconcile."
     ),
+    # alpha-engine-config-I10750 / nousergon-data-PR1702: the EOD SF launches
+    # the EDGAR filing-date point-in-time fundamentals collector on a data-spot
+    # box after the close (alpha-engine-config-I10733).
+    "LaunchEdgarPitFundamentalsDailySpot": ArtifactReason(
+        reason="Launches the data-spot box running the EDGAR companyfacts "
+        "collector; writes fundamentals_pit/edgar/v1/runs/{date}/{run_id}.json "
+        "and the runs/latest.json freshness sentinel, keyed by SEC filing "
+        "date — no per-run rendered archive page."
+    ),
     "PostMarketArcticAppend": ArtifactReason(
         reason="EOD ArcticDB daily_append split into its own state (2026-06-16) "
         "— writes today's post-market OHLCV row + recomputed features to the "
