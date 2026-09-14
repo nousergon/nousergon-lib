@@ -1302,6 +1302,26 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "Operational only, no rendered artifact; the append output is "
         "substrate (see PostMarketArcticAppend).",
     ),
+    # alpha-engine-config-I10733/-I10750: the EDGAR filing-date-indexed
+    # fundamentals daily leg, added to step_function_eod.json immediately
+    # after LaunchPostMarketArcticAppendSpot above. Same fire-and-forget
+    # spot-dispatch shape and same fail-open ExtractDataSpotError/
+    # SetDataSpotDegradedFlag path.
+    "LaunchEdgarPitFundamentalsDailySpot": ArtifactReason(
+        reason="Fire-and-forget spot dispatch (alpha-engine-data-spot-"
+        "dispatcher Lambda, workload=edgar-pit-fundamentals-daily) for the "
+        "EDGAR point-in-time fundamentals incremental build "
+        "(collectors/edgar_pit_fundamentals.py, alpha-engine-config-I10733) "
+        "— scheduled on the postclose SF rather than a new standalone "
+        "EventBridge rule, which would land DISABLED under the 2026-08-07 "
+        "automation-pause ruling (config-I6617). Operational only, no "
+        "rendered artifact; the run's own output is "
+        "fundamentals_pit/edgar/v1/runs/{run_date}/{run_id}.json plus the "
+        "runs/latest.json freshness sentinel (alpha-engine-config-I10750), "
+        "watched by ARTIFACT_REGISTRY.yaml row "
+        "edgar_pit_fundamentals_runs_latest, not by this pipeline-status "
+        "registry.",
+    ),
     "CaptureSnapshot": ArchivePageRef(
         page="eod-report",
         artifact_label="NAV + positions snapshot",
@@ -1567,6 +1587,7 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-postclose-trading-pipeline": (
         "LaunchPostMarketDataSpot",
         "LaunchPostMarketArcticAppendSpot",
+        "LaunchEdgarPitFundamentalsDailySpot",
         "CaptureSnapshot",
         "EODReconcile",
         "StopTradingInstance",
