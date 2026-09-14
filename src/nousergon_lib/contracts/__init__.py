@@ -34,6 +34,13 @@ single source of truth for those schemas:
   hash + slot fingerprints + typed artifact link table with honest absences);
   the results renderer consumes this record, never a directory listing.
   Envelope contract, not a slot.
+- ``data_run_manifest`` — one run record per execution of one data-collection
+  unit (the audit's D01–D46), emitted by
+  ``nousergon_lib.run_manifest.run_unit`` →
+  ``data_collection/runs/{unit_id}/{trading_day}/{run_id}.json``, on the
+  success path, the failure path and the correctly-had-nothing-to-do path.
+  Lifted from crucible's ``run_manifest.v2`` on second adoption
+  (alpha-engine-config-I10773). Run-record contract, not a slot.
 - ``arena_cycle`` — one champion/challenger evaluation cycle of one slot,
   emitted by ``nousergon_lib.arena.engine.run_cycle`` → the slot's
   ``arena/{slot}/{date}.json``. The shared engine all four slots consume;
@@ -114,6 +121,15 @@ CONTRACT_SCHEMAS: dict[str, str] = {
     # Eval-storage contract, not a slot. Normative source:
     # nous-ergon-ops/policies/champion-challenger-policy.md.
     "arena_cycle": "arena_cycle.schema.json",
+    # One run record per execution of one data-collection unit (D01-D46),
+    # emitted by ``nousergon_lib.run_manifest.run_unit`` →
+    # ``data_collection/runs/{unit_id}/{trading_day}/{run_id}.json``. Consumed
+    # by nousergon-data's `data` gate ladder (the `data.<unit>.run_record`
+    # clause) and by the freshness/completeness objectives computed from
+    # `rows_out` rather than from HEAD alone. Lifted from crucible's
+    # ``run_manifest.v2`` on second adoption (`shared-code-policy` §2);
+    # alpha-engine-config-I10773. Run-record contract, not a slot.
+    "data_run_manifest": "data_run_manifest.schema.json",
 }
 
 # The subset of CONTRACT_SCHEMAS that are product SLOT boundaries (R/M/S), with
@@ -139,6 +155,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
     "experiment_record": 1,
     "producer_champion_audit": 2,  # schema_version const: 2 (winner-take-all, config-I2518)
     "arena_cycle": 1,
+    "data_run_manifest": 1,
 }
 
 
