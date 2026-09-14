@@ -73,6 +73,12 @@ flow_doctor = ["krepis[flow-doctor]"]  # delegate the pin to krepis (owns the fl
 # App JWTs need PyJWT with its crypto backend (config-I2785).
 github_app = ["PyJWT[crypto]>=2.8"]
 contracts = ["jsonschema>=4.21"]
+# The gate engine (nousergon_lib.gates) validates every ladder document against
+# its shipped JSON Schema before the bytes reach a store. Producer-side
+# validation is not an optional degradation -- a malformed ladder reaches a
+# console that renders it as state -- so the dependency is declared rather than
+# guarded by a try/except that would publish unvalidated.
+gates = ["jsonschema>=4.21"]
 rag = [
     "psycopg2-binary>=2.9",
     "pgvector>=0.2",
@@ -139,6 +145,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "nousergon_lib" = ["transparency_inventory.yaml", "py.typed"]
 "nousergon_lib.contracts" = ["*.schema.json"]
+"nousergon_lib.gates" = ["schemas/*.json"]
 "nousergon_lib.rag" = ["schema.sql", "migrations/*.sql"]
 "nousergon_lib.egress" = ["gitleaks-egress.toml", "gitleaks-custom.toml", "routes.v1.json", "routes.schema.v1.json"]
 

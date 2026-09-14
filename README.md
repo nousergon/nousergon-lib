@@ -313,6 +313,45 @@ The shared institutional-analytics engine: pure, front-end- and data-source-agno
 from nousergon_lib.arena import ArenaConfig, ArmRegister, ArmSeries, run_cycle
 ```
 
+### `gates` — the phase-gate engine (clauses, readings, ladder)
+
+`nousergon_lib.gates` is the fleet's single gate engine, lifted from `crucible/crucible/gate.py` on
+its second adoption (data collector plan §4.1, `alpha-engine-config-I10748`). Three rules, carried
+over verbatim in meaning:
+
+1. **A gate reads; it never runs.** Every clause is evaluated against artifacts already written, so
+   a merge can never satisfy a gate.
+2. **A clause is MET, UNMET or UNMEASURABLE, and UNMEASURABLE is never met.** An absent artifact is
+   UNMET with the missing key named; a read that failed is UNMEASURABLE, which is a fact about *our
+   reading* and renders red rather than being folded into "unmet".
+3. **The gate's job succeeds when the MEASUREMENT succeeds.** The ladder is written and the process
+   exits non-zero unless the gate is met, so nobody reads "not there yet" as "done".
+
+- **`gates.clause`** — `Clause`, `unmeasurable()`, and `contained()`/`contain_clause_exceptions()`:
+  every `_clause_*` function in a module is wrapped at import so a clause that raises becomes one
+  UNMEASURABLE row instead of darkening the whole ladder. One unguarded client construction in one
+  crucible clause took down every phase gate in the system on 2026-09-09; the containment lives in
+  the engine so a clause author cannot forget it.
+- **`gates.result`** — `GateResult`: `met_ratio` is `None`, never `0.0`, when nothing was measured
+  *or* when any clause is unmeasurable — a ratio computed over a partial read is an overclaim.
+- **`gates.ladder`** — `Phase`, `build_ladder()`, `ladder_payload()` and the shipped
+  `phase_ladder.v1` JSON Schema. Five states (`MET`/`UNMET`/`UNMEASURED`/`UNMEASURABLE`/
+  `OUT_OF_ORDER`), each with a declared `observability-policy` §8.3 console rendering;
+  `UNMEASURED` renders `UNREPORTED` and counts against the transparency gap.
+- **`gates.faults`** — `fault_excused_run_ids()`: only an `induced` record, matched on `run_id`
+  alone, excuses anything. This is the one mechanism in a gate capable of turning a red clause
+  green, so its refusals are the design.
+- **`gates.store`** — a two-method `GateStore` Protocol, so the engine binds to no repo's store
+  class, plus reads that keep *absent* and *could not read* apart.
+
+**No clause definitions live here.** They stay in the repo that owns the thing being graded
+(`architecture.d/146` rule 1) — `crucible` grades crucible, `nousergon-data`'s `data_gate` grades
+the data collector. Needs the `gates` extra (`jsonschema`) for ladder validation.
+
+```python
+from nousergon_lib.gates import Clause, GateResult, Phase, build_ladder, ladder_payload
+```
+
 ### `egress.routes` — published LLM egress-proxy route contract
 
 `nousergon_lib.egress.routes` publishes, as a versioned artifact with a JSON Schema beside it, **which upstream hosts a multi-tenant LLM egress-proxy deployment serves and how each is authenticated** — `box_upstream_hosts()`, `laptop_upstream_hosts()`, `upstream_hosts(table)`, `table(name)`, `load_contract()`, `load_schema()`. A request naming a host absent from the table is refused by the proxy with `unknown upstream host`, so anything deciding which model rows are *servable* has to know the table; publishing it here is what lets a consumer read it with **no credential** instead of checking out the private repo that configures the proxy (alpha-engine-config-I8337). The artifact carries upstream host, path prefix and auth mode only — no key-environment names, no ports, no host of ours — and `tests/test_egress_routes_contract.py` asserts that. Deployments are never unioned: `box` and `laptop` are different tables. Stdlib only.
