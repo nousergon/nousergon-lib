@@ -44,9 +44,11 @@ from nousergon_lib.artifact_freshness import (
     CheckResult,
     CompletenessCheck,
     CycleCompletion,
+    DeadlineLocalError,
     DependencyGraph,
     KeyTemplateError,
     _format_key,  # noqa: PLC2701 — unit-test the key axis split
+    apply_local_deadline,
     build_dependency_graph,
     check_completeness,
     check_freshness,
@@ -58,8 +60,10 @@ from nousergon_lib.artifact_freshness import (
     listable_prefix,
     localize_root_causes,
     matches_key_template,
+    parse_deadline_local,
     resolve_current_cycle,
     resolve_dedup_key,
+    resolve_local_deadline_utc,
     validate_key_template,
 )
 from nousergon_lib.trading_calendar import last_closed_trading_day
@@ -1120,7 +1124,11 @@ def _daily_health_spec(**overrides) -> ArtifactSpec:
         "s3_key_template": "health/daily_data.json",
         "cadence": "continuous",
         "interval_minutes": 1440,
-        "sla_minutes_after_cron": 60,
+        # 0, not a positive value: alpha-engine-config-I10805 measured that
+        # `_freshness_floor` never consults `sla_minutes_after_cron` for this
+        # shape (continuous + trading_days + interval >= 1440) — the
+        # inert-SLA validator now refuses a non-zero declaration here.
+        "sla_minutes_after_cron": 0,
         "severity": "warning",
         "owner_repo": "alpha-engine-data",
         "created_at": date(2025, 1, 1),
@@ -1237,7 +1245,9 @@ def _weekly_predictor_spec(**overrides) -> ArtifactSpec:
         "s3_key_template": "predictor/self_test.json",
         "cadence": "continuous",
         "interval_minutes": 10080,
-        "sla_minutes_after_cron": 60,
+        # 0 — inert for this shape (continuous + trading_days + interval >=
+        # 1440); see the matching comment on `_daily_health_spec`.
+        "sla_minutes_after_cron": 0,
         "severity": "warning",
         "owner_repo": "crucible-predictor",
         "created_at": date(2025, 1, 1),
@@ -2272,3 +2282,271 @@ class TestWildcardSegmentFreshness:
         assert "*" in result.canonical_key
         with pytest.raises(ValueError, match="observed_key"):
             check_completeness(s3, spec, result.canonical_key)
+
+
+# ── deadline_local — wall-clock local deadlines (alpha-engine-config-I10805/I10829) ─
+
+
+class TestParseDeadlineLocal:
+
+    def test_valid_grammar(self):
+        hhmm, tz = parse_deadline_local("08:30 America/New_York")
+        assert hhmm.hour == 8 and hhmm.minute == 30
+        assert tz.key == "America/New_York"
+
+    def test_missing_zone_raises(self):
+        with pytest.raises(DeadlineLocalError, match="HH:MM"):
+            parse_deadline_local("08:30")
+
+    def test_compact_time_rejected(self):
+        # time.fromisoformat accepts "0830"; the grammar does not — an
+        # accepted compact form would silently diverge from the documented
+        # "<HH:MM> <IANA zone>" spelling.
+        with pytest.raises(DeadlineLocalError, match="malformed time"):
+            parse_deadline_local("0830 America/New_York")
+
+    def test_seconds_rejected(self):
+        # The strict HH:MM regex rejects the seconds field before it ever
+        # reaches `time.fromisoformat` — a seconds/offset-carrying string is
+        # simply not the grammar's "HH:MM" shape.
+        with pytest.raises(DeadlineLocalError, match="malformed time"):
+            parse_deadline_local("08:30:00 America/New_York")
+
+    def test_utc_offset_rejected(self):
+        # An offset would silently re-fix the deadline to one UTC instant —
+        # exactly the defect this field exists to remove. Also caught by the
+        # strict HH:MM regex, before `time.fromisoformat` is even called.
+        with pytest.raises(DeadlineLocalError, match="malformed time"):
+            parse_deadline_local("08:30+00:00 America/New_York")
+
+    def test_unknown_zone_raises(self):
+        with pytest.raises(DeadlineLocalError, match="unknown zone"):
+            parse_deadline_local("08:30 Mars/Olympus_Mons")
+
+    def test_bad_hour_raises(self):
+        with pytest.raises(DeadlineLocalError):
+            parse_deadline_local("24:00 America/New_York")
+
+    def test_empty_raises(self):
+        with pytest.raises(DeadlineLocalError):
+            parse_deadline_local("")
+
+    def test_none_raises(self):
+        with pytest.raises(DeadlineLocalError):
+            parse_deadline_local(None)  # type: ignore[arg-type]
+
+
+class TestResolveLocalDeadlineUtc:
+    """Pinned at both sides of the 2026-11-01 America/New_York DST changeover."""
+
+    def test_edt_offset(self):
+        # 2026-09-15 — EDT (UTC-4) in force.
+        deadline = parse_deadline_local("08:30 America/New_York")
+        due = resolve_local_deadline_utc(deadline, date(2026, 9, 15))
+        assert due == datetime(2026, 9, 15, 12, 30, tzinfo=timezone.utc)
+
+    def test_est_offset(self):
+        # 2026-11-03 — past the 2026-11-01 changeover, EST (UTC-5).
+        deadline = parse_deadline_local("08:30 America/New_York")
+        due = resolve_local_deadline_utc(deadline, date(2026, 11, 3))
+        assert due == datetime(2026, 11, 3, 13, 30, tzinfo=timezone.utc)
+
+
+def _preopen_spec(**overrides) -> ArtifactSpec:
+    """Models a `crucible_trader_preopen_*` row: continuous, daily,
+    trading-day-gated, with a wall-clock local pre-open deadline
+    (alpha-engine-config-I10805)."""
+    defaults = {
+        "artifact_id": "crucible_trader_preopen_signal",
+        "s3_bucket": "bkt",
+        "s3_key_template": "trader/preopen/latest.json",
+        "cadence": "continuous",
+        "interval_minutes": 1440,
+        "sla_minutes_after_cron": 0,  # inert for this shape — see validator
+        "severity": "critical",
+        "owner_repo": "crucible-executor",
+        "created_at": date(2025, 1, 1),
+        "run_calendar": "trading_days",
+        "deadline_local": "08:30 America/New_York",
+    }
+    defaults.update(overrides)
+    return ArtifactSpec(**defaults)
+
+
+def _preopen_s3(last_modified: datetime | None):
+    if last_modified is None:
+        return _fake_s3()
+    return _fake_s3(head_returns={
+        "trader/preopen/latest.json": {"LastModified": last_modified},
+    })
+
+
+class TestDeadlineLocalOnArtifactSpec:
+
+    def test_malformed_grammar_raises_at_construction(self):
+        with pytest.raises(DeadlineLocalError):
+            _preopen_spec(deadline_local="8:30am America/New_York")
+
+    def test_none_is_valid_and_unchanged_behavior(self):
+        spec = _preopen_spec(deadline_local=None)
+        assert spec.deadline_local is None
+
+
+class TestCheckFreshnessAppliesDeadlineLocal:
+    """`check_freshness` — the public entry point — applies the deadline
+    re-grade transparently; every caller (freshness-monitor Lambda,
+    upstream_artifact_gate.py) inherits it with no second call."""
+
+    def test_before_deadline_absence_is_fresh(self):
+        # Trading day, before 08:30 ET (12:30 UTC EDT). No object at all
+        # (the daily floor would say "missing" on its own) — deadline says
+        # absence is still expected.
+        now = datetime(2026, 9, 15, 11, 0, tzinfo=timezone.utc)
+        result = check_freshness(_preopen_s3(None), _preopen_spec(), now)
+        assert result.state == "fresh"
+        assert "expected before the declared deadline" in result.reason
+
+    def test_at_deadline_written_in_window_is_fresh(self):
+        now = datetime(2026, 9, 15, 12, 30, tzinfo=timezone.utc)
+        written = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+        result = check_freshness(_preopen_s3(written), _preopen_spec(), now)
+        assert result.state == "fresh"
+        assert "inside the declared deadline" in result.reason
+
+    def test_after_deadline_never_written_is_missing(self):
+        now = datetime(2026, 9, 15, 13, 0, tzinfo=timezone.utc)  # past 12:30 UTC
+        result = check_freshness(_preopen_s3(None), _preopen_spec(), now)
+        assert result.state == "missing"
+        assert "not written by the declared deadline" in result.reason
+        assert result.sla_violated_by_minutes > 0
+
+    def test_after_deadline_carried_over_from_prior_day_is_stale(self):
+        now = datetime(2026, 9, 15, 13, 0, tzinfo=timezone.utc)
+        stale_write = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+        result = check_freshness(_preopen_s3(stale_write), _preopen_spec(), now)
+        assert result.state == "stale"
+        assert "was missed by" in result.reason
+
+    def test_non_trading_day_untouched(self):
+        # Sunday — the row's own run_calendar gate already short-circuits to
+        # fresh; deadline_local must not re-derive a second calendar.
+        now = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+        result = check_freshness(_preopen_s3(None), _preopen_spec(), now)
+        assert result.state == "fresh"
+        assert "non-trading day" in result.reason
+
+    def test_dst_offset_est(self):
+        # 2026-11-03 — past the changeover. 08:30 ET is now 13:30 UTC. A
+        # write that would satisfy the OLD fixed-12:30-UTC assumption is
+        # still BEFORE the EST-correct due time.
+        now = datetime(2026, 11, 3, 13, 0, tzinfo=timezone.utc)
+        result = check_freshness(_preopen_s3(None), _preopen_spec(), now)
+        assert result.state == "fresh"  # still before 13:30 UTC due time
+        now_after = datetime(2026, 11, 3, 13, 45, tzinfo=timezone.utc)
+        result_after = check_freshness(_preopen_s3(None), _preopen_spec(), now_after)
+        assert result_after.state == "missing"
+
+    def test_probe_failed_untouched(self):
+        now = datetime(2026, 9, 15, 13, 0, tzinfo=timezone.utc)
+        s3 = _fake_s3(head_raises={
+            "trader/preopen/latest.json": RuntimeError("boom"),
+        })
+        result = check_freshness(s3, _preopen_spec(), now)
+        assert result.state == "probe_failed"
+
+    def test_apply_local_deadline_is_noop_without_the_field(self):
+        result = CheckResult(state="missing", reason="x")
+        spec = _spec()  # no deadline_local
+        out = apply_local_deadline(spec, result, datetime(2026, 9, 15, tzinfo=timezone.utc))
+        assert out is result
+
+
+# ── DST-aware weekday_sf / eod_sf cadence anchors ────────────────────────────
+
+
+class TestSfAnchorsDstAware:
+    """`_WEEKDAY_SF_CRON_LOCAL` / `_EOD_SF_ANCHOR_LOCAL` are declared in
+    America/New_York and converted per-date — the cron tick's UTC hour must
+    shift across the 2026-11-01 changeover, not stay pinned."""
+
+    def test_weekday_sf_tick_edt(self):
+        # Probe at 14:00 UTC on 2026-09-15 so today's 09:00 ET (13:00 UTC
+        # EDT) tick has definitely fired.
+        now = datetime(2026, 9, 15, 14, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="weekday_sf")
+        tick, label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 9, 15, 13, 0, tzinfo=timezone.utc)
+        assert label == "2026-09-15"
+
+    def test_weekday_sf_tick_est(self):
+        # Past the 2026-11-01 changeover — 09:00 ET is now 14:00 UTC.
+        now = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="weekday_sf")
+        tick, label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 11, 3, 14, 0, tzinfo=timezone.utc)
+        assert label == "2026-11-03"
+
+    def test_eod_sf_tick_edt(self):
+        now = datetime(2026, 9, 15, 22, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="eod_sf")
+        tick, _label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 9, 15, 21, 0, tzinfo=timezone.utc)
+
+    def test_eod_sf_tick_est(self):
+        now = datetime(2026, 11, 3, 23, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="eod_sf")
+        tick, _label = resolve_current_cycle(spec, now)
+        assert tick == datetime(2026, 11, 3, 22, 0, tzinfo=timezone.utc)
+
+    def test_weekday_sf_tick_not_yet_fired_steps_back_a_full_day_edt(self):
+        # 12:00 UTC on 2026-09-15 (EDT) is BEFORE the 13:00 UTC tick — must
+        # step back to the prior weekday's tick, not just subtract an hour.
+        now = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+        spec = _spec(cadence="weekday_sf")
+        tick, label = resolve_current_cycle(spec, now)
+        assert label == "2026-09-14"
+        assert tick == datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc)
+
+
+# ── Inert sla_minutes_after_cron validator (alpha-engine-config-I10805) ─────
+
+
+class TestInertSlaMinutesValidator:
+    """continuous + trading_days-or-market_hours + interval_minutes>=1440
+    resolves to a trading-day floor that never reads sla_minutes_after_cron —
+    a non-zero declaration there is refused at construction."""
+
+    def test_nonzero_sla_on_daily_trading_days_continuous_raises(self):
+        with pytest.raises(ValueError, match="inert"):
+            _daily_health_spec(sla_minutes_after_cron=60)
+
+    def test_zero_sla_on_daily_trading_days_continuous_is_valid(self):
+        spec = _daily_health_spec(sla_minutes_after_cron=0)
+        assert spec.sla_minutes_after_cron == 0
+
+    def test_nonzero_sla_on_weekly_trading_days_continuous_raises(self):
+        with pytest.raises(ValueError, match="inert"):
+            _weekly_predictor_spec(sla_minutes_after_cron=15)
+
+    def test_nonzero_sla_on_sub_daily_continuous_is_valid(self):
+        # interval_minutes < 1440 uses the rolling wall-clock floor, which
+        # DOES consult sla_minutes_after_cron — not inert.
+        spec = _open_orders_spec(sla_minutes_after_cron=15)
+        assert spec.sla_minutes_after_cron == 15
+
+    def test_nonzero_sla_on_all_days_continuous_is_valid(self):
+        # all_days uses the wall-clock now - (interval + sla) floor
+        # regardless of interval length — sla_minutes_after_cron is live.
+        spec = _daily_health_spec(run_calendar="all_days", sla_minutes_after_cron=60)
+        assert spec.sla_minutes_after_cron == 60
+
+    def test_nonzero_sla_on_non_continuous_cadence_is_valid(self):
+        # weekday_sf / eod_sf / saturday_sf all consult sla_minutes_after_cron
+        # via their own floor arithmetic — only the continuous trading-day
+        # daily-or-longer shape is inert.
+        spec = _spec(cadence="weekday_sf", sla_minutes_after_cron=60)
+        assert spec.sla_minutes_after_cron == 60
+
+    def test_market_hours_daily_interval_also_refused(self):
+        with pytest.raises(ValueError, match="inert"):
+            _open_orders_spec(interval_minutes=1440, sla_minutes_after_cron=30)
