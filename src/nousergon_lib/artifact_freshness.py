@@ -92,8 +92,11 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from datetime import date, datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import Any, Final, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # trading_calendar.py is a sys.modules rebind shim to
 # krepis.trading_calendar; pyright can't see through the dynamic rebind,
@@ -148,10 +151,39 @@ CADENCE_SYMBOLS: Final[frozenset[str]] = frozenset(
 # Sunday SF fires 09:00 UTC Sun (EventBridge rule ``alpha-engine-modelzoo-sunday``,
 # ``cron(0 9 ? * SUN *)``) — the weekly counterpart to saturday_sf, anchored to
 # Sunday instead of Saturday.
+#
+# ``saturday_sf`` / ``sunday_sf`` stay FIXED-UTC: the weekly SF is a
+# calendar-day batch job with no wall-clock local-business-day meaning, and
+# its own 10-calendar-day staleness window (`_SATURDAY_SF_STALE_DAYS`) already
+# swallows a ±1h DST wobble with room to spare.
 _SATURDAY_SF_CRON_UTC: Final[int] = 9
 _SUNDAY_SF_CRON_UTC: Final[int] = 9
-_WEEKDAY_SF_CRON_UTC: Final[int] = 13
-_EOD_SF_ANCHOR_UTC: Final[int] = 21
+
+# ``weekday_sf`` / ``eod_sf`` DO carry local-business-day meaning — pre-open
+# and end-of-day are Eastern-market-hours concepts — so a FIXED-UTC anchor is
+# wrong for half the year (alpha-engine-config-I10805 measured this exact
+# defect for `sla_minutes_after_cron`; the cadence anchor is the same class of
+# bug one layer up). Declared in `America/New_York` and converted to UTC PER
+# DATE by `_sf_anchor_utc`, so the UTC instant moves with the zone's own
+# offset (13:00 UTC under EDT, 14:00 UTC under EST) with no per-season
+# constant to maintain. 09:00 / 17:00 America/New_York reproduce the prior
+# fixed 13:00 / 21:00 UTC constants exactly while EDT is in force (today,
+# 2026-09-14); the divergence begins at the 2026-11-01 changeover.
+_WEEKDAY_SF_CRON_LOCAL: Final[dt_time] = dt_time(9, 0)
+_EOD_SF_ANCHOR_LOCAL: Final[dt_time] = dt_time(17, 0)
+_SF_ANCHOR_ZONE: Final[ZoneInfo] = ZoneInfo("America/New_York")
+
+
+def _sf_anchor_utc(local_time: dt_time, on_date: date) -> datetime:
+    """The UTC instant ``local_time`` falls on for ``on_date`` in
+    :data:`_SF_ANCHOR_ZONE` — DST-correct by construction (the wall-clock
+    time is attached to the calendar date with ``tzinfo=`` and the zone
+    resolves its own UTC offset for that date), mirroring
+    :func:`resolve_local_deadline_utc`.
+    """
+    return datetime.combine(
+        on_date, local_time, tzinfo=_SF_ANCHOR_ZONE,
+    ).astimezone(timezone.utc)
 
 CheckState = Literal["fresh", "stale", "missing", "probe_failed", "grace_period"]
 
@@ -201,6 +233,209 @@ RunCalendarSymbol = Literal["trading_days", "all_days", "market_hours"]
 RUN_CALENDAR_SYMBOLS: Final[frozenset[str]] = frozenset(
     {"trading_days", "all_days", "market_hours"}
 )
+
+
+# ── Wall-clock local deadlines (alpha-engine-config-I10805 / I10829) ────────
+#
+# `sla_minutes_after_cron` is a fixed-UTC-minutes offset from a cadence
+# anchor. For a cadence that is a real deadline in somebody's local business
+# day (pre-open, end-of-day), that offset is wrong twice a year across DST.
+# `deadline_local` is the fix, and it is deliberately NOT a variant of the
+# SLA-minutes arithmetic: the deadline is resolved by
+# ``datetime.combine(local_day, HH:MM, tzinfo=ZoneInfo(zone)).astimezone(utc)``
+# on the row's OWN local calendar day, so the UTC instant it lands on moves
+# with the zone's offset (12:30 UTC under EDT, 13:30 UTC under EST for
+# ``08:30 America/New_York``) with no per-season maintenance and no second
+# constant to keep in step.
+#
+# Lifted from ``nousergon-data/infrastructure/lambdas/freshness-monitor/``
+# (nousergon-data-PR1723) onto :class:`ArtifactSpec` as a first-class field
+# per ``policy-shared-code``'s second-adoption trigger — the freshness
+# monitor was the first consumer; ``crucible-executor``'s
+# ``upstream_artifact_gate.py`` (and any other ``check_freshness`` caller) is
+# the second, and now inherits the re-grade for free: it is wired into
+# :func:`check_freshness` itself (§4b below) rather than requiring every
+# caller to remember a second call.
+_DEADLINE_LOCAL_HELP: Final[str] = (
+    "expected '<HH:MM> <IANA zone>', e.g. '08:30 America/New_York'"
+)
+_HHMM_RE: Final[re.Pattern[str]] = re.compile(r"([01]\d|2[0-3]):[0-5]\d\Z")
+
+
+class DeadlineLocalError(ValueError):
+    """``ArtifactSpec.deadline_local`` does not match the grammar.
+
+    Raised at spec construction — the same fail-loud shape as
+    :func:`validate_key_template` — rather than degraded to "no deadline" at
+    the registry loader. Now that ``deadline_local`` is a first-class
+    ``ArtifactSpec`` field, spec construction is the one chokepoint every
+    caller shares; a loader that constructs specs from untrusted rows (e.g. a
+    YAML registry) is the place to catch this and skip/log the offending row,
+    not this parser.
+    """
+
+
+def parse_deadline_local(value: str) -> tuple[dt_time, ZoneInfo]:
+    """Parse a ``deadline_local`` value into ``(time, tzinfo)``.
+
+    Grammar: ``"<HH:MM> <IANA zone>"`` — strict zero-padded 24h ``HH:MM``
+    (``time.fromisoformat`` alone also accepts the compact ``0830``, a
+    seconds field, and a trailing UTC offset; an offset in particular would
+    silently re-fix the deadline to one UTC instant, which is the whole
+    defect this field exists to remove — so those shapes are rejected here
+    even though the stdlib parser would accept them) and a zone
+    :mod:`zoneinfo` can resolve.
+
+    Raises :class:`DeadlineLocalError` for any malformed shape. See the
+    class docstring for why this raises rather than degrading.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise DeadlineLocalError(
+            f"deadline_local={value!r} — {_DEADLINE_LOCAL_HELP}"
+        )
+    parts = value.strip().split()
+    if len(parts) != 2:
+        raise DeadlineLocalError(
+            f"deadline_local={value!r} — {_DEADLINE_LOCAL_HELP}"
+        )
+    hhmm, zone = parts
+    if not _HHMM_RE.match(hhmm):
+        # Rejects a seconds field, a UTC offset, and the compact `0830` form
+        # in one shot — `_HHMM_RE` is anchored to fully match exactly
+        # `HH:MM`, so anything `time.fromisoformat` would additionally
+        # accept (all three of the above) never reaches it.
+        raise DeadlineLocalError(
+            f"deadline_local={value!r} carries a malformed time {hhmm!r} — "
+            f"{_DEADLINE_LOCAL_HELP}"
+        )
+    parsed = dt_time.fromisoformat(hhmm)
+    try:
+        tz = ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError) as err:
+        raise DeadlineLocalError(
+            f"deadline_local={value!r} carries an unknown zone {zone!r} — "
+            f"{_DEADLINE_LOCAL_HELP}"
+        ) from err
+    return parsed, tz
+
+
+def resolve_local_deadline_utc(
+    deadline: tuple[dt_time, ZoneInfo], on_local_date: date,
+) -> datetime:
+    """The UTC instant ``deadline`` falls on for ``on_local_date``.
+
+    DST-correct BY CONSTRUCTION, not by table: the wall-clock time is
+    attached to the local calendar day with ``tzinfo=`` and the zone
+    resolves its own UTC offset for that date, so ``08:30
+    America/New_York`` is 12:30 UTC while EDT is in force and 13:30 UTC from
+    the 2026-11-01 changeover onward, with no constant anywhere that has to
+    be edited on either side of it.
+    """
+    hhmm, tz = deadline
+    return datetime.combine(on_local_date, hhmm, tzinfo=tz).astimezone(timezone.utc)
+
+
+def apply_local_deadline(
+    spec: ArtifactSpec,
+    result: CheckResult,
+    now: datetime,
+) -> CheckResult:
+    """Re-grade ``result`` against ``spec.deadline_local`` (a no-op when unset).
+
+    Semantics, on the row's own LOCAL calendar day:
+
+    * No ``deadline_local`` ⇒ untouched.
+    * Not a trading day in that zone ⇒ untouched. The row's declared
+      ``run_calendar`` / calendar-aware gate already owns the
+      weekend/holiday short-circuit; re-deriving it here would be a second
+      calendar to keep in step with the first.
+    * ``probe_failed`` ⇒ untouched. The monitor being broken is not a
+      producer verdict and must keep its own no-grace page path.
+    * BEFORE the deadline ⇒ a ``missing``/``stale`` verdict is downgraded to
+      ``fresh``. This is the ONE place the field removes a page, and it is
+      the field's whole meaning: a deadline says absence before it is
+      EXPECTED. It is bounded to the current local day (never across days)
+      and it removes a page, never a fact — ``reason`` records the pending
+      deadline and the row still reaches the caller with it.
+    * AT OR AFTER the deadline ⇒ the artifact must carry a ``last_modified``
+      inside ``[local midnight, deadline]``. Anything else — absent, or
+      written after the deadline, or carried over from a previous day — is
+      a confirmed miss (``missing`` when nothing was found, ``stale`` when a
+      too-old or too-late instance was), with ``sla_violated_by_minutes``
+      counted from the deadline.
+
+    ``spec.severity`` is untouched — this function never raises one, only
+    re-grades the freshness verdict callers already route to alerting.
+    """
+    if spec.deadline_local is None:
+        return result
+    deadline = parse_deadline_local(spec.deadline_local)
+    now_utc = _utc(now)
+    _hhmm, tz = deadline
+    local_day = now_utc.astimezone(tz).date()
+    if not is_trading_day(local_day):
+        return result
+    if result.state == "probe_failed":
+        return result
+
+    due_utc = resolve_local_deadline_utc(deadline, local_day)
+    label = f"{_hhmm.isoformat(timespec='minutes')} {tz.key} ({due_utc:%H:%MZ}) on {local_day}"
+
+    if now_utc < due_utc:
+        if result.state in ("missing", "stale"):
+            return dc_replace(
+                result,
+                state="fresh",
+                sla_violated_by_minutes=0,
+                reason=(
+                    f"absence is expected before the declared deadline "
+                    f"{label}; substrate verdict was {result.state}: "
+                    f"{result.reason}"
+                ),
+            )
+        return result
+
+    day_start_utc = datetime.combine(
+        local_day, dt_time(0, 0), tzinfo=tz,
+    ).astimezone(timezone.utc)
+    late_by = max(1, int((now_utc - due_utc).total_seconds() // 60))
+    last_modified = result.last_modified
+    if last_modified is not None and last_modified.tzinfo is None:
+        last_modified = last_modified.replace(tzinfo=timezone.utc)
+
+    if last_modified is None:
+        return dc_replace(
+            result,
+            state="missing",
+            sla_violated_by_minutes=late_by,
+            reason=(
+                f"not written by the declared deadline {label} — {late_by} "
+                f"min late. Substrate verdict was {result.state}: "
+                f"{result.reason}"
+            ),
+        )
+    if not (day_start_utc <= last_modified <= due_utc):
+        return dc_replace(
+            result,
+            state="stale",
+            sla_violated_by_minutes=late_by,
+            reason=(
+                f"newest instance last_modified={last_modified.isoformat()} "
+                f"is outside [{day_start_utc.isoformat()}, "
+                f"{due_utc.isoformat()}] — the declared deadline {label} "
+                f"was missed by {late_by} min"
+            ),
+        )
+    return dc_replace(
+        result,
+        state="fresh",
+        last_modified=last_modified,
+        sla_violated_by_minutes=0,
+        reason=(
+            f"written {last_modified.isoformat()}, inside the declared "
+            f"deadline {label}"
+        ),
+    )
 
 
 # ── Spec ────────────────────────────────────────────────────────────────────
@@ -361,6 +596,21 @@ class ArtifactSpec:
             proves the producer runs. Default ``False`` — a plain
             ``event_driven`` row without this flag remains eligible for the
             never-written probe (config-I10614).
+        deadline_local: Optional wall-clock local deadline
+            (alpha-engine-config-I10805/I10829), grammar
+            ``"<HH:MM> <IANA zone>"`` (e.g. ``"08:30 America/New_York"``),
+            parsed by :func:`parse_deadline_local` and applied by
+            :func:`check_freshness` (via :func:`apply_local_deadline`) on
+            the row's own local calendar day. Use it for any row whose real
+            deadline is a local-business-day wall-clock time rather than a
+            fixed UTC offset from the cadence's cron tick — the same class
+            of DST bug ``_WEEKDAY_SF_CRON_LOCAL`` / ``_EOD_SF_ANCHOR_LOCAL``
+            fix for the cadence anchor itself, one layer up. ``None`` (the
+            default) means "no local deadline" — the row's ``cadence`` /
+            ``sla_minutes_after_cron`` floor is the only verdict, matching
+            every row that predates this field. Malformed grammar raises
+            :class:`DeadlineLocalError` at construction (fail loud, like
+            :func:`validate_key_template`).
     """
 
     artifact_id: str
@@ -382,6 +632,7 @@ class ArtifactSpec:
     liveness_via: str | None = None
     completeness: CompletenessCheck | None = None
     absence_expected: bool = False
+    deadline_local: str | None = None
 
     def __post_init__(self) -> None:
         if self.cadence not in CADENCE_SYMBOLS:
@@ -420,6 +671,52 @@ class ArtifactSpec:
         if self.recovery_key_template is not None:
             validate_key_template(self.recovery_key_template)
         self._validate_absence_expected()
+        self._validate_deadline_local()
+        self._validate_inert_sla_minutes()
+
+    def _validate_deadline_local(self) -> None:
+        """Reject malformed ``deadline_local`` grammar at construction —
+        raises :class:`DeadlineLocalError` (a :class:`ValueError` subclass)
+        via :func:`parse_deadline_local`. ``None`` (unset) is always valid.
+        """
+        if self.deadline_local is not None:
+            parse_deadline_local(self.deadline_local)
+
+    def _validate_inert_sla_minutes(self) -> None:
+        """Refuse a declared ``sla_minutes_after_cron`` on a cadence shape
+        whose :func:`_freshness_floor` never consults it.
+
+        Measured (alpha-engine-config-I10805): for
+        ``cadence="continuous"`` + a resolved ``run_calendar`` of
+        ``"trading_days"``/``"market_hours"`` + ``interval_minutes >= 1440``,
+        ``_freshness_floor`` returns a trading-day-counted floor
+        (``subtract_trading_days(last_closed_trading_day(now),
+        ceil(interval_minutes / 1440))``) and never reads
+        ``sla_minutes_after_cron`` at all — a row declaring a non-zero value
+        there is declaring something the engine silently ignores. ``0`` is
+        the "no SLA" spelling and stays legal (it is what every row of this
+        shape declares today); any other value is refused so the typo is
+        caught at spec construction instead of grading against a floor the
+        author never sees.
+        """
+        if self.cadence != "continuous" or self.interval_minutes is None:
+            return
+        if _resolve_run_calendar(self) == "all_days":
+            return
+        if self.interval_minutes < 1440:
+            return
+        if self.sla_minutes_after_cron != 0:
+            raise ValueError(
+                f"ArtifactSpec.sla_minutes_after_cron="
+                f"{self.sla_minutes_after_cron} is inert for "
+                f"{self.artifact_id!r}: cadence='continuous' + "
+                f"run_calendar={_resolve_run_calendar(self)!r} + "
+                f"interval_minutes={self.interval_minutes} (>= 1440) "
+                "resolves to a trading-day freshness floor that never "
+                "consults sla_minutes_after_cron (alpha-engine-config-"
+                "I10805) — declare 0, or use deadline_local for a real "
+                "wall-clock deadline"
+            )
 
     def _validate_absence_expected(self) -> None:
         """Validate the ``absence_expected`` ↔ ``event_driven`` coupling.
@@ -718,30 +1015,28 @@ def resolve_current_cycle(
         return tick, f"{iso_year}-W{iso_week:02d}-SUN"
 
     if spec.cadence in ("weekday_sf", "eod_sf"):
-        cron_hour = (
-            _WEEKDAY_SF_CRON_UTC
+        anchor_local = (
+            _WEEKDAY_SF_CRON_LOCAL
             if spec.cadence == "weekday_sf"
-            else _EOD_SF_ANCHOR_UTC
+            else _EOD_SF_ANCHOR_LOCAL
         )
-        # Walk back to the most recent calendar weekday whose cron hour
-        # has passed in UTC. The cycle is the calendar weekday — NYSE
-        # holidays are NOT snapped away here. The holiday gate in
-        # :func:`check_freshness` is what suppresses the alert on
-        # holidays (state="fresh" with a holiday reason), preserving
-        # one distinct cycle per calendar day so dedup keys don't
-        # collide with the prior trading day's actual probe.
+        # Walk back to the most recent calendar weekday whose cron anchor
+        # has passed — the anchor is declared in America/New_York and
+        # resolved to UTC per date via `_sf_anchor_utc`, so it tracks the
+        # 2026-11-01 DST changeover instead of drifting by an hour. The
+        # cycle is the calendar weekday — NYSE holidays are NOT snapped
+        # away here. The holiday gate in :func:`check_freshness` is what
+        # suppresses the alert on holidays (state="fresh" with a holiday
+        # reason), preserving one distinct cycle per calendar day so dedup
+        # keys don't collide with the prior trading day's actual probe.
         d = _most_recent_weekday(now_utc)
-        tick = datetime(
-            d.year, d.month, d.day, cron_hour, 0, tzinfo=timezone.utc,
-        )
+        tick = _sf_anchor_utc(anchor_local, d)
         if tick > now_utc:
             # Today's tick hasn't fired yet — step back one weekday.
             d -= timedelta(days=1)
             while d.weekday() > 4:
                 d -= timedelta(days=1)
-            tick = datetime(
-                d.year, d.month, d.day, cron_hour, 0, tzinfo=timezone.utc,
-            )
+            tick = _sf_anchor_utc(anchor_local, d)
         return tick, d.isoformat()
 
     if spec.cadence == "continuous":
@@ -1526,6 +1821,33 @@ def check_freshness(
     list_cache: dict | None = None,
 ) -> CheckResult:
     """Probe ``spec`` and return the classified outcome.
+
+    When ``spec.deadline_local`` is set, the substrate verdict computed by
+    :func:`_check_freshness_impl` is re-graded against that wall-clock local
+    deadline via :func:`apply_local_deadline` before it is returned — every
+    caller of ``check_freshness`` (the freshness-monitor Lambda,
+    ``crucible-executor``'s ``upstream_artifact_gate.py``, and any future
+    consumer) inherits the deadline semantics for free, with no second call
+    to remember (alpha-engine-config-I10805/I10829). ``deadline_local=None``
+    (the default) makes this byte-identical to every row that predates the
+    field.
+
+    See :func:`_check_freshness_impl` for the substrate probe this wraps.
+    """
+    result = _check_freshness_impl(s3_client, spec, now, list_cache=list_cache)
+    return apply_local_deadline(spec, result, now)
+
+
+def _check_freshness_impl(
+    s3_client: Any,
+    spec: ArtifactSpec,
+    now: datetime,
+    *,
+    list_cache: dict | None = None,
+) -> CheckResult:
+    """The freshness substrate probe — see :func:`check_freshness` (the
+    public entry point, which additionally applies ``spec.deadline_local``)
+    for the deadline-aware wrapper every caller should use.
 
     ``list_cache`` (keyword-only, default ``None``) is an optional per-run
     S3-LIST cache threaded into every :func:`_newest_under_prefix` call this
