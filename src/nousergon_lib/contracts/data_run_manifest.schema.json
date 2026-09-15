@@ -167,7 +167,20 @@
         "etag": { "type": ["string", "null"] },
         "schema_version": { "type": ["string", "null"] },
         "rows_out": { "minimum": 0, "type": "integer" },
-        "bytes": { "minimum": 0, "type": ["integer", "null"] }
+        "bytes": { "minimum": 0, "type": ["integer", "null"] },
+        "version_id": {
+          "type": ["string", "null"],
+          "description": "The S3 VersionId of the object this run published, measured right after the write (alpha-engine-config-I10892). Null on an unversioned bucket or when not captured — `version_capture` says which. Optional: manifests written before it existed still validate."
+        },
+        "version_capture": {
+          "enum": ["caller", "head_object", "object_absent", "unavailable", "not_captured"],
+          "description": "How `etag` / `version_id` / `bytes` were obtained. A reader must treat anything other than `caller` or `head_object` as no recorded version."
+        },
+        "version_capture_error": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Present when `version_capture` is `unavailable`: the HeadObject failure."
+        }
       }
     },
     "RejectedRow": {
