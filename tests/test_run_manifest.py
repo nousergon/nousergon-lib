@@ -18,9 +18,11 @@ from nousergon_lib.run_manifest import (
     NOT_APPLICABLE_REASONS,
     SCHEMA_VERSION,
     TRIGGERS,
+    VERSION_CAPTURES,
     CodeShaError,
     LocalDirManifestSink,
     NotApplicable,
+    S3ManifestSink,
     UnitRun,
     manifest_key,
     new_run_id,
@@ -306,6 +308,149 @@ def test_not_applicable_reasons_carries_the_i10831_members():
         "disabled_by_declaration",
         "outside_session_window",
     }
+
+
+# ── per-output version capture (alpha-engine-config-I10892) ───────────────
+
+
+class _ClientError(Exception):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
+class FakeS3:
+    """put_object for the manifest, head_object for the outputs."""
+
+    def __init__(self, heads=None, fail_code=None):
+        self.heads = heads or {}
+        self.fail_code = fail_code
+        self.head_calls: list[tuple[str, str]] = []
+        self.puts: list[tuple[str, dict]] = []
+
+    def put_object(self, *, Bucket, Key, Body, ContentType):
+        self.puts.append((Key, json.loads(Body.decode("utf-8"))))
+        return {"ETag": '"manifest-etag"'}
+
+    def head_object(self, *, Bucket, Key):
+        self.head_calls.append((Bucket, Key))
+        if self.fail_code:
+            raise _ClientError(self.fail_code)
+        if (Bucket, Key) not in self.heads:
+            raise _ClientError("404")
+        return self.heads[(Bucket, Key)]
+
+
+def _s3_run(body, client, **sink_kw):
+    sink = S3ManifestSink(bucket="alpha-engine-research", s3_client=client, **sink_kw)
+    _run(body, sink)
+    return client.puts[0][1]
+
+
+def test_record_output_measures_etag_version_and_bytes_without_the_caller_passing_them():
+    client = FakeS3(
+        {
+            ("alpha-engine-research", "market_data/close_history/A.json"): {
+                "ETag": '"abc123"',
+                "VersionId": "v-3HL4kqtJlcpXroDTDmJ",
+                "ContentLength": 48213,
+            }
+        }
+    )
+    manifest = _s3_run(lambda ctx: ctx.record_output("market_data/close_history/A.json", rows_out=2511), client)
+    out = manifest["outputs"][0]
+    assert out["etag"] == "abc123"
+    assert out["version_id"] == "v-3HL4kqtJlcpXroDTDmJ"
+    assert out["bytes"] == 48213
+    assert out["version_capture"] == "head_object"
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_an_unversioned_objects_null_version_id_is_recorded_as_none():
+    client = FakeS3({("alpha-engine-research", "k.json"): {"ETag": '"e"', "VersionId": "null", "ContentLength": 3}})
+    out = _s3_run(lambda ctx: ctx.record_output("k.json", rows_out=1), client)["outputs"][0]
+    assert out["etag"] == "e"
+    assert out["version_id"] is None
+    assert out["version_capture"] == "head_object"
+
+
+def test_a_404_head_is_object_absent_not_a_failure():
+    """`arcticdb/universe` is recorded as an output but is not one S3 object."""
+    client = FakeS3()
+    manifest = _s3_run(lambda ctx: ctx.record_output("arcticdb/universe", rows_out=900), client)
+    out = manifest["outputs"][0]
+    assert manifest["status"] == "ok"
+    assert (out["etag"], out["version_id"], out["bytes"]) == (None, None, None)
+    assert out["version_capture"] == "object_absent"
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_a_denied_head_is_recorded_as_unavailable_and_the_run_still_succeeds(caplog):
+    client = FakeS3(fail_code="AccessDenied")
+    with caplog.at_level("WARNING"):
+        manifest = _s3_run(lambda ctx: ctx.record_output("k.json", rows_out=1), client)
+    out = manifest["outputs"][0]
+    assert manifest["status"] == "ok"
+    assert out["version_capture"] == "unavailable"
+    assert "AccessDenied" in out["version_capture_error"]
+    assert out["version_id"] is None
+    assert "HeadObject for output k.json failed" in caplog.text
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_caller_supplied_fields_win_and_skip_the_lookup():
+    client = FakeS3()
+    out = _s3_run(
+        lambda ctx: ctx.record_output("k.json", rows_out=1, etag="e1", bytes_=10, version_id="v1"), client
+    )["outputs"][0]
+    assert (out["etag"], out["bytes"], out["version_id"], out["version_capture"]) == ("e1", 10, "v1", "caller")
+    assert client.head_calls == []
+
+
+def test_a_partially_supplied_record_is_completed_from_the_head_without_overwriting():
+    client = FakeS3({("alpha-engine-research", "k.json"): {"ETag": '"store"', "VersionId": "v9", "ContentLength": 7}})
+    out = _s3_run(lambda ctx: ctx.record_output("k.json", rows_out=1, etag="caller-etag"), client)["outputs"][0]
+    assert (out["etag"], out["version_id"], out["bytes"]) == ("caller-etag", "v9", 7)
+    assert out["version_capture"] == "head_object"
+
+
+def test_head_key_redirects_the_lookup_and_s3_uris_address_their_own_bucket():
+    client = FakeS3(
+        {
+            ("alpha-engine-research", "shadow/2026-09-14/k.json"): {"ETag": '"s"', "VersionId": "vs", "ContentLength": 1},
+            ("other-bucket", "x/y.parquet"): {"ETag": '"o"', "VersionId": "vo", "ContentLength": 2},
+        }
+    )
+
+    def body(ctx):
+        ctx.record_output("k.json", rows_out=1)
+        ctx.record_output("s3://other-bucket/x/y.parquet", rows_out=1)
+
+    outs = _s3_run(body, client, head_key=lambda k: k if k.startswith("s3://") else f"shadow/2026-09-14/{k}")["outputs"]
+    assert [o["version_id"] for o in outs] == ["vs", "vo"]
+    assert outs[0]["key"] == "k.json"  # the RECORDED key is unchanged; only the lookup moved
+
+
+def test_a_sink_without_head_records_not_captured():
+    sink = RecordingSink()
+    _run(lambda ctx: ctx.record_output("k.json", rows_out=1), sink)
+    manifest = sink.writes[0][1]
+    assert manifest["outputs"][0]["version_capture"] == "not_captured"
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_a_pre_i10892_manifest_with_null_etag_and_no_version_fields_still_validates():
+    sink = RecordingSink()
+    _run(lambda ctx: None, sink)
+    manifest = dict(sink.writes[0][1])
+    manifest["outputs"] = [{"key": "k.json", "etag": None, "schema_version": None, "rows_out": 5, "bytes": None}]
+    manifest["rows_out"] = 5
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_version_capture_vocabulary_matches_the_schema():
+    schema = contracts.load_schema("data_run_manifest")
+    assert set(schema["$defs"]["OutputRef"]["properties"]["version_capture"]["enum"]) == VERSION_CAPTURES
 
 
 def test_the_closed_vocabularies_match_the_schema():

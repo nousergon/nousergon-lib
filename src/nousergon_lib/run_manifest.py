@@ -88,10 +88,12 @@ __all__ = [
     "NOT_APPLICABLE_REASONS",
     "SCHEMA_VERSION",
     "TRIGGERS",
+    "VERSION_CAPTURES",
     "CodeShaError",
     "LocalDirManifestSink",
     "ManifestSink",
     "NotApplicable",
+    "ObjectVersion",
     "S3ManifestSink",
     "UnitRun",
     "UnitRunResult",
@@ -197,9 +199,59 @@ class ManifestSink(Protocol):
         """Persist ``payload`` at ``key``; return the object's ETag if it has one."""
 
 
+#: How an output's ``etag`` / ``version_id`` / ``bytes`` came to be on the
+#: record. Closed, and written on every output so a ``null`` version is never
+#: ambiguous between "nobody looked" and "the object was not there":
+#:
+#: * ``caller`` — the write site passed every field itself.
+#: * ``head_object`` — measured by a HeadObject against the sink's store right
+#:   after the write was recorded (alpha-engine-config-I10892).
+#: * ``object_absent`` — the HeadObject answered 404: the key is not a single
+#:   object in the sink's bucket (an ArcticDB library reference such as
+#:   ``arcticdb/universe``, a prefix, or a key in another bucket).
+#: * ``unavailable`` — the HeadObject failed for any other reason; the error is
+#:   carried in ``version_capture_error``.
+#: * ``not_captured`` — the sink has no way to look (a local-directory sink, a
+#:   hand-built :class:`UnitRun`).
+VERSION_CAPTURES: frozenset[str] = frozenset(
+    {"caller", "head_object", "object_absent", "unavailable", "not_captured"}
+)
+
+
+@dataclass(frozen=True)
+class ObjectVersion:
+    """What a store says about one object as it stands now."""
+
+    etag: str | None
+    version_id: str | None
+    bytes: int | None
+
+
+def _clean_etag(value: Any) -> str | None:
+    return value.strip('"') if isinstance(value, str) else None
+
+
+def _split_s3_uri(key: str, default_bucket: str) -> tuple[str, str]:
+    """``s3://bucket/key`` addresses its own bucket; a bare key is the sink's."""
+    if key.startswith("s3://"):
+        bucket, _, rest = key[len("s3://") :].partition("/")
+        return bucket, rest
+    return default_bucket, key
+
+
 @dataclass
 class S3ManifestSink:
     """The production sink: one JSON object per run under the declared prefix.
+
+    It also answers :meth:`head` — an output object's version as it stands
+    right after the unit recorded it — so every ``record_output`` carries the
+    ``etag`` / ``version_id`` / ``bytes`` a later reader needs to fetch THAT
+    object rather than whatever a later run overwrote it with
+    (alpha-engine-config-I10892). ``head_key`` maps a recorded output key to the
+    physical key to look at, for a caller whose writes are redirected below the
+    S3 client (a shadow run's output root); the default is the key itself.
+    HeadObject needs ``s3:GetObject`` on the output key; a role without it
+    records ``version_capture: unavailable`` rather than failing the unit.
 
     Every identity that runs a unit needs ``s3:PutObject`` on
     ``<bucket>/data_collection/runs/*`` — this is NOT implied by a unit's own
@@ -213,6 +265,7 @@ class S3ManifestSink:
     bucket: str
     prefix: str = DEFAULT_MANIFEST_PREFIX
     s3_client: Any = None
+    head_key: Callable[[str], str] | None = None
 
     def _client(self) -> Any:
         if self.s3_client is None:
@@ -230,6 +283,34 @@ class S3ManifestSink:
         )
         etag = resp.get("ETag") if isinstance(resp, Mapping) else None
         return etag.strip('"') if isinstance(etag, str) else None
+
+    def head(self, key: str) -> ObjectVersion | None:
+        """The object's current ETag, VersionId and size, or ``None`` on a 404.
+
+        Any other failure RAISES; :meth:`UnitRun.record_output` decides what a
+        failed look means for the record. ``version_id`` is ``None`` when the
+        bucket is unversioned (S3 omits the header, or returns ``"null"`` for an
+        object written before versioning was enabled).
+        """
+        physical = self.head_key(key) if self.head_key is not None else key
+        bucket, object_key = _split_s3_uri(physical, self.bucket)
+        try:
+            resp = self._client().head_object(Bucket=bucket, Key=object_key)
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            code = ""
+            if isinstance(response, Mapping):
+                code = str((response.get("Error") or {}).get("Code") or "")
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise
+        version = resp.get("VersionId")
+        size = resp.get("ContentLength")
+        return ObjectVersion(
+            etag=_clean_etag(resp.get("ETag")),
+            version_id=version if isinstance(version, str) and version and version != "null" else None,
+            bytes=int(size) if isinstance(size, int) and not isinstance(size, bool) else None,
+        )
 
 
 @dataclass
@@ -316,6 +397,9 @@ class UnitRun:
     excluded: list[dict[str, Any]] = field(default_factory=list)
     denominator: dict[str, Any] | None = None
     compute: dict[str, Any] = field(default_factory=_resolve_compute)
+    #: Looks up an output object's current version. Set by :func:`run_unit`
+    #: from a sink that has a ``head`` method; never written to the manifest.
+    object_head: Callable[[str], ObjectVersion | None] | None = field(default=None, repr=False)
 
     def record_input(
         self,
@@ -336,24 +420,67 @@ class UnitRun:
         etag: str | None = None,
         schema_version: str | None = None,
         bytes_: int | None = None,
+        version_id: str | None = None,
     ) -> None:
         """One artifact this run PUBLISHED, with the row count that landed in it.
 
         ``rows_out`` is required and has no ``None``: "we did not count" and "we
         counted zero" are different facts with opposite consequences, and the
         empty-but-fresh objective is computed from this number.
+
+        **The version is measured here, not passed in** (alpha-engine-config-I10892).
+        Unless the caller supplied ``etag``, ``bytes_`` and ``version_id`` all
+        three, the object is looked up through :attr:`object_head` and the
+        missing fields are filled from what the store says NOW — immediately
+        after the write this call records. That is what lets a later reader
+        fetch the exact object this run published after a subsequent run has
+        overwritten the key. How the fields were obtained is written as
+        ``version_capture`` (:data:`VERSION_CAPTURES`), so a ``null`` is never
+        ambiguous.
         """
         if rows_out < 0:
             raise ValueError(f"rows_out must be >= 0, got {rows_out}")
-        self.outputs.append(
-            {
-                "key": key,
-                "etag": etag,
-                "schema_version": schema_version,
-                "rows_out": int(rows_out),
-                "bytes": bytes_,
-            }
-        )
+        record: dict[str, Any] = {
+            "key": key,
+            "etag": etag,
+            "schema_version": schema_version,
+            "rows_out": int(rows_out),
+            "bytes": bytes_,
+            "version_id": version_id,
+        }
+        if etag is not None and bytes_ is not None and version_id is not None:
+            record["version_capture"] = "caller"
+        elif self.object_head is None:
+            record["version_capture"] = "not_captured"
+        else:
+            try:
+                head = self.object_head(key)
+            except Exception as exc:  # noqa: BLE001 -- recorded on the manifest, see below
+                # Deliberate, narrow deviation from raise-by-default:
+                # (a) swallowed: a HeadObject that failed for a reason other than
+                #     404 (a writer role holding PutObject but not GetObject, a
+                #     throttle). (b) The primary deliverable survives: the object
+                #     was ALREADY written, and failing the unit here would mark a
+                #     successful publish `failed` over its lineage record, not its
+                #     data. (c) Recording surface: this output's own
+                #     `version_capture: unavailable` + `version_capture_error`,
+                #     which a parity reader treats as "no recorded version" and
+                #     never as a match — plus the WARNING below.
+                logger.warning("unit %s: HeadObject for output %s failed: %s", self.unit_id, key, exc)
+                record["version_capture"] = "unavailable"
+                record["version_capture_error"] = f"{type(exc).__name__}: {exc}"[:500]
+            else:
+                if head is None:
+                    record["version_capture"] = "object_absent"
+                else:
+                    record["version_capture"] = "head_object"
+                    if record["etag"] is None:
+                        record["etag"] = head.etag
+                    if record["bytes"] is None:
+                        record["bytes"] = head.bytes
+                    if record["version_id"] is None:
+                        record["version_id"] = head.version_id
+        self.outputs.append(record)
 
     def reject(self, reason: str, count: int = 1) -> None:
         """Record ``count`` rejected records under ``reason``. Never a bare count."""
@@ -516,6 +643,7 @@ def run_unit(
         started=started,
         code_sha=resolved_sha,
         log_location=log_location,
+        object_head=getattr(sink, "head", None) if sink is not None else None,
     )
     for ref in inputs:
         ctx.record_input(
