@@ -138,6 +138,31 @@ def test_not_applicable_reason_must_come_from_the_closed_list():
         NotApplicable("felt_like_it")
 
 
+@pytest.mark.parametrize(
+    "reason, detail",
+    [
+        ("disabled_by_declaration", "D15 disabled: enabled=false in config.yaml"),
+        ("outside_session_window", "20:05 UTC is outside 13:30-20:00 UTC NYSE session"),
+    ],
+)
+def test_each_new_not_applicable_reason_round_trips_against_the_contract(reason, detail):
+    """I10831 deliverable 1: a manifest built with EITHER new reason validates
+    against `data_run_manifest.v1` — the reason list and the schema cannot
+    drift into two ideas of `closed` for these either."""
+    sink = RecordingSink()
+
+    def body(ctx: UnitRun):
+        raise NotApplicable(reason, detail)
+
+    result = _run(body, sink)
+
+    assert result.status == "not_applicable"
+    manifest = sink.writes[0][1]
+    assert manifest["status"] == "not_applicable"
+    assert manifest["reason"] == reason
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
 def test_no_third_success_state_is_representable():
     """The schema refuses `degraded` outright — there is no call site to guard."""
     sink = RecordingSink()
@@ -267,6 +292,20 @@ def test_guard_verdicts_ride_on_the_manifest_including_passes():
     assert manifest["guards"][0]["verdict"] == "ok"
     assert manifest["guards"][0]["mode"] == "observe"
     assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_not_applicable_reasons_carries_the_i10831_members():
+    """A closed list that lacks the word forces the wrong one (I10831 finding
+    1): `disabled_by_declaration` (an operator/config decision) and
+    `outside_session_window` (a clock fact) are distinct from the
+    `no_new_data_declared` catch-all and from each other."""
+    assert {"disabled_by_declaration", "outside_session_window"} <= NOT_APPLICABLE_REASONS
+    assert NOT_APPLICABLE_REASONS == {
+        "not_a_trading_day",
+        "no_new_data_declared",
+        "disabled_by_declaration",
+        "outside_session_window",
+    }
 
 
 def test_the_closed_vocabularies_match_the_schema():
