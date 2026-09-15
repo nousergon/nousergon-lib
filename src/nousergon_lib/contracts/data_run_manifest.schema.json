@@ -238,7 +238,12 @@
   },
   "not_applicable_reasons": {
     "description": "The CLOSED list a `not_applicable` status draws its reason from. It grows only by PR, with the cycle that needed it named — a free-text reason is how a unit quietly stops being graded (`observability-policy` §3.5).",
-    "enum": ["not_a_trading_day", "no_new_data_declared"]
+    "enum": [
+      "not_a_trading_day",
+      "no_new_data_declared",
+      "disabled_by_declaration",
+      "outside_session_window"
+    ]
   },
   "allOf": [
     {
@@ -253,7 +258,14 @@
       "if": { "properties": { "status": { "const": "not_applicable" } }, "required": ["status"] },
       "then": {
         "properties": {
-          "reason": { "enum": ["not_a_trading_day", "no_new_data_declared"] }
+          "reason": {
+            "enum": [
+              "not_a_trading_day",
+              "no_new_data_declared",
+              "disabled_by_declaration",
+              "outside_session_window"
+            ]
+          }
         }
       }
     }

@@ -63,12 +63,24 @@ import datetime as dt
 import json
 import logging
 import os
-import random
 import re
-import subprocess
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+# `resolve_code_sha` / `new_run_id` moved to `run_identity` (I10831 deliverable
+# 2) — neither reads or writes anything schema-shaped, so crucible's
+# `run_manifest.v2` can import them directly without coupling to this module's
+# `data_run_manifest.v1` contract. `_REAL_SHA_RE` stays imported (not
+# re-derived) so this module's own sha-shape refusal below cannot drift from
+# `run_identity`'s.
+from nousergon_lib.run_identity import (
+    _REAL_SHA_RE,
+    CODE_SHA_ENV,
+    CodeShaError,
+    new_run_id,
+    resolve_code_sha,
+)
 
 __all__ = [
     "CODE_SHA_ENV",
@@ -103,10 +115,31 @@ DEFAULT_MANIFEST_PREFIX = "data_collection/runs"
 #: by PR, with the cycle that needed it named. A free-text reason is how a unit
 #: quietly stops being graded (`observability-policy` §3.5's N/A taxonomy is the
 #: same rule one level up).
+#:
+#: One line of semantics per member (`alpha-engine-config-I10831`):
+#:
+#: * ``not_a_trading_day`` — the trading-calendar axis says this cycle has no
+#:   session at all (a weekend, a market holiday).
+#: * ``no_new_data_declared`` — an upstream explicitly declared there is
+#:   nothing new for THIS run to collect (a vendor feed with no fresh rows, a
+#:   target date already published). Prefer the two more specific members
+#:   below when the real cause is one of them; this stays the catch-all for
+#:   every other "declared nothing new" shape.
+#: * ``disabled_by_declaration`` — the unit itself is switched off by a
+#:   standing config declaration (a collector's ``enabled: false`` in
+#:   ``config.yaml``), independent of what any upstream published this cycle.
+#:   The non-run is an operator decision, not a data observation.
+#: * ``outside_session_window`` — the unit's own schedule fires more often
+#:   than its declared window (a 5-minute intraday timer gated to NYSE market
+#:   hours; a phase gated to run only before a cutoff time of day), and this
+#:   tick landed outside it. The non-run is a clock fact, not a data
+#:   observation or an operator decision.
 NOT_APPLICABLE_REASONS: frozenset[str] = frozenset(
     {
         "not_a_trading_day",
         "no_new_data_declared",
+        "disabled_by_declaration",
+        "outside_session_window",
     }
 )
 
@@ -115,10 +148,6 @@ NOT_APPLICABLE_REASONS: frozenset[str] = frozenset(
 #: rather than disguised as a schedule (plan §4.4).
 TRIGGERS: frozenset[str] = frozenset({"scheduled", "on_demand", "manual", "gha", "backfill"})
 
-#: The box's dispatcher exports the sha it deployed; off the box a real git
-#: checkout answers for itself. Named here so a caller can export it.
-CODE_SHA_ENV = "NE_DATA_CODE_SHA"
-
 #: Optional environment declarations for the compute row, exported by the box
 #: shell that launched the workload.
 _INSTANCE_TYPE_ENV = "NE_DATA_INSTANCE_TYPE"
@@ -126,23 +155,7 @@ _LIFECYCLE_ENV = "NE_DATA_LIFECYCLE"
 _ESCALATED_ENV = "NE_DATA_ESCALATED_ON_DEMAND"
 _REGION_ENVS = ("AWS_REGION", "AWS_DEFAULT_REGION")
 
-#: A real, non-placeholder git sha: forty lowercase hex characters, explicitly
-#: NOT the all-zero placeholder. Mirrors crucible's ``_REAL_SHA_RE`` and the
-#: schema's ``code_sha`` pattern.
-_REAL_SHA_RE = re.compile(r"^(?!0{40}$)[0-9a-f]{40}$")
-
-_ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
 _UNIT_ID_RE = re.compile(r"^D[0-9]{2}[A-Z]?$")
-
-
-class CodeShaError(RuntimeError):
-    """The running tree's commit sha could not be measured.
-
-    Raised BEFORE the unit body runs, never at write time: a manifest cannot
-    record a value nobody measured, and discovering that in the ``finally``
-    would pit the refusal against "manifest or it did not happen".
-    """
 
 
 class NotApplicable(Exception):
@@ -232,68 +245,12 @@ class LocalDirManifestSink:
 
 # ---------------------------------------------------------------------------
 # Identity and environment.
+#
+# `new_run_id` and `resolve_code_sha` live in `run_identity` (I10831
+# deliverable 2) and are imported at the top of this module; re-exported here
+# via `__all__` so existing importers of `nousergon_lib.run_manifest` keep
+# working unchanged.
 # ---------------------------------------------------------------------------
-
-
-def new_run_id(now: dt.datetime | None = None) -> str:
-    """A ULID: 48 bits of millisecond timestamp then 80 bits of randomness.
-
-    Lexically sortable by creation time, which is what makes a listing of one
-    unit's day readable in execution order without parsing the ids.
-    """
-    moment = now or dt.datetime.now(dt.timezone.utc)
-    value = (int(moment.timestamp() * 1000) << 80) | random.getrandbits(80)  # noqa: S311 -- an id, not a secret
-    out = []
-    for _ in range(26):
-        out.append(_ULID_ALPHABET[value & 0x1F])
-        value >>= 5
-    return "".join(reversed(out))
-
-
-def resolve_code_sha(env_var: str = CODE_SHA_ENV, cwd: str | None = None) -> str:
-    """The commit sha of the tree that is running, or raise :class:`CodeShaError`.
-
-    ``$NE_DATA_CODE_SHA`` wins when set — the box's own answer, carried in the
-    release rather than read from a working tree a wheel install does not have.
-    Off the box (a laptop or CI run inside a real checkout) the variable is
-    normally unset and ``git rev-parse HEAD`` is the real answer.
-
-    Either source producing something other than a real 40-character lowercase
-    sha is REFUSED rather than written as the all-zero placeholder that used to
-    validate and answer nothing.
-    """
-    declared = os.environ.get(env_var)
-    if declared is not None:
-        if not _REAL_SHA_RE.match(declared):
-            raise CodeShaError(
-                f"${env_var}={declared!r} is not a real 40-character lowercase git sha "
-                "(or is the all-zero placeholder). The box exports this from the sha it "
-                "deployed; a malformed value there is a deploy-time defect, and code_sha "
-                "cannot be written as a value nobody measured."
-            )
-        return declared
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],  # noqa: S603,S607 -- fixed argv, no shell
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-            cwd=cwd,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise CodeShaError(
-            f"${env_var} is unset and `git rev-parse HEAD` could not run ({exc}). "
-            f"Export ${env_var} on a box with no git checkout, or run from inside one."
-        ) from exc
-    sha = out.stdout.strip()
-    if out.returncode != 0 or not _REAL_SHA_RE.match(sha):
-        raise CodeShaError(
-            f"${env_var} is unset and `git rev-parse HEAD` did not return a real sha "
-            f"(exit {out.returncode}, stdout {sha!r}). code_sha cannot be written as a "
-            "value nobody measured."
-        )
-    return sha
 
 
 def _resolve_compute() -> dict[str, Any]:
