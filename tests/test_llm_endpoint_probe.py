@@ -196,7 +196,11 @@ def test_request_openai_wire_path():
         mocked.return_value = _urlopen_ok()
         probe.request("http://127.0.0.1:8990", wire="openai", model="m", timeout=1)
         url = req_cls.call_args[0][0]
-        assert url == "http://127.0.0.1:8990/v1/chat/completions"
+        # OpenAI-SDK join: the declared base carries any version segment, the
+        # wire appends only `/chat/completions`. `/v1/chat/completions` here
+        # 404'd every egress upstream whose path_prefix already ends in a
+        # version (api.z.ai's `/api/paas/v4`, measured 2026-09-15).
+        assert url == "http://127.0.0.1:8990/chat/completions"
 
 
 def test_request_explicit_path_overrides_the_wire_default():

@@ -201,8 +201,13 @@ class ManifestSink(Protocol):
 class S3ManifestSink:
     """The production sink: one JSON object per run under the declared prefix.
 
-    The writer identity for the collectors already holds ``alpha-engine-research/*``,
-    so no new grant is needed for ``data_collection/runs/``.
+    Every identity that runs a unit needs ``s3:PutObject`` on
+    ``<bucket>/data_collection/runs/*`` — this is NOT implied by a unit's own
+    ``writes[]`` grants. The earlier claim here, that collector identities
+    already held ``alpha-engine-research/*``, was false for the dashboard box's
+    ``alpha-engine-dashboard-role``: D36 daily-news wrote all of its data and
+    then died on AccessDenied at this sink (2026-09-15). The grant is asserted
+    per writer role in ``nous-ergon-ops``.
     """
 
     bucket: str

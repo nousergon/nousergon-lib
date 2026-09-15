@@ -102,9 +102,23 @@ def _validate_url(url: str) -> str:
 #: with an explicit ``path=``. The wire IS the path — one upstream host can
 #: serve both wires under different prefixes, so the endpoint alone never
 #: says which wire is being spoken.
+#:
+#: Each path is RELATIVE TO THE ENDPOINT AS ITS OWN SDK READS IT, because the
+#: registry's ``endpoints.<wire>`` value is handed to that SDK as ``base_url``
+#: and a probe that joins differently exercises a URL no consumer requests.
+#: The Anthropic SDK's base excludes the version and appends
+#: ``/v1/messages``; the OpenAI SDK's base INCLUDES it and appends
+#: ``/chat/completions``. This was ``/v1/chat/completions`` until 2026-09-15:
+#: the egress proxy prepends each upstream's declared ``path_prefix``, so
+#: ``api.z.ai`` (prefix ``/api/paas/v4``) received
+#: ``/api/paas/v4/v1/chat/completions`` and 404'd, and the router degraded-mode
+#: drill failed ``glm-5.3-direct`` — an endpoint every real consumer reaches
+#: fine. Hosts whose prefix is ``/v1`` (moonshot, x.ai) were exposed the same
+#: way; ``api.deepseek.com`` (no prefix) serves both spellings, which is why
+#: the defect stayed hidden.
 WIRE_PATHS: dict[str, str] = {
     "anthropic": "/v1/messages",
-    "openai": "/v1/chat/completions",
+    "openai": "/chat/completions",
 }
 
 #: Header the Anthropic Messages wire requires; the proxy forwards it
