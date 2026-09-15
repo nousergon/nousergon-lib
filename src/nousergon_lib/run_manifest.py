@@ -75,8 +75,8 @@ from typing import Any, Protocol
 # re-derived) so this module's own sha-shape refusal below cannot drift from
 # `run_identity`'s.
 from nousergon_lib.run_identity import (
-    CODE_SHA_ENV,
     _REAL_SHA_RE,
+    CODE_SHA_ENV,
     CodeShaError,
     new_run_id,
     resolve_code_sha,
