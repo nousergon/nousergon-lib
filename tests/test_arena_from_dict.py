@@ -38,7 +38,7 @@ def _fixture_register_and_series(n_arms=3, promote_min_weeks=1):
     ids = []
     for name in ["a", "b", "c", "d"][:n_arms]:
         reg, record = reg.register(
-            slot="u", name=name, spec={"recipe": name}, created_date="2026-01-05"
+            slot="u", name=name, spec={"recipe": name}, created_date="2026-01-05", filed_on="2026-01-05"
         )
         ids.append(record.arm_id)
     series = {

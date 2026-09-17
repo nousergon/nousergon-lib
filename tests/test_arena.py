@@ -71,7 +71,7 @@ def _register(arms, created="2026-01-05"):
     ids = {}
     for name, created_date in arms.items():
         reg, record = reg.register(
-            slot="model", name=name, spec={"recipe": name}, created_date=created_date
+            slot="model", name=name, spec={"recipe": name}, created_date=created_date, filed_on=created_date
         )
         ids[name] = record.arm_id
     return reg, ids
@@ -239,7 +239,7 @@ def test_spec_hash_ignores_key_order_so_a_reformat_is_not_a_new_arm():
 def test_registering_the_same_arm_twice_is_refused():
     reg, ids = _register({"a": "2026-01-05"})
     with pytest.raises(ImmutableArmError, match="registered twice"):
-        reg.register(slot="model", name="a", spec={"recipe": "a"}, created_date="2026-01-05")
+        reg.register(slot="model", name="a", spec={"recipe": "a"}, created_date="2026-01-05", filed_on="2026-01-05")
 
 
 def test_re_registering_an_id_with_a_different_record_is_refused():
@@ -247,7 +247,7 @@ def test_re_registering_an_id_with_a_different_record_is_refused():
     ladder must not be able to start from a different day than it did."""
     reg, ids = _register({"a": "2026-01-05"})
     with pytest.raises(ImmutableArmError, match="DIFFERENT record"):
-        reg.register(slot="model", name="a", spec={"recipe": "a"}, created_date="2026-02-01")
+        reg.register(slot="model", name="a", spec={"recipe": "a"}, created_date="2026-02-01", filed_on="2026-02-01")
 
 
 def test_retiring_an_arm_twice_is_refused_because_it_would_move_the_trailing_window():
@@ -619,7 +619,7 @@ def test_retirement_requires_both_age_and_being_out_of_the_top_cap():
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(names):
         created = "2026-01-05" if i < 6 else "2026-08-25"  # the last one is days old
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date=created)
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date=created, filed_on=created)
         ids[name] = record.arm_id
     series = {
         ids[name]: _series(ids[name], [0.10 - 0.01 * i] * 30) for i, name in enumerate(names)
@@ -645,7 +645,7 @@ def test_the_champion_is_never_retired():
     names = [f"a{i}" for i in range(7)]
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(names):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
     ranking = rank_pairwise(
@@ -665,7 +665,7 @@ def test_the_floor_stops_a_slot_being_stranded_below_a_live_comparison():
     names = [f"a{i}" for i in range(5)]
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(names):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
     ranking = rank_pairwise(
@@ -710,7 +710,7 @@ def test_every_arm_gets_a_retirement_verdict_including_the_survivors():
     names = [f"a{i}" for i in range(3)]
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(names):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
     ranking = rank_pairwise(
@@ -729,10 +729,15 @@ def test_a_controls_win_does_not_move_a_real_arm_toward_the_cap():
     names = [f"a{i}" for i in range(5)]
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(names):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     reg, ctrl = reg.register(
-        slot="model", name="benchmark", spec={"k": "control"}, created_date="2026-01-05", control=True
+        slot="model",
+        name="benchmark",
+        spec={"k": "control"},
+        created_date="2026-01-05",
+        filed_on="2026-01-05",
+        control=True,
     )
     series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
     series[ctrl.arm_id] = _series(ctrl.arm_id, [0.99] * 30)  # beats every real arm
@@ -761,10 +766,15 @@ def test_a_control_is_never_retired():
     names = [f"a{i}" for i in range(6)]
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(names):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     reg, ctrl = reg.register(
-        slot="model", name="benchmark", spec={"k": "control"}, created_date="2026-01-05", control=True
+        slot="model",
+        name="benchmark",
+        spec={"k": "control"},
+        created_date="2026-01-05",
+        filed_on="2026-01-05",
+        control=True,
     )
     series = {ids[n]: _series(ids[n], [0.10 - 0.01 * i] * 30) for i, n in enumerate(names)}
     series[ctrl.arm_id] = _series(ctrl.arm_id, [-0.99] * 30)  # loses to every real arm
@@ -805,7 +815,7 @@ def test_anytime_valid_retirement_evidence_is_available_and_stricter():
 def _cycle_fixture():
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(["a", "b", "c"]):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     series = {ids[n]: _series(ids[n], [0.03 - 0.01 * i] * 60) for i, n in enumerate(["a", "b", "c"])}
     return reg, ids, series
@@ -880,10 +890,15 @@ def test_promotable_arms_excludes_controls_when_present():
     computation rather than re-deriving it."""
     reg, ids = ArmRegister(), {}
     for i, name in enumerate(["a", "b", "c"]):
-        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05")
+        reg, record = reg.register(slot="model", name=name, spec={"n": i}, created_date="2026-01-05", filed_on="2026-01-05")
         ids[name] = record.arm_id
     reg, ctrl = reg.register(
-        slot="model", name="benchmark", spec={"k": "control"}, created_date="2026-01-05", control=True
+        slot="model",
+        name="benchmark",
+        spec={"k": "control"},
+        created_date="2026-01-05",
+        filed_on="2026-01-05",
+        control=True,
     )
     ids["benchmark"] = ctrl.arm_id
     series = {ids[n]: _series(ids[n], [0.03 - 0.01 * i] * 60) for i, n in enumerate(["a", "b", "c", "benchmark"])}
@@ -1096,3 +1111,82 @@ class TestSeriesLineageReachesTheVerdictArtifact:
         payload = cycle.to_dict()
         payload["ladders"][0]["lineage"] = {"feature_version": []}
         assert contracts.conformance_errors("arena_cycle", payload) != []
+
+
+# --------------------------------------------------------------------------
+# alpha-engine-config-I10948 — the filing day is not the recipe's date
+# --------------------------------------------------------------------------
+
+
+def test_a_registered_event_takes_the_filing_day_not_the_recipes_created_date():
+    """Measured 2026-09-17 against the live U and M registers.
+
+    EVERY `registered` row carried `date == record.created_date`, because
+    `register()` stamped the event with `created_date`. Seven arms appended
+    on one evening therefore read as filed on 2026-07-27, 2026-08-17,
+    2026-08-24 and 2026-09-14 — and the clause grading "every registered arm
+    was scored on every day in the window" demanded them on days whose arena
+    cycles ran weeks before the rows existed.
+
+    The two dates come from two different arguments and must survive
+    independently. A failure here means the copy is back.
+    """
+    reg, record = ArmRegister().register(
+        slot="model",
+        name="filed_late",
+        spec={"recipe": "filed_late"},
+        created_date="2026-08-17",
+        filed_on="2026-09-17",
+    )
+    event = reg.events[-1]
+    assert event.date == "2026-09-17"
+    assert record.created_date == "2026-08-17"
+    assert event.record is not None
+    assert event.record.created_date == "2026-08-17"
+    # The clock the grace/promotion rungs count from is still the RECIPE's.
+    assert reg.state(record.arm_id).record.created_date == "2026-08-17"
+
+
+def test_the_filing_day_survives_a_round_trip_through_from_dicts():
+    """A register is persisted as JSONL and re-read; the filing day is the
+    only durable answer to "was this arm in the log on day D", so it must not
+    be lost or re-derived on the way back in."""
+    reg, record = ArmRegister().register(
+        slot="model",
+        name="round_trip",
+        spec={"recipe": "round_trip"},
+        created_date="2026-06-01",
+        filed_on="2026-09-17",
+    )
+    rebuilt = ArmRegister.from_dicts([e.to_dict() for e in reg.events])
+    assert rebuilt.events[-1].date == "2026-09-17"
+    assert rebuilt.state(record.arm_id).record.created_date == "2026-06-01"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 20260917])
+def test_an_unusable_filing_day_is_refused_rather_than_stamped(bad):
+    """`filed_on` is what a grader reads; an empty or non-string value would
+    produce an event whose date says nothing, which reads as "always
+    registered" to a lenient comparison and as malformed to a strict one."""
+    with pytest.raises(ValueError, match="filed_on"):
+        ArmRegister().register(
+            slot="model",
+            name="bad_filing",
+            spec={"recipe": "bad_filing"},
+            created_date="2026-06-01",
+            filed_on=bad,
+        )
+
+
+def test_omitting_the_filing_day_warns_and_is_not_silent():
+    """The compatibility path for callers pinned to an older release
+    reproduces the defect, so it must be audible. A silent fallback would be
+    indistinguishable from the bug it replaces."""
+    with pytest.warns(DeprecationWarning, match="filed_on"):
+        reg, record = ArmRegister().register(
+            slot="model",
+            name="no_filing_day",
+            spec={"recipe": "no_filing_day"},
+            created_date="2026-06-01",
+        )
+    assert reg.events[-1].date == record.created_date
