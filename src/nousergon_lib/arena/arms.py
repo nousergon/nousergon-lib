@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -180,7 +181,16 @@ class ArmRecord:
 
 @dataclass(frozen=True)
 class ArmEvent:
-    """One append-only lifecycle event. ``record`` is set for ``registered``."""
+    """One append-only lifecycle event. ``record`` is set for ``registered``.
+
+    ``date`` is the day the EVENT happened — the day the row was appended for
+    a ``registered``, the day the arm was retired for a ``retired``, the day
+    the refit ran for a ``refit``. It is never the recipe's declared
+    ``created_date``, which lives on :class:`ArmRecord` and answers a
+    different question (`alpha-engine-config-I10948`); see
+    :meth:`ArmRegister.register` for what went wrong when the two were the
+    same value.
+    """
 
     kind: str
     arm_id: str
@@ -372,8 +382,51 @@ class ArmRegister:
         bootstrap: bool = False,
         notes: str = "",
         control: bool = False,
+        *,
+        filed_on: str | None = None,
     ) -> tuple[ArmRegister, ArmRecord]:
-        """Append a new vintage. Returns the new register and the record."""
+        """Append a new vintage. Returns the new register and the record.
+
+        ``created_date`` and ``filed_on`` answer two different questions and
+        are never each other's default:
+
+        * ``created_date`` is what the RECIPE declares — the start of the
+          arm's out-of-sample clock, which :meth:`ArmState.age_weeks` and
+          every grace/promotion rung count from. It may be months before the
+          row exists.
+        * ``filed_on`` is the trading day the APPEND happens — when this row
+          entered the log. It is the only thing that can answer "was this arm
+          in the register on day D", and a grader that asks that question of
+          ``created_date`` demands an arm on days before it was filed.
+
+        Copying one into the other is `alpha-engine-config-I10948`: every
+        `registered` event in the live U and M registers carried
+        ``date == record.created_date``, so seven arms appended on one evening
+        read as having been registered weeks earlier, and the clause grading
+        "every registered arm was scored" demanded them on days whose cycles
+        ran before the rows existed.
+
+        ``filed_on=None`` is a DEPRECATED compatibility path for callers
+        pinned to a release older than this one: it reproduces the defect
+        above (the event takes ``created_date``) and warns. It is not a
+        graceful degrade for a caller that could state the day — every caller
+        in this package's own tree passes it — and it is removed once the v1
+        `crucible-research` / `crucible-predictor` call sites are retired.
+        """
+        if filed_on is None:
+            warnings.warn(
+                "ArmRegister.register(filed_on=...) is not set: the appended `registered` "
+                "event will take its date from `created_date`, which is the recipe's "
+                "declared date and NOT the day the row was filed. Pass the trading day of "
+                "the run doing the append. See alpha-engine-config-I10948.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            filed_on = created_date
+        elif not isinstance(filed_on, str) or not filed_on.strip():
+            raise ValueError(
+                f"filed_on must be a non-empty ISO-8601 trading day; got {filed_on!r}"
+            )
         arm_id = derive_arm_id(slot, name, spec)
         record = ArmRecord(
             arm_id=arm_id,
@@ -391,7 +444,8 @@ class ArmRegister:
                 f"arm {arm_id} declares supersedes={supersedes!r}, which is not registered; a "
                 "lineage pointer to nothing is worse than none"
             )
-        event = ArmEvent(kind=EVENT_REGISTERED, arm_id=arm_id, date=created_date, record=record)
+        # `filed_on`, NEVER `created_date` — see this method's docstring.
+        event = ArmEvent(kind=EVENT_REGISTERED, arm_id=arm_id, date=filed_on, record=record)
         return ArmRegister(self._events + (event,)), record
 
     def refit(self, arm_id: str, refit_date: str, reason: str = "scheduled refit") -> ArmRegister:
