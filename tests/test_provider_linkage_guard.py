@@ -1125,3 +1125,46 @@ def test_router_aware_is_off_in_the_raw_staleness_scan(tmp_path):
         extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
     )
     assert _classes(raw) == {"openai:dist"}
+
+
+# -- the other half of the I11017 narrowing: it must not over-apply ----------
+#
+# nousergon-lib-PR422 exempts a `dist` match inside the ROUTER's own
+# requirement spec. The exemption is keyed on the package being the router,
+# and the cases below pin the two consequences of that wording which nothing
+# else asserts: a provider extra belonging to some OTHER distribution is not
+# covered by it, and a repo may DELETE its now-unnecessary allowlist entry
+# without the staleness check reddening it.
+
+
+def test_a_provider_extra_of_a_NON_router_distribution_is_still_a_finding(tmp_path):
+    """The narrowing is not keyed on the SHAPE `name[extra]`. Any other
+    package's provider extra installs that SDK with nothing between it and the
+    call site -- the I7723 failure mode the `dist` class exists for -- so it
+    must still fail. Distinct from the `krepis-shim` case above, which tests
+    the NAME boundary; this tests that an unrelated, plausible, real-world
+    package spelling does not inherit the router's exemption."""
+    repo = _git_repo(tmp_path)
+    _add(
+        repo, "requirements.txt",
+        "krepis[openai]==0.59.62\n"
+        "langchain[openai]==0.2.0\n"
+        "some-agent-sdk[anthropic]>=1.0\n",
+    )
+    matches = _router_scan(repo)
+    assert _classes(matches) == {"openai:dist", "anthropic:dist"}
+    assert sorted(m.line for m in matches) == [2, 3]
+
+
+def test_a_repo_may_delete_its_now_unnecessary_router_entry(tmp_path):
+    """The second half of the no-lockstep property. The test above this block
+    proves an EXISTING `krepis[openai]` entry is not staled by the narrowing
+    landing; this proves the cleanup that removes it is green too. Neither
+    order of merges can redden anyone, which is why the guard fix and the
+    per-repo allowlist cleanups are independent PRs with no merge order
+    (crucible-evaluator, crucible-backtester, crucible-dashboard,
+    alpha-engine-config-I11017)."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis[flow-doctor, openai]==0.59.62\n")
+    _allowlist(repo, "schema_version: 1\nentries: []\n")
+    assert plg.main(["--repo", str(repo), "--include-dist"]) == 0
