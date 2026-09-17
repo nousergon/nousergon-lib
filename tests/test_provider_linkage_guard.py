@@ -983,3 +983,145 @@ def test_asserts_absence_exemption_does_not_redden_a_consumer(tmp_path):
         "    expires: 2099-01-01\n"
     ))
     assert plg.main(["--repo", str(repo)]) == 0
+
+
+# -- the ROUTER's own extras (alpha-engine-config-I11017) -------------------
+#
+# `krepis` IS the router (Brian's 2026-08-29 ruling, -I9294/-I9295). The
+# `[openai]` extra installs the openai SDK for KREPIS's own use, so the router
+# can speak the OpenAI WIRE FORMAT to its endpoint -- transport-plane, inside
+# the one declared adapter. A dist spec whose PACKAGE is the router cannot, by
+# construction, be a bypass of the router. The guard's 0.124.128 bump began
+# matching `krepis[openai]==0.59.62` at nousergon-data's requirements.txt:208
+# and held that repo's `main` red for four consecutive runs with no commit in
+# it. The rule below is keyed on the package being the router -- not on the
+# literal string `krepis[openai]`, and not on a per-consumer allowlist entry.
+# The narrowing must not become a hole: the last tests here prove a genuine
+# direct linkage still fails.
+
+
+def _router_scan(repo: Path):
+    return plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+
+
+@pytest.mark.parametrize("line", [
+    "krepis[openai]==0.59.62",
+    "krepis[openai,flow-doctor]>=0.59.0",
+    "krepis[flow-doctor,openai]>=0.59.0",
+    "krepis[anthropic]>=0.60",            # tomorrow's extra, same rule, no edit
+    "krepis[openai, anthropic]==0.59.62",
+    "krepis [openai] == 0.59.62",
+    "krepis==0.59.62",                    # bare router pin
+    "krepis",
+])
+def test_router_dist_spec_is_never_a_direct_linkage(tmp_path, line):
+    """The literal I11017 case and its general form: any extras, any pin."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", f"boto3==1.34.0\n{line}\n")
+    assert _router_scan(repo) == []
+
+
+def test_router_extra_in_a_pyproject_dependency_string(tmp_path):
+    """crucible's shape (-I10473): the pin lives in pyproject, quoted."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "pyproject.toml", '[project]\ndependencies = ["krepis[openai]>=0.59.62"]\n')
+    assert _router_scan(repo) == []
+
+
+def test_router_extra_in_a_toml_inline_table(tmp_path):
+    repo = _git_repo(tmp_path)
+    _add(repo, "pyproject.toml", 'krepis = { extras = ["openai"], version = ">=0.59" }\n')
+    assert _router_scan(repo) == []
+
+
+def test_router_package_spelling_variants_are_covered(tmp_path):
+    """PEP 503 normalization and case-insensitivity, same as every other
+    dist name -- the rule is the PACKAGE, not one spelling of it."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "KREPIS[OpenAI]==0.59.62\n")
+    assert _router_scan(repo) == []
+
+
+def test_the_nousergon_data_case_is_green_end_to_end(tmp_path):
+    """The closes-when, as the consumer repo sees it: `krepis[openai]` pinned
+    in requirements.txt, NO allowlist entry, exit 0 with `--include-dist`."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "boto3==1.34.0\nkrepis[openai]==0.59.62\n")
+    assert plg.main(["--repo", str(repo), "--include-dist"]) == 0
+
+
+# -- and the narrowing is not a hole ---------------------------------------
+
+
+def test_a_direct_openai_dist_still_fails(tmp_path):
+    """The genuine bypass: the SDK as a FIRST-CLASS requirement of the
+    consumer, not an extra of the router."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis[openai]==0.59.62\nopenai==1.40\n")
+    matches = _router_scan(repo)
+    assert _classes(matches) == {"openai:dist"}
+    assert [m.line for m in matches] == [2]
+    assert plg.main(["--repo", str(repo), "--include-dist"]) == 1
+
+
+def test_a_direct_dist_on_the_same_line_as_the_router_spec_still_fails(tmp_path):
+    """Suppression is SPAN-scoped, not line-scoped: only the characters
+    belonging to the router spec are exempt."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis[openai]==0.59.62; openai==1.40\n")
+    assert _classes(_router_scan(repo)) == {"openai:dist"}
+
+
+def test_a_call_site_constructing_an_openai_client_still_fails(tmp_path):
+    """The other half of the narrowing test: a repo may pin `krepis[openai]`
+    AND still be caught for addressing the provider itself."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis[openai]==0.59.62\n")
+    _add(repo, "src/judge.py", (
+        "from openai import OpenAI\n"
+        "client = OpenAI(base_url='https://api.openai.com/v1', api_key=OPENAI_API_KEY)\n"
+    ))
+    classes = _classes(_scan(repo))
+    assert "openai:sdk_client" in classes
+    assert "openai:base_url" in classes
+    assert plg.main(["--repo", str(repo), "--include-dist"]) == 1
+
+
+def test_an_unrelated_package_whose_name_contains_the_router_is_not_exempt(tmp_path):
+    """`krepis-shim[openai]` is not the router; the boundary must hold."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis-shim[openai]==1.0\n")
+    assert _classes(_router_scan(repo)) == {"openai:dist"}
+
+
+def test_the_router_exemption_never_stales_an_existing_allowlist_entry(tmp_path):
+    """The guard is checked out UNPINNED by the reusable workflow, so this
+    relaxation re-verdicts every consumer `main` with no commit there. A
+    consumer holding the interim `krepis[openai]` entry (nousergon-data-PR1789)
+    must go GREEN on the finding AND not be reddened by a stale entry -- the
+    entry is deleted on their next PR, not by this script landing."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis[openai]==0.59.62\n")
+    _allowlist(repo, (
+        "entries:\n"
+        "  - path: requirements.txt\n"
+        "    pattern: openai:dist\n"
+        "    reason: interim entry for the router's own wire-format extra (I11017)\n"
+        "    expires: 2099-01-01\n"
+    ))
+    assert plg.main(["--repo", str(repo), "--include-dist"]) == 0
+
+
+def test_router_aware_is_off_in_the_raw_staleness_scan(tmp_path):
+    """The mechanism behind the test above, asserted directly."""
+    repo = _git_repo(tmp_path)
+    _add(repo, "requirements.txt", "krepis[openai]==0.59.62\n")
+    raw = plg.scan(
+        repo, plg.DEFAULT_EXTENSIONS, _dist_patterns(),
+        strip=False, registry_aware=False, absence_aware=False, router_aware=False,
+        extra_filename_re=plg.DEPENDENCY_FILENAME_RE,
+    )
+    assert _classes(raw) == {"openai:dist"}
