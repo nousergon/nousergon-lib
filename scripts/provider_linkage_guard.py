@@ -146,6 +146,32 @@ holds the one legitimate declared provider adapter. Principle 8 permits
 exactly one adapter behind the router; what it forbids is a call site shaped
 around a vendor. krepis is not a caller of this workflow.
 
+**And a dependency on the ROUTER PACKAGE is never a direct linkage, whatever
+extras it carries** (alpha-engine-config-I11017). ``krepis[openai]==0.59.62``
+declares the ``openai`` SDK for *krepis's own* use, so the router can speak
+the OpenAI WIRE FORMAT to its endpoint -- transport-plane, inside the one
+declared adapter, which is exactly where model-portability-policy §2 says
+provider-shape knowledge belongs. A dist spec whose PACKAGE is the router
+cannot, by construction, be a bypass of the router, so ``_router_dist_spans``
+suppresses any ``dist`` match falling inside one. The rule is keyed on the
+package being the router, not on the literal string ``krepis[openai]``: a
+future ``krepis[anthropic]``, ``krepis[openai,flow-doctor]`` or
+``krepis = {extras = [...]}`` inline table is covered by the same rule with no
+edit. It is NOT keyed on a per-consumer allowlist entry, because every repo
+pinning the extra would otherwise hit this in turn and each would "fix" it
+locally -- the mechanism-not-property class (-I10908, -I10928). The extra is
+load-bearing: omitting it left the v2 boxes unable to make an openai-wire
+call at all (``ModuleNotFoundError: No module named 'openai'``, measured
+2026-09-10 on ``i-0fcd1c9649a27aa62``, -I10473).
+
+Like the registry and asserts-absence exemptions, this is a RELAXATION and is
+therefore applied ONLY to the findings scan, never to the raw scan staleness
+is computed from (``router_aware``): the reusable workflow checks this script
+out UNPINNED, so a relaxation that also ran in the staleness scan would turn
+a consumer's existing ``krepis[openai]`` allowlist entry stale -- reddening a
+`main` with no commit in that repo, the very failure this split exists to
+prevent.
+
 Exit codes: ``0`` clean, ``1`` findings, ``2`` could not complete the check.
 
 Usage::
@@ -200,11 +226,56 @@ def _dist_boundary(*names: str) -> str:
     on ``anthropic==1.0`` while still refusing a false one on an unrelated
     compound name that merely CONTAINS this name as a substring.
     """
-    alts = []
-    for n in names:
-        parts = re.split(r"[-_.]", n)
-        alts.append("[-_.]".join(re.escape(p) for p in parts))
+    alts = [_dist_name_core(n) for n in names]
     return rf"(?<![\w.-])(?:{'|'.join(alts)})(?![\w.-])"
+
+
+def _dist_name_core(name: str) -> str:
+    """The separator-flexible body of a PEP 503 name, without boundaries."""
+    parts = re.split(r"[-_.]", name)
+    return "[-_.]".join(re.escape(p) for p in parts)
+
+
+# -- the router package itself ----------------------------------------------
+
+#: The router distribution. A dependency on THIS package -- with any extras,
+#: any version specifier, any spelling the requirement grammar allows -- is
+#: transport-plane wiring for the router's own adapter, never a direct
+#: provider linkage. See the module docstring (alpha-engine-config-I11017).
+ROUTER_DIST = "krepis"
+
+_ROUTER_CORE = _dist_name_core(ROUTER_DIST)
+
+#: ``krepis[openai]``, ``krepis[openai,flow-doctor]``, ``"krepis [ openai ]"``,
+#: ``#egg=krepis[openai]`` -- the whole spec, extras bracket included.
+_ROUTER_EXTRAS_RE = re.compile(
+    rf"(?<![\w.-]){_ROUTER_CORE}\s*\[[^\]]*\]",
+    re.IGNORECASE,
+)
+
+#: A TOML/JSON dependency declaration keyed by the router package, whose
+#: extras live in a table on the same line:
+#: ``krepis = {{ extras = ["openai"], version = ">=0.59" }}``.
+_ROUTER_TABLE_RE = re.compile(
+    rf"""^\s*["']?{_ROUTER_CORE}["']?\s*[:=]\s*[{{\[]""",
+    re.IGNORECASE,
+)
+
+
+def _router_dist_spans(line: str) -> tuple[tuple[int, int], ...]:
+    """Character spans of ``line`` that belong to a ROUTER dependency spec.
+
+    A ``dist``-class match falling entirely inside one of these is the router's
+    own extra, not a direct provider linkage, and is suppressed.
+    """
+    spans = [m.span() for m in _ROUTER_EXTRAS_RE.finditer(line)]
+    if _ROUTER_TABLE_RE.match(line):
+        spans.append((0, len(line)))
+    return tuple(spans)
+
+
+def _inside(span: tuple[int, int], spans: tuple[tuple[int, int], ...]) -> bool:
+    return any(start <= span[0] and span[1] <= end for start, end in spans)
 
 
 @dataclass(frozen=True)
@@ -824,6 +895,7 @@ def scan(
     strip: bool = True,
     registry_aware: bool = True,
     absence_aware: bool = True,
+    router_aware: bool = True,
     extra_filename_re: re.Pattern[str] | None = None,
 ) -> list[Match]:
     """Every pattern hit in every tracked, in-scope file.
@@ -846,6 +918,13 @@ def scan(
     ``_is_asserts_absence``) the same way, for the same reason: it is a
     relaxation and must never retroactively stale an existing allowlist
     entry on ``main`` with no commit in that repo.
+
+    ``router_aware`` gates the ROUTER-package exemption (see
+    ``_router_dist_spans``) identically, for the identical reason: a ``dist``
+    match inside a ``krepis[...]`` spec is the router's own transport extra,
+    not a direct linkage -- but suppressing it in the staleness scan too
+    would stale a consumer's existing entry and redden their `main`
+    (alpha-engine-config-I11017).
     """
     registry_names = _registry_filenames(repo, extensions) if registry_aware else frozenset()
 
@@ -890,8 +969,18 @@ def scan(
         applicable = other_patterns + (dist_patterns if is_dependency_file else ())
         body = strip_comments(rel, text) if strip else text
         for lineno, line in enumerate(body.splitlines(), 1):
+            router_spans = (
+                _router_dist_spans(line) if (router_aware and is_dependency_file) else ()
+            )
             for klass, regex in applicable:
-                if regex.search(line):
+                is_dist = klass.endswith(dist_suffix)
+                hit = False
+                for m in regex.finditer(line):
+                    if is_dist and router_spans and _inside(m.span(), router_spans):
+                        continue  # the ROUTER's own extra -- never a bypass of the router
+                    hit = True
+                    break
+                if hit:
                     matches.append(Match(rel, lineno, klass, line.strip()))
     return matches
 
@@ -1159,6 +1248,7 @@ def main(argv: list[str] | None = None) -> int:
         raw_matches = scan(
             repo, extensions, patterns, skip=skip,
             strip=False, registry_aware=False, absence_aware=False,
+            router_aware=False,
             extra_filename_re=dep_re,
         )
         allowlist = load_allowlist(allowlist_path, all_pattern_classes())
