@@ -14,6 +14,15 @@ schema, and fault exclusion. What did NOT move is any clause definition: those
 stay in the repo that owns the thing being graded (`architecture.d/146` rule 1),
 which is why this package has no notion of a phase 0 or of crucible's arcs.
 
+Two more modules sit beside the engine and are imported by PATH, not
+re-exported here (`nousergon_lib.gates.report`, `nousergon_lib.gates.tracker`):
+the system-agnostic core of a daily accountability report and the rolling-issue
+adapter it posts through, lifted from `crucible/crucible/morning.py` and
+`tracker.py` on their second adoption (`alpha-engine-config-I10951`). They are
+deliberately not folded into this namespace — ``Read`` and ``DocumentRead`` are
+different records for different jobs, and one flat namespace carrying both
+invites a caller to reach for whichever name it remembers.
+
 One engine, two ladders, one schema. `crucible`'s re-import onto this package
 is a tracked follow-up; until it lands crucible keeps its own copy, and the two
 schemas are kept compatible on purpose — this one is a strict generalization
