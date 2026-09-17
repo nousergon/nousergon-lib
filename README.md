@@ -352,6 +352,42 @@ the data collector. Needs the `gates` extra (`jsonschema`) for ladder validation
 from nousergon_lib.gates import Clause, GateResult, Phase, build_ladder, ladder_payload
 ```
 
+### `gates.report` / `gates.tracker` — the daily accountability report core
+
+`nousergon_lib.gates.report` is the system-agnostic half of a daily report that reads artifacts it
+does not own and pushes a pointer at an operator, lifted from `crucible/crucible/morning.py` on its
+second adoption (alpha-engine-config-I10951). Imported by path, not re-exported from
+`nousergon_lib.gates`, because `Read` and `DocumentRead` are different records for different jobs.
+
+- **`staleness()`** — the bolded first-line headline. An unparseable *or absent* `generated_at` is
+  STALE; freshness is never assumed from a timestamp nobody could read.
+- **`read_optional()` → `Read`** — present / absent / **DENIED** as three distinct facts.
+  `read_required()` raises. A denial rendered as absence hides an IAM gap behind a normal-looking
+  report — measured live, since S3 answers 403 for a *missing* key when the caller also lacks
+  `s3:ListBucket`, so absence is a listing, not a get.
+- **`moved_since()` → `MovedResult`** — the previous-reading diff, with `ABSENT`/`VANISHED`
+  sentinels and a `cannot_say` that is never rendered as "nothing moved".
+- **`wire_budget()` / `assert_within_budget()`** — the transport-prefix arithmetic against what
+  `krepis.alerts` actually prepends, pinned by a test against krepis' own formatter. Over budget
+  RAISES; it never truncates, because a truncated report arrives reading complete.
+- **`deliver()`** — `silent=False`, `dedup_key=None`, `sns=False`, an EXPLICIT destination, and an
+  `UndeliveredError` on the muted/dedup-suppressed publish krepis reports as `any_ok=True`.
+- **`filter_withheld_clauses()`** — a withheld clause is REPLACED by a counting marker, never
+  silently dropped. **`resolve_trigger()`** — `GITHUB_EVENT_NAME` first, because a workflow's own
+  `env:` block cannot forge a reserved prefix. **`history_row()` / `render_history_index()`** — the
+  rolling index, last row per trading day, newest first, corrupt rows named in place.
+
+`nousergon_lib.gates.tracker` is the rolling-issue adapter it posts through: `Tracker` over a
+`TrackerConfig(repo, token_var, app_ssm_prefix_var)`, find-or-create by title (two open issues with
+that title is a loud error, never a pick), comment, and a body PATCH whose payload is a literal
+`{"body": ...}`. **It carries no close method** — closing an issue is a human's authority, and the
+absence of the method is the control. Credential: the named env var, else a short-lived installation
+token minted through `nousergon_lib.github_app` narrowed to `issues: write`.
+
+**The ordering invariant belongs to the caller:** post the tracker comment BEFORE rendering the
+headline, because the headline's indispensable content is that comment's permalink. Both tracker
+calls raise, so a failed post means the job's manifest is `failed` and no message is sent.
+
 ### `egress.routes` — published LLM egress-proxy route contract
 
 `nousergon_lib.egress.routes` publishes, as a versioned artifact with a JSON Schema beside it, **which upstream hosts a multi-tenant LLM egress-proxy deployment serves and how each is authenticated** — `box_upstream_hosts()`, `laptop_upstream_hosts()`, `upstream_hosts(table)`, `table(name)`, `load_contract()`, `load_schema()`. A request naming a host absent from the table is refused by the proxy with `unknown upstream host`, so anything deciding which model rows are *servable* has to know the table; publishing it here is what lets a consumer read it with **no credential** instead of checking out the private repo that configures the proxy (alpha-engine-config-I8337). The artifact carries upstream host, path prefix and auth mode only — no key-environment names, no ports, no host of ours — and `tests/test_egress_routes_contract.py` asserts that. Deployments are never unioned: `box` and `laptop` are different tables. Stdlib only.
