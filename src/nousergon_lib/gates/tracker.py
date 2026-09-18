@@ -41,9 +41,13 @@ from typing import Any
 
 __all__ = [
     "API_ROOT",
+    "COMMENT_PAGE_CEILING",
+    "COMMENT_PAGE_SIZE",
     "HTTP_TIMEOUT_S",
+    "ISSUE_STATES",
     "SEARCH_API_ROOT",
     "TRACKER_APP_PERMISSIONS",
+    "IssueRead",
     "Opener",
     "Tracker",
     "TrackerConfig",
@@ -68,6 +72,20 @@ TRACKER_APP_PERMISSIONS: dict[str, str] = {"issues": "write"}
 #: Seconds. A daily report blocked forever on a hung socket is an absence page
 #: on a working producer.
 HTTP_TIMEOUT_S = 20
+
+#: GitHub's closed vocabulary for an issue. Anything else is REFUSED rather
+#: than passed through: a state a consumer has no rendering for would reach a
+#: board as a row it cannot classify, and an unclassifiable row renders as
+#: whatever the default branch happens to be.
+ISSUE_STATES: tuple[str, ...] = ("open", "closed")
+
+#: GitHub's maximum page size for a comment listing.
+COMMENT_PAGE_SIZE = 100
+
+#: How many pages :meth:`Tracker.comment_bodies` will follow before it
+#: REFUSES. A listing that would need more raises rather than truncating —
+#: see that method for why a short listing is the dangerous direction.
+COMMENT_PAGE_CEILING = 10
 
 #: A GitHub API request, as a caller may substitute it. ``(status, body)``.
 #: Injected so every test exercises the real request construction — headers,
@@ -107,6 +125,14 @@ class TrackerConfig:
     repo: str
     token_var: str
     app_ssm_prefix_var: str
+    #: The exact operator step that grants this adapter its credential, in the
+    #: caller's own vocabulary (which stack, which role, which repo variable).
+    #: Appended verbatim to every credential-absence message, because an
+    #: operator step recorded in an issue and nowhere else is
+    #: `alpha-engine-config-I1906` — closed as *fixed* on a PR whose command
+    #: was never run. Empty is legal and means the caller has nothing shorter
+    #: to say than the two variable names already in the message.
+    grant_hint: str = ""
 
 
 def _default_opener(request: urllib.request.Request) -> tuple[int, bytes]:
@@ -118,6 +144,31 @@ def _default_opener(request: urllib.request.Request) -> tuple[int, bytes]:
         # body naming what GitHub refused, and the caller renders that. Only a
         # URLError (an OSError) propagates, and each caller catches it by name.
         return int(exc.code), exc.read()
+
+
+@dataclass(frozen=True)
+class IssueRead:
+    """One tracker issue's state, or the reason it could not be read.
+
+    ``state`` is one of :data:`ISSUE_STATES` when the read succeeded and
+    ``None`` otherwise; exactly one of ``state``/``problem`` is set.
+
+    ``access_problem`` is the field that earns this class its existence. A
+    fault in OUR access — no credential, a 403, a transport failure — is a
+    statement about this identity's grant, NOT about the issue. A consumer
+    renders it ``UNMEASURABLE``; folding it into "the issue is not closed"
+    would report an IAM gap as a met-or-unmet verdict, which is a wrong answer
+    wearing a measurement's clothes.
+    """
+
+    state: str | None
+    problem: str | None
+    access_problem: bool = False
+
+    @property
+    def closed(self) -> bool:
+        """True only when the tracker was READ and says closed."""
+        return self.state == "closed"
 
 
 class Tracker:
@@ -180,6 +231,7 @@ class Tracker:
                 f"{self.config.repo} cannot be performed. It is not filed anywhere else "
                 "either — a record in one place and not the other is the "
                 "two-instruments-disagreeing defect this adapter removes."
+                + (f" Grant it with: {self.config.grant_hint}" if self.config.grant_hint else "")
             )
         return granted
 
@@ -281,6 +333,96 @@ class Tracker:
                 "fix by hand, not by choosing"
             )
         return numbers[0]
+
+    def read_issue(self, issue: int) -> IssueRead:
+        """Whether ``issue`` is open or closed. NEVER raises.
+
+        The lenient face, opposite :meth:`comment_bodies`, and deliberately
+        so: its callers render one row of a board per issue, and a board that
+        died because one optional read was denied tells nobody anything. Every
+        fault becomes an :class:`IssueRead` carrying ``access_problem=True``,
+        which a consumer renders as UNMEASURABLE rather than as a verdict.
+
+        A ``state`` outside :data:`ISSUE_STATES` is a PROBLEM, not a value
+        passed through — see that constant.
+        """
+        repo = self.config.repo
+        try:
+            granted = self.credential()
+        except TrackerCredentialError as exc:
+            return IssueRead(None, str(exc), access_problem=True)
+        if granted is None:
+            # Compact on purpose: rendered once per board row inside a wire
+            # budget, where a longer sentence here pushes another row out of
+            # the message. The grant itself is carried on the row's own
+            # "what to do when this is red" text, not repeated here.
+            return IssueRead(
+                None,
+                f"no tracker credential (${self.config.app_ssm_prefix_var} and "
+                f"${self.config.token_var} unset): could not ask {repo} whether the issue "
+                "is open or closed",
+                access_problem=True,
+            )
+        try:
+            status, body = self._request(f"/issues/{issue}", token=granted)
+        except OSError as exc:
+            return IssueRead(None, f"reading {repo}#{issue} failed at the transport: {exc}", access_problem=True)
+        if status != 200:
+            return IssueRead(
+                None,
+                f"GitHub answered {status} for {repo}#{issue}: {body.decode('utf-8', 'replace')[:200]}",
+                access_problem=True,
+            )
+        try:
+            document = self._decode(body, doing=f"reading {repo}#{issue}")
+        except TrackerError as exc:
+            return IssueRead(None, str(exc), access_problem=True)
+        state = document.get("state") if isinstance(document, dict) else None
+        if state not in ISSUE_STATES:
+            return IssueRead(
+                None,
+                f"{repo}#{issue} reports state {state!r}, which is not one of {ISSUE_STATES}",
+                access_problem=True,
+            )
+        return IssueRead(str(state), None)
+
+    def comment_bodies(self, issue: int) -> list[str]:
+        """Every comment body on ``issue``, oldest first. RAISES on any fault.
+
+        The strict face, because its caller is a WRITER: it exists so a record
+        is not posted twice, and a listing that silently came back short would
+        post a duplicate rather than skip one. The lenient reading that suits
+        :meth:`read_issue` is the wrong default here — one of these two
+        callers is harmed by a guess in each direction, which is why there are
+        two methods and not one with a flag.
+
+        Pagination is followed to :data:`COMMENT_PAGE_CEILING` and a listing
+        needing more RAISES rather than truncating: an issue carrying that
+        many comments is a fact worth failing on, not one worth guessing past.
+        """
+        repo = self.config.repo
+        doing = f"listing comments on {repo}#{issue}"
+        token = self._granted(doing)
+        bodies: list[str] = []
+        for page in range(1, COMMENT_PAGE_CEILING + 1):
+            path = f"/issues/{issue}/comments?per_page={COMMENT_PAGE_SIZE}&page={page}"
+            try:
+                status, body = self._request(path, token=token)
+            except OSError as exc:
+                raise TrackerError(f"{doing} failed at the transport: {exc}") from exc
+            if status != 200:
+                raise TrackerError(f"GitHub answered {status} {doing}: {body.decode('utf-8', 'replace')[:200]}")
+            document = self._decode(body, doing=doing)
+            if not isinstance(document, list):
+                raise TrackerError(f"{doing} answered with a {type(document).__name__}, not a list")
+            bodies.extend(str(item.get("body") or "") for item in document if isinstance(item, dict))
+            if len(document) < COMMENT_PAGE_SIZE:
+                return bodies
+        raise TrackerError(
+            f"{repo}#{issue} carries more than {COMMENT_PAGE_CEILING * COMMENT_PAGE_SIZE} comments; "
+            "this reader stops rather than deciding from a truncated listing whether the "
+            "record is already posted"
+        )
 
     # -- writes -------------------------------------------------------------
 
