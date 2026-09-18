@@ -52,7 +52,7 @@ import datetime as dt
 import json
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,6 +62,8 @@ __all__ = [
     "TRIGGER_VARS",
     "WITHHELD_MARKER",
     "MessageTooLongError",
+    "DeferPredicate",
+    "Move",
     "MovedResult",
     "Read",
     "UndeliveredError",
@@ -333,6 +335,7 @@ def staleness(
     now: dt.datetime,
     stale_after: dt.timedelta,
     label: str,
+    prefix: str = "STALE",
 ) -> str | None:
     """The bolded first-line staleness headline, or ``None``. Never a footnote.
 
@@ -340,14 +343,21 @@ def staleness(
     from a timestamp nobody could read is a positive claim asserted on no
     evidence, and it is the one direction of this error that leaves a reader
     confident about an age that was never measured.
+
+    ``prefix`` is the alarm word the line opens with. It is a parameter and
+    not a constant because a caller migrating onto this function has a live
+    surface whose first line an operator already recognises, and changing that
+    word as a side effect of consolidating two implementations is exactly the
+    un-shipped behaviour `shared-code-policy` §3.1 is about. It is the ALARM,
+    not a label: a caller may spell it for its own artifact, never soften it.
     """
     if generated_at is None or not str(generated_at).strip():
-        return f"STALE: {label} carries no generated_at, so the age of every reading below is unknown."
+        return f"{prefix}: {label} carries no generated_at, so the age of every reading below is unknown."
     try:
         generated = dt.datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
     except ValueError:
         return (
-            f"STALE: {label} generated_at={generated_at!r} is not a timestamp, so the "
+            f"{prefix}: {label} generated_at={generated_at!r} is not a timestamp, so the "
             "age of every reading below is unknown."
         )
     if generated.tzinfo is None:
@@ -358,7 +368,33 @@ def staleness(
     if age <= stale_after:
         return None
     hours = age.total_seconds() / 3600
-    return f"STALE: {label} was generated {generated_at} — {hours:.0f}h ago. Every reading below is that old."
+    return f"{prefix}: {label} was generated {generated_at} — {hours:.0f}h ago. Every reading below is that old."
+
+
+@dataclass(frozen=True)
+class Move:
+    """One row's difference between two readings, with both states named.
+
+    ``was``/``now`` carry the sentinels ``ABSENT`` and ``VANISHED`` rather
+    than ``None``, so a row that entered or left the board is a stated fact
+    and never an empty cell a reader skims past.
+    """
+
+    row_id: Any
+    was: str
+    now: str
+
+    def render(self) -> str:
+        """The one-line rendering both the diff and the deferred list use."""
+        return f"- {self.row_id}: {self.was} -> {self.now}"
+
+
+#: The signature of the predicate :func:`moved_since` sets rows aside with.
+#: It is handed the FULL before and after rows — ``None`` where that side has
+#: none — rather than the two states, because the field a caller classifies on
+#: (a scheduling state, a lifecycle marker) is usually not the field the diff
+#: is about.
+DeferPredicate = Callable[["dict[str, Any] | None", "dict[str, Any] | None"], bool]
 
 
 @dataclass(frozen=True)
@@ -369,11 +405,32 @@ class MovedResult:
     that case ``count`` is ``None`` rather than ``0``: reporting no movement
     over a failed comparison is a positive claim asserted on no evidence, and
     "nothing moved" is exactly the sentence a reader would act on.
+
+    ``deferred`` holds the differences a caller's ``defer`` predicate set
+    aside — counted and rendered separately, never dropped. A deferred row is
+    a row this surface has decided is not NEWS; it is not a row it has decided
+    is not THERE.
     """
 
     lines: list[str]
     cannot_say: str | None
     count: int | None
+    moves: tuple[Move, ...] = ()
+    deferred: tuple[Move, ...] = ()
+
+    @property
+    def deferred_lines(self) -> list[str]:
+        """The set-aside differences, rendered like the moves they are not."""
+        return [move.render() for move in self.deferred]
+
+    @property
+    def deferred_count(self) -> int | None:
+        """How many differences were set aside, or ``None`` when cannot_say.
+
+        ``None`` for the same reason ``count`` is: over a comparison that did
+        not happen, zero is a claim rather than a measurement.
+        """
+        return None if self.cannot_say is not None else len(self.deferred)
 
 
 def moved_since(
@@ -383,6 +440,7 @@ def moved_since(
     previous_reason: str | None,
     row_id_key: str = "id",
     state_key: str = "state",
+    defer: DeferPredicate | None = None,
 ) -> MovedResult:
     """The previous-reading diff, old -> new. Never an absolute-state retelling.
 
@@ -390,19 +448,46 @@ def moved_since(
     reads ``ABSENT`` on the left. Both are named rather than skipped, because
     a row LEAVING a board is the change most worth seeing and a diff that only
     reports rows present in both would be silent about it.
+
+    **``defer`` separates a state change from a schedule phase.**
+    `alpha-engine-config-I10872`: a blind state diff counted 30 component rows
+    that were RUNNING at one render as having "moved" against a board rendered
+    after the work finished — a number that is arithmetically correct and
+    reads as news when none of it is. A caller passes the predicate for its
+    own vocabulary (crucible's is
+    ``crucible.console.classify.not_yet_due`` over ``component_state``), and
+    the rows it names go to :attr:`MovedResult.deferred` instead of being
+    counted as moves. They are RENDERED, separately and with their count — a
+    deferred row dropped silently would be the same blindness pointed the
+    other way.
+
+    The predicate is handed the whole rows, so it can classify on a field the
+    diff itself does not read; a caller with no such field passes nothing and
+    gets the flat diff unchanged.
     """
     if previous is None:
         reason = previous_reason or "the previous reading could not be read"
         sentence = f"cannot say — {reason}"
         return MovedResult([sentence], sentence, None)
-    before = {row.get(row_id_key): row.get(state_key) for row in previous.get("rows", []) if isinstance(row, dict)}
-    after = {row.get(row_id_key): row.get(state_key) for row in current.get("rows", []) if isinstance(row, dict)}
-    lines = [
-        f"- {row_id}: {before.get(row_id, 'ABSENT')} -> {after.get(row_id, 'VANISHED')}"
-        for row_id in sorted(set(before) | set(after), key=str)
-        if before.get(row_id) != after.get(row_id)
-    ]
-    return MovedResult(lines, None, len(lines))
+    before = {row.get(row_id_key): row for row in previous.get("rows", []) if isinstance(row, dict)}
+    after = {row.get(row_id_key): row for row in current.get("rows", []) if isinstance(row, dict)}
+    moves: list[Move] = []
+    deferred: list[Move] = []
+    for row_id in sorted(set(before) | set(after), key=str):
+        was_row, now_row = before.get(row_id), after.get(row_id)
+        was = str(was_row.get(state_key)) if was_row is not None else "ABSENT"
+        now = str(now_row.get(state_key)) if now_row is not None else "VANISHED"
+        if was_row is not None and now_row is not None and was == now:
+            continue
+        move = Move(row_id, was, now)
+        (deferred if defer is not None and defer(was_row, now_row) else moves).append(move)
+    return MovedResult(
+        [move.render() for move in moves],
+        None,
+        len(moves),
+        tuple(moves),
+        tuple(deferred),
+    )
 
 
 def filter_withheld_clauses(
@@ -439,7 +524,11 @@ def filter_withheld_clauses(
     return separator.join([*kept, marker]) if kept else marker
 
 
-def resolve_trigger(*, override_var: str | None = None) -> str:
+def resolve_trigger(
+    *,
+    override_var: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
     """What started this run, as a key-safe name.
 
     Never inferred from the clock or the calendar: a dispatched run is just as
@@ -451,10 +540,17 @@ def resolve_trigger(*, override_var: str | None = None) -> str:
     Returns :data:`TRIGGER_UNKNOWN` when the invocation said nothing. A value
     that does not match :data:`TRIGGER_RE` RAISES: it becomes a store-key
     segment, and refusing is the only reading that is not a guess.
+
+    ``environ`` substitutes the environment wholesale. A test that mutates the
+    real ``os.environ`` leaks into whatever runs next in the same process, and
+    the leak is invisible in exactly the direction that matters — a stray
+    ``GITHUB_EVENT_NAME`` makes a later assertion about ``unknown`` pass for
+    the wrong reason.
     """
+    source = os.environ if environ is None else environ
     names = TRIGGER_VARS + ((override_var,) if override_var else ())
     for var in names:
-        value = (os.environ.get(var) or "").strip()
+        value = (source.get(var) or "").strip()
         if not value:
             continue
         if not TRIGGER_RE.match(value):
@@ -513,8 +609,23 @@ def deliver(
     destination: str | None = None,
     parse_mode: str = "HTML",
     destination_override_var: str | None = None,
-) -> None:
-    """Send ``message`` on the operator channel, or RAISE.
+    transport: Callable[..., Any] | None = None,
+) -> str:
+    """Send ``message`` on the operator channel, or RAISE. Returns where it went.
+
+    **The return value is the destination the transport says it reached**, not
+    the one this function asked for. A caller records it on its run manifest,
+    and the two are not the same claim: krepis resolves what it was handed,
+    and a manifest that recorded the REQUEST would keep reading ``ok`` on the
+    day the resolution changed underneath it — which is the silent
+    audience-change this function's explicit ``destination`` already refuses
+    one step earlier. It falls back to the transport's own name when the
+    result does not say, never to the requested value.
+
+    ``transport`` substitutes the publish call for one test or one tier. The
+    module attribute :func:`_krepis_publish` is substitutable too; the
+    argument exists so a CALLER — not only a monkeypatching test — can route
+    one delivery without mutating module state a sibling test then inherits.
 
     **Telegram only, ``sns=False``.** A daily digest is not a page, and
     routing one through the page path is how a page channel becomes the
@@ -536,7 +647,8 @@ def deliver(
     publish by its documented contract, and neither of those put the report in
     anybody's hands.
     """
-    result = _krepis_publish(
+    publish = _krepis_publish if transport is None else transport
+    result = publish(
         message,
         severity=severity,
         source=source,
@@ -566,6 +678,7 @@ def deliver(
             "deliverable; a rendered report nobody received is the accountability gap "
             "this job closes."
         )
+    return str(getattr(result, "telegram_destination", None) or "telegram")
 
 
 def history_row(
