@@ -982,6 +982,19 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "serves while the zoo arc is degraded. No persisted artifact (the email IS "
         "the surface)."
     ),
+    "PublishModelZooUnservableNotice": ArtifactReason(
+        reason="SNS notice fired when the M slot DECLARED itself unservable "
+        "(alpha-engine-config-I11106) — the arena evaluated every arm, applied "
+        "the serving preconditions and correctly refused to promote. That is a "
+        "VERDICT, not a failure, and it is a DIFFERENT state from "
+        "PublishModelZooFailureImmediate's: the rotation ran to completion. The "
+        "run terminates SUCCEEDED and sets no degraded flag. No persisted "
+        "artifact of its own (the notice IS the surface); the durable record is "
+        "arena/model/{date}.json::decision.status, which the standing detector "
+        "check_arena_slot_servability.py grades — that detector, not this "
+        "notice, is what keeps the quiet terminal honest "
+        "(champion-challenger-policy §5.3)."
+    ),
     # ── Pre-open Trading SF (17 substantive Task steps) ───────────────────────────
     "DeployDriftCheck": ArchivePageRef(
         page="fleet-status",
