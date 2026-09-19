@@ -102,6 +102,7 @@ __all__ = [
     "Comparison",
     "PointerDecision",
     "RetirementVerdict",
+    "ArmExclusion",
     "ArenaCycle",
     "decide_pointer",
     "evaluate_retirements",
@@ -518,6 +519,43 @@ class RetirementVerdict:
 
 
 @dataclass(frozen=True)
+class ArmExclusion:
+    """One arm the cycle did NOT score, and why it was absent.
+
+    A cycle is graded AS OF a trading day, so it contains exactly the arms
+    that were in the arena on that day. Every other registered arm is
+    excluded — and named here, with the two dates that decide it, so a reader
+    comparing the cycle's arm count against the register today can tell an
+    intentional point-in-time exclusion from a silently dropped arm
+    (`principles.md` §2.7, `alpha-engine-config-I11084`).
+    """
+
+    arm_id: str
+    reason: str
+    created_date: str
+    filed_date: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "arm_id": self.arm_id,
+            "reason": self.reason,
+            "created_date": self.created_date,
+            "filed_date": self.filed_date,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> ArmExclusion:
+        """The inverse of :meth:`to_dict`. Every field is stored directly."""
+        filed = data.get("filed_date")
+        return cls(
+            arm_id=str(data["arm_id"]),
+            reason=str(data.get("reason") or ""),
+            created_date=str(data["created_date"]),
+            filed_date=None if filed is None else str(filed),
+        )
+
+
+@dataclass(frozen=True)
 class ArenaCycle:
     """The durable artifact for one evaluation cycle of one slot."""
 
@@ -531,10 +569,13 @@ class ArenaCycle:
     decision: PointerDecision
     retirements: tuple[RetirementVerdict, ...]
     scored_arms: tuple[str, ...]
-    #: Every live arm in the slot, CONTROLS INCLUDED. Kept for backward
-    #: compatibility with existing consumers reading arm counts off this
-    #: field — do not repurpose it to exclude controls; use
-    #: `promotable_arms` for that instead.
+    #: Every arm that was live in the slot ON `as_of`, CONTROLS INCLUDED.
+    #: Kept for backward compatibility with existing consumers reading arm
+    #: counts off this field — do not repurpose it to exclude controls; use
+    #: `promotable_arms` for that instead. POINT-IN-TIME, like the rest of
+    #: the cycle: an arm registered after `as_of` is absent from this field
+    #: and named in `not_yet_registered_arms` instead
+    #: (`alpha-engine-config-I11084`).
     active_arms: tuple[str, ...]
     #: `active_arms` with controls excluded — the pool `min_active_arms`
     #: actually governs (`evaluate_retirements`'s docstring,
@@ -551,6 +592,13 @@ class ArenaCycle:
     #: have changed — `promote_evidence` and `promote_min_weeks` in particular
     #: change what a given set of comparisons decides.
     config: ArenaConfig
+    #: Registered arms the cycle deliberately did NOT score because they were
+    #: not in the arena on ``as_of`` — filed later, or declaring a later
+    #: ``created_date``. Emitted on EVERY cycle, the empty tuple included, so
+    #: that "no arm was excluded" is a reading rather than an absence
+    #: (`alpha-engine-config-I11084`). Defaulted only so a hand-built cycle in
+    #: a test need not state it; :func:`run_cycle` always sets it.
+    not_yet_registered_arms: tuple[ArmExclusion, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -567,6 +615,9 @@ class ArenaCycle:
             "ranking": self.ranking.to_dict() if self.ranking else None,
             "decision": self.decision.to_dict(),
             "retirements": [verdict.to_dict() for verdict in self.retirements],
+            "not_yet_registered_arms": [
+                exclusion.to_dict() for exclusion in self.not_yet_registered_arms
+            ],
         }
 
     @classmethod
@@ -609,6 +660,9 @@ class ArenaCycle:
             active_arms=tuple(str(a) for a in data.get("active_arms") or ()),
             promotable_arms=tuple(str(a) for a in data.get("promotable_arms") or ()),
             config=config,
+            not_yet_registered_arms=tuple(
+                ArmExclusion.from_dict(d) for d in data.get("not_yet_registered_arms") or ()
+            ),
         )
 
 
@@ -949,7 +1003,7 @@ def decide_pointer(
     )
 
 
-def _promotable_arms(register: ArmRegister) -> tuple[str, ...]:
+def _promotable_arms(register: ArmRegister, as_of: str | None = None) -> tuple[str, ...]:
     """The active pool with controls excluded — the ``min_active_arms`` floor.
 
     A control (synthetic benchmark) is a real point of comparison but can
@@ -958,11 +1012,14 @@ def _promotable_arms(register: ArmRegister) -> tuple[str, ...]:
     the single computation both `evaluate_retirements` (which checks the
     floor) and `run_cycle` (which emits it as `ArenaCycle.promotable_arms`)
     read, so the "controls excluded" rule lives in exactly one place.
+
+    ``as_of`` makes the pool POINT-IN-TIME: an arm registered after that day
+    was not in the arena then, so it is neither part of the floor nor a
+    candidate for retirement (`alpha-engine-config-I11084`).
     """
-    control_ids = frozenset(
-        a for a in register.active_arms() if register.state(a).record.control
-    )
-    return tuple(a for a in register.active_arms() if a not in control_ids)
+    active = register.active_arms(as_of)
+    control_ids = frozenset(a for a in active if register.state(a).record.control)
+    return tuple(a for a in active if a not in control_ids)
 
 
 def evaluate_retirements(
@@ -1019,9 +1076,9 @@ def evaluate_retirements(
       correctly report every live arm, controls included.
     """
     control_ids = frozenset(
-        a for a in register.active_arms() if register.state(a).record.control
+        a for a in register.active_arms(as_of) if register.state(a).record.control
     )
-    active = list(_promotable_arms(register))
+    active = list(_promotable_arms(register, as_of))
     control_losses: dict[str, int] = dict.fromkeys(active, 0)
     for verdict in ranking.verdicts:
         if verdict.winner in control_ids and verdict.loser in control_losses:
@@ -1140,7 +1197,43 @@ def run_cycle(
     status at all — fails the whole cycle with
     :class:`TrainingIntegrityError`. Slots whose arms are not fitted (a
     deterministic universe cut, say) pass ``training=None``.
+
+    **The cycle is POINT-IN-TIME.** It contains exactly the arms that were in
+    the arena on ``as_of``: an arm whose ``registered`` row was filed later,
+    or whose recipe declares a later ``created_date``, is EXCLUDED from the
+    cycle rather than aged. It is not scored, not ranked, not eligible for the
+    pointer and receives no retirement verdict, and it is named in
+    :attr:`ArenaCycle.not_yet_registered_arms` with the dates that decide it.
+
+    Neither of the two shortcuts is taken, and both are forbidden
+    (`alpha-engine-config-I11084`):
+    :func:`~nousergon_lib.arena.window.elapsed_weeks` still RAISES on a
+    negative age — that refusal is the only reason this defect was ever found
+    — and an absent arm's age is never clamped to zero, which would hand an
+    arm that did not exist a standing and a retirement verdict on a day it
+    was absent from (the `-I10948` defect re-entering through the writer).
+
+    A series supplied for a not-yet-registered arm is DROPPED for the same
+    reason, not scored: a shadow backfilled for a recipe that did not exist
+    on ``as_of`` is a look-ahead on that day whatever produced it. The drop is
+    reported in the same field, so it is never silent.
     """
+    absent = {
+        arm: register.state(arm) for arm in register.not_yet_registered(as_of)
+    }
+    not_yet_registered_arms = tuple(
+        ArmExclusion(
+            arm_id=arm,
+            reason=state.absence_reason(as_of),
+            created_date=state.record.created_date,
+            filed_date=state.filed_date,
+        )
+        for arm, state in sorted(absent.items())
+    )
+    series_by_arm = {
+        arm: series for arm, series in series_by_arm.items() if arm not in absent
+    }
+
     expected = set(register.scored_arms(as_of, config.retired_trailing_cycles))
     supplied = set(series_by_arm)
     missing = sorted(expected - supplied)
@@ -1160,14 +1253,14 @@ def run_cycle(
         )
 
     if training is not None:
-        assert_training_integrity(training, register.active_arms())
+        assert_training_integrity(training, register.active_arms(as_of))
 
     ladders = tuple(
         build_ladder(series_by_arm[arm], as_of, max_weeks=config.max_ladder_weeks)
         for arm in sorted(series_by_arm)
     )
 
-    active = register.active_arms()
+    active = register.active_arms(as_of)
     active_series = {arm: series_by_arm[arm] for arm in active if arm in series_by_arm}
     ranking = None
     if len(active_series) >= 2:
@@ -1213,6 +1306,7 @@ def run_cycle(
         retirements=retirements,
         scored_arms=tuple(sorted(series_by_arm)),
         active_arms=active,
-        promotable_arms=_promotable_arms(register),
+        promotable_arms=_promotable_arms(register, as_of),
         config=config,
+        not_yet_registered_arms=not_yet_registered_arms,
     )
