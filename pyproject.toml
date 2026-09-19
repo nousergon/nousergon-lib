@@ -39,6 +39,7 @@ dependencies = [
 
 [project.scripts]
 llm-egress-proxy = "nousergon_lib.egress.proxy:main"
+universe-scope-lint = "nousergon_lib.contracts.universe_scope_lint:main"
 
 [project.optional-dependencies]
 arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
