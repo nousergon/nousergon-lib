@@ -15,6 +15,7 @@ import pytest
 
 from nousergon_lib.arena import (
     ArenaConfig,
+    ArenaCycle,
     ArmRegister,
     ArmSeries,
     ImmutableArmError,
@@ -1190,3 +1191,179 @@ def test_omitting_the_filing_day_warns_and_is_not_silent():
             created_date="2026-06-01",
         )
     assert reg.events[-1].date == record.created_date
+
+
+# --------------------------------------------------------------------------
+# The cycle is POINT-IN-TIME — alpha-engine-config-I11084
+#
+# Measured live 2026-09-19: `crucible experiment.grade --slot u --date
+# 2026-08-14` raised `ValueError: end_date 2026-08-14 precedes start_date
+# 2026-08-17` — an arm registered on 2026-08-17 being AGED as of a day three
+# days before it existed. The grader could not produce an arena cycle for any
+# past day on which a later-registered arm exists, which blocked every
+# historical replay and, through `arms_all_scored`, the whole phase ladder.
+#
+# The two forbidden repairs are pinned below: `elapsed_weeks` still raises on
+# a negative age (it is the only reason this was ever found), and an absent
+# arm's age is never clamped to zero (that hands an arm a standing on a day
+# it was not there — alpha-engine-config-I10948 re-entering through the
+# writer instead of the reader).
+# --------------------------------------------------------------------------
+
+PAST = "2026-08-14"
+
+
+def _past_series(arm_id, values, step=7, end=PAST):
+    ds = _dates(len(values), step=step, end=end)
+    return ArmSeries(arm_id=arm_id, scores=dict(zip(ds, values)))
+
+
+def _i11084_register():
+    """The live U register's shape: two arms present, one filed days later."""
+    reg, ids = ArmRegister(), {}
+    for name, created in (
+        ("attractiveness", "2026-07-27"),
+        ("attractiveness_old", "2026-07-06"),
+        ("attractiveness_mom121", "2026-08-17"),
+    ):
+        reg, record = reg.register(
+            slot="model", name=name, spec={"recipe": name}, created_date=created, filed_on=created
+        )
+        ids[name] = record.arm_id
+    return reg, ids
+
+
+def test_a_cycle_on_a_past_date_excludes_an_arm_registered_after_it():
+    """The I11084 reproduction. Grading 2026-08-14 must not age an arm whose
+    row was filed on 2026-08-17 — it must exclude it."""
+    reg, ids = _i11084_register()
+    series = {
+        ids["attractiveness"]: _past_series(ids["attractiveness"], [0.05] * 6),
+        ids["attractiveness_old"]: _past_series(ids["attractiveness_old"], [0.03] * 6),
+    }
+
+    cycle = run_cycle(_config(), PAST, reg, series, incumbent=ids["attractiveness_old"])
+
+    later = ids["attractiveness_mom121"]
+    assert later not in cycle.scored_arms
+    assert later not in cycle.active_arms
+    assert later not in cycle.promotable_arms
+    assert all(v.arm_id != later for v in cycle.retirements)
+
+
+def test_the_excluded_arm_is_NAMED_in_the_cycle_with_the_dates_that_decide_it():
+    """A cycle scoring fewer arms than the register holds, with no statement
+    of why, is indistinguishable from one that silently dropped them
+    (`principles.md` §2.7)."""
+    reg, ids = _i11084_register()
+    series = {
+        ids["attractiveness"]: _past_series(ids["attractiveness"], [0.05] * 6),
+        ids["attractiveness_old"]: _past_series(ids["attractiveness_old"], [0.03] * 6),
+    }
+
+    cycle = run_cycle(_config(), PAST, reg, series, incumbent=ids["attractiveness_old"])
+
+    excluded = {e.arm_id: e for e in cycle.not_yet_registered_arms}
+    assert set(excluded) == {ids["attractiveness_mom121"]}
+    entry = excluded[ids["attractiveness_mom121"]]
+    assert entry.created_date == "2026-08-17"
+    assert entry.filed_date == "2026-08-17"
+    assert "not yet registered" in entry.reason
+    assert "2026-08-17" in entry.reason and PAST in entry.reason
+    # And it survives the artifact round-trip a consumer actually reads.
+    payload = cycle.to_dict()
+    assert payload["not_yet_registered_arms"] == [entry.to_dict()]
+    assert ArenaCycle.from_dict(payload).not_yet_registered_arms == (entry,)
+
+
+def test_a_cycle_with_nothing_to_exclude_says_so_rather_than_omitting_the_field():
+    """An empty reading, never an absent one — `no data` is not rendered as
+    green anywhere in this fleet (`principles.md` §2.7)."""
+    reg, ids = _i11084_register()
+    series = {
+        ids[n]: _series(ids[n], [0.05 - 0.01 * i] * 8)
+        for i, n in enumerate(("attractiveness", "attractiveness_old", "attractiveness_mom121"))
+    }
+
+    cycle = run_cycle(_config(), AS_OF, reg, series, incumbent=ids["attractiveness_old"])
+
+    assert cycle.not_yet_registered_arms == ()
+    assert cycle.to_dict()["not_yet_registered_arms"] == []
+    assert set(cycle.scored_arms) == set(series)
+
+
+def test_a_later_registered_arm_receives_no_retirement_verdict_at_all():
+    """NOT a verdict of `retire=False` with age 0: an arm that did not exist
+    has no standing to report. Clamping the age would give it one."""
+    reg, ids = _i11084_register()
+    series = {
+        ids["attractiveness"]: _past_series(ids["attractiveness"], [0.05] * 6),
+        ids["attractiveness_old"]: _past_series(ids["attractiveness_old"], [0.03] * 6),
+    }
+    ranking = rank_pairwise(
+        series,
+        created_dates={a: reg.state(a).record.created_date for a in series},
+        as_of=PAST,
+        clip=0.05,
+    )
+
+    verdicts = evaluate_retirements(
+        _config(), PAST, reg, ranking, champion=ids["attractiveness_old"]
+    )
+
+    assert ids["attractiveness_mom121"] not in {v.arm_id for v in verdicts}
+
+
+def test_elapsed_weeks_still_raises_on_a_negative_age():
+    """The refusal is CORRECT and is the only reason I11084 was ever found.
+    A fix that relaxed it would have closed the symptom and kept the defect."""
+    reg, ids = _i11084_register()
+    with pytest.raises(ValueError, match="precedes"):
+        reg.state(ids["attractiveness_mom121"]).age_weeks(PAST)
+
+
+def test_a_supplied_series_for_a_not_yet_registered_arm_is_dropped_and_named():
+    """A shadow backfilled for a recipe that did not exist on `as_of` is a
+    look-ahead on that day, whatever produced it — so it is dropped, and the
+    drop is reported rather than silent."""
+    reg, ids = _i11084_register()
+    later = ids["attractiveness_mom121"]
+    series = {
+        ids["attractiveness"]: _past_series(ids["attractiveness"], [0.05] * 6),
+        ids["attractiveness_old"]: _past_series(ids["attractiveness_old"], [0.03] * 6),
+        later: _past_series(later, [0.99] * 6),
+    }
+
+    cycle = run_cycle(_config(), PAST, reg, series, incumbent=ids["attractiveness_old"])
+
+    assert later not in cycle.scored_arms
+    assert all(ladder.arm_id != later for ladder in cycle.ladders)
+    assert cycle.decision.champion != later
+    assert [e.arm_id for e in cycle.not_yet_registered_arms] == [later]
+
+
+def test_the_register_reads_point_in_time_on_both_the_filed_and_created_axes():
+    """`filed_date` and `created_date` answer different questions and either
+    one in the future of `as_of` means the arm was absent."""
+    reg, ids = _i11084_register()
+    later = ids["attractiveness_mom121"]
+
+    assert later not in reg.active_arms(PAST)
+    assert later not in reg.scored_arms(PAST, trailing_cycles=4)
+    assert reg.not_yet_registered(PAST) == (later,)
+    # Present tense is unchanged: the register as it stands still holds it.
+    assert later in reg.active_arms()
+    assert later in reg.scored_arms(AS_OF, trailing_cycles=4)
+    assert reg.not_yet_registered(AS_OF) == ()
+
+    # A row filed long after the recipe's declared start is absent until the
+    # day it was FILED, not the day the recipe claims (I10948's axis).
+    late_filed, record = ArmRegister().register(
+        slot="model",
+        name="backfilled",
+        spec={"recipe": "backfilled"},
+        created_date="2026-06-01",
+        filed_on="2026-08-24",
+    )
+    assert late_filed.not_yet_registered("2026-08-21") == (record.arm_id,)
+    assert late_filed.not_yet_registered("2026-08-24") == ()

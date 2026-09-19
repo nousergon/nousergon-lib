@@ -229,6 +229,14 @@ class ArmState:
     record: ArmRecord
     retired_date: str | None = None
     retired_reason: str = ""
+    #: The day the arm's ``registered`` event was FILED — the event date, not
+    #: the recipe's declared ``created_date`` (:meth:`ArmRegister.register`).
+    #: It is the only thing that answers "was this row in the register on day
+    #: D", which is the axis :meth:`exists_at` and every point-in-time read
+    #: below are built on (`alpha-engine-config-I10948`, `-I11084`). Optional
+    #: only so a hand-built :class:`ArmState` in a test need not state it; the
+    #: fold always sets it.
+    filed_date: str | None = None
 
     @property
     def arm_id(self) -> str:
@@ -237,6 +245,39 @@ class ArmState:
     @property
     def active(self) -> bool:
         return self.retired_date is None
+
+    def exists_at(self, as_of: str) -> bool:
+        """Was this arm IN THE ARENA on ``as_of``?
+
+        Two dates have to be at or before ``as_of`` for the answer to be yes,
+        and they answer different questions
+        (:meth:`ArmRegister.register`'s docstring):
+
+        * ``filed_date`` — the row was in the register that day. An arm filed
+          later was not there to be scored, ranked or retired.
+        * ``record.created_date`` — the arm's out-of-sample clock had started.
+          An arm whose recipe declares a later start has NO AGE on this day,
+          and :func:`nousergon_lib.arena.window.elapsed_weeks` correctly
+          refuses to invent one.
+
+        Either being in the future of ``as_of`` means the same thing: the arm
+        was absent, so it has no standing and no retirement question
+        (`alpha-engine-config-I11084`).
+        """
+        if self.record.created_date > as_of:
+            return False
+        return self.filed_date is None or self.filed_date <= as_of
+
+    def absence_reason(self, as_of: str) -> str:
+        """Why :meth:`exists_at` said no — stated, never implied."""
+        parts: list[str] = []
+        if self.record.created_date > as_of:
+            parts.append(f"created {self.record.created_date}")
+        if self.filed_date is not None and self.filed_date > as_of:
+            parts.append(f"filed {self.filed_date}")
+        if not parts:
+            return f"present on {as_of}"
+        return f"not yet registered on {as_of} ({', '.join(parts)})"
 
     def age_weeks(self, as_of: str) -> int:
         """FULL weeks elapsed since ``created_date``.
@@ -290,7 +331,7 @@ class ArmRegister:
                         "not idempotent — a duplicate registration hides which "
                         "created_date the ladder should start from"
                     )
-                states[event.arm_id] = ArmState(record=event.record)
+                states[event.arm_id] = ArmState(record=event.record, filed_date=event.date)
             elif event.kind == EVENT_REFIT:
                 if event.arm_id not in states:
                     raise ImmutableArmError(
@@ -315,6 +356,7 @@ class ArmRegister:
                     record=state.record,
                     retired_date=event.date,
                     retired_reason=event.reason,
+                    filed_date=state.filed_date,
                 )
         return states
 
@@ -354,19 +396,54 @@ class ArmRegister:
     def __contains__(self, arm_id: object) -> bool:
         return arm_id in self._states
 
-    def active_arms(self) -> tuple[str, ...]:
-        return tuple(sorted(a for a, s in self._states.items() if s.active))
+    def active_arms(self, as_of: str | None = None) -> tuple[str, ...]:
+        """Live arms. With ``as_of``, the arms that were live ON that day.
+
+        ``as_of=None`` is "as the register stands now" and is what every
+        present-tense caller wants. Passing a past trading day makes the read
+        POINT-IN-TIME: an arm whose row was filed after that day, or whose
+        recipe declares a later ``created_date``, was not in the arena then
+        and is excluded rather than aged (`alpha-engine-config-I11084`).
+        """
+        return tuple(
+            sorted(
+                a
+                for a, s in self._states.items()
+                if s.active and (as_of is None or s.exists_at(as_of))
+            )
+        )
 
     def all_arms(self) -> tuple[str, ...]:
         return tuple(sorted(self._states))
 
+    def not_yet_registered(self, as_of: str) -> tuple[str, ...]:
+        """Every arm in the log that did NOT yet exist on ``as_of``.
+
+        The complement of the point-in-time reads above, returned so a
+        consumer can NAME the arms it excluded. A cycle that scores fewer
+        arms than the register holds, with no statement of why, is
+        indistinguishable from one that silently dropped them
+        (`principles.md` §2.7).
+        """
+        return tuple(
+            sorted(arm for arm, state in self._states.items() if not state.exists_at(as_of))
+        )
+
     def scored_arms(self, as_of: str, trailing_cycles: int) -> tuple[str, ...]:
-        """Active arms plus retired arms still inside their trailing window (§3)."""
+        """Arms to score on ``as_of``: active plus retired-but-trailing (§3).
+
+        POINT-IN-TIME on both ends. An arm retired more than
+        ``trailing_cycles`` ago has left the window; an arm that had not yet
+        been registered on ``as_of`` had not entered it. Both are absences
+        from the day being graded, and neither is a series the caller owes
+        (`alpha-engine-config-I11084`).
+        """
         return tuple(
             sorted(
                 arm
                 for arm, state in self._states.items()
-                if state.in_trailing_scoring_window(as_of, trailing_cycles)
+                if state.exists_at(as_of)
+                and state.in_trailing_scoring_window(as_of, trailing_cycles)
             )
         )
 

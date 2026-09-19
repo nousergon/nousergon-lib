@@ -58,6 +58,20 @@
       "items": {"type": "string"},
       "description": "`active_arms` with controls excluded — the pool `min_active_arms` actually governs (alpha-engine-config-I9770, alpha-engine-config-I10645). A control can never take the pointer, so it can never serve as the floor's slack; compare `len(promotable_arms)` against a slot's `min_active_arms`, not `len(active_arms)`. ABSENT — as opposed to present — means the document was written before this field existed, which is why it is optional rather than required."
     },
+    "not_yet_registered_arms": {
+      "type": "array",
+      "description": "Registered arms this cycle deliberately did NOT score, because they were not in the arena on `as_of` — the `registered` row was filed later, or the recipe declares a later `created_date`. A cycle is POINT-IN-TIME: an arm that did not exist on the day being graded has no age, no standing and no retirement question, so it is excluded rather than aged, and `elapsed_weeks` still refuses a negative age rather than clamping one (alpha-engine-config-I11084). Emitted on every cycle, the EMPTY ARRAY included, so that 'no arm was excluded' is a reading rather than an absence and a reader comparing `scored_arms` against today's register can tell an intentional exclusion from a silently dropped arm. ABSENT — as opposed to empty — means the document was written before this field existed, which is why it is optional rather than required.",
+      "items": {
+        "type": "object",
+        "required": ["arm_id", "reason", "created_date"],
+        "properties": {
+          "arm_id": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1, "description": "Why the arm was absent on `as_of`, naming the date(s) that decide it."},
+          "created_date": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$", "description": "The recipe's declared start of the arm's out-of-sample clock."},
+          "filed_date": {"type": ["string", "null"], "description": "The day this arm's `registered` event entered the log — the only date that answers 'was this row in the register on day D' (alpha-engine-config-I10948). Null only where the register carries no filed date for it."}
+        }
+      }
+    },
     "ladders": {
       "type": "array",
       "items": {
