@@ -44,13 +44,39 @@ and folding one into the union would let a Tuesday debugging run mark the
 week's belief refresh complete — the separation ``roles.py`` calls a binding
 invariant.
 
+## Cadence-declared skips (``alpha-engine-config-I11170``)
+
+Completeness is graded against the plan DECLARED for the run, not against a
+fixed stage list. The live Saturday trigger carries ``skip_parity: true``, so
+``PitParityCompare`` is not due — yet the walk counted it mandatory and every
+weekly cycle read ``incomplete (partial_cycle), 15/16`` however well the run
+went, including ``2026-09-18``, whose ``watch-rerun-2026-09-18-3`` SUCCEEDED
+with ``degraded_summary.degraded: false``. A verdict that cannot reach a
+non-``incomplete`` value while the cadence stands cannot distinguish "off by
+design" from "broken".
+
+The declaration is read as EVIDENCE from the cycle's own state walk: the SF
+enters a marker state (``MarkParityVerdictUnknownByCadence``) exactly when the
+cadence declared the skip, and :data:`~.registry.CADENCE_SKIP_MARKER_STAGES`
+maps that name to the spine stages its entry excuses. So the fold stays pure —
+no EventBridge read, no ``run_scope.json``, no S3 — and the inverse inference
+is impossible: **absence never implies a skip** (``sf-pipeline-policy.md``
+§2.3a — absence is UNKNOWN, never a pass). A stage not entered with no marker
+stays MISSING and the cycle stays INCOMPLETE.
+
+Declared-skipped stages land in :attr:`CycleShape.stages_declared_skipped`,
+their own visible state — not entered, not missing — and the reason says
+``full_cycle_with_declared_skips`` rather than ``full_cycle``, so no reader
+mistakes an excused cycle for an exhaustive one.
+
 ## The four cycle verdicts
 
 :class:`CycleVerdict` is closed and has no fall-through:
 
 - :attr:`CycleVerdict.COMPLETED` — the union of contributing executions
-  covers the declared spine. Reached in one execution or in five; the count
-  is reported, never the discriminator.
+  covers the declared spine, stage for stage or by a cadence-declared skip
+  the walk can PROVE. Reached in one execution or in five; the count is
+  reported, never the discriminator.
 - :attr:`CycleVerdict.SKIPPED` — every contributing execution reached a
   declared skip terminal. No work was due.
 - :attr:`CycleVerdict.INCOMPLETE` — the union does not cover the spine.
@@ -90,7 +116,11 @@ from .read import (
     _raise_for_boto_error,
     _sfn_client,
 )
-from .registry import pending_definition_stages_for, stage_order_for
+from .registry import (
+    declared_skip_stages_for,
+    pending_definition_stages_for,
+    stage_order_for,
+)
 from .roles import CADENCE_ROLES, RECOVERY_ROLES
 from .work import WorkOutcome, WorkVerdict, classify_work, entered_states_from_history
 
@@ -218,13 +248,29 @@ class CycleShape:
     run_date: str
     verdict: CycleVerdict
     #: Closed vocabulary: ``full_cycle`` · ``recovered_across_executions`` ·
-    #: ``declared_skip`` · ``no_executions`` · ``partial_cycle`` ·
-    #: ``still_running``.
+    #: ``full_cycle_with_declared_skips`` ·
+    #: ``recovered_across_executions_with_declared_skips`` · ``declared_skip`` ·
+    #: ``no_executions`` · ``partial_cycle`` · ``still_running``.
+    #:
+    #: The two ``*_with_declared_skips`` reasons exist so a reader can tell a
+    #: cycle that ran EVERYTHING from one that was allowed to skip part of the
+    #: spine (``alpha-engine-config-I11170``). A bare ``full_cycle`` on a cycle
+    #: with a declared skip would be the same class of over-claim the module
+    #: docstring's ``recovered_across_executions`` exists to prevent.
     reason: str
     executions: tuple[CycleExecution, ...] = ()
     stage_spine: tuple[str, ...] = field(default=(), repr=False)
     stages_entered: tuple[str, ...] = ()
     stages_missing: tuple[str, ...] = ()
+    #: Spine stages the cadence DECLARED skipped for this run, proved by a
+    #: marker state in the cycle's own walk
+    #: (:data:`~.registry.CADENCE_SKIP_MARKER_STAGES`). Its own visible state:
+    #: these stages are neither entered (they did not run) nor missing (their
+    #: absence is the declared plan), and a surface must render them as OFF —
+    #: never green, never red. Brian's ruling 2026-09-15 on unconsumed data
+    #: units is the precedent: off-by-declaration is a third state, not a
+    #: rounding of the other two.
+    stages_declared_skipped: tuple[str, ...] = ()
     #: True when the ``ListExecutions`` walk hit its cap before running out of
     #: executions — the contributor set may be incomplete, so a COMPLETED
     #: verdict is still trustworthy (the union only grows) but an INCOMPLETE
@@ -253,6 +299,11 @@ class CycleShape:
     @property
     def stage_coverage(self) -> str:
         return f"{len(self.stages_entered)}/{len(self.stage_spine)}"
+
+    @property
+    def has_declared_skips(self) -> bool:
+        """This cycle's plan excluded part of the declared spine."""
+        return bool(self.stages_declared_skipped)
 
     @property
     def did_work(self) -> bool:
@@ -304,6 +355,8 @@ class CycleShape:
             else " in 1 execution"
         )
         tail = f", stages {self.stage_coverage}{across}"
+        if self.stages_declared_skipped:
+            tail += f", declared-skipped {', '.join(self.stages_declared_skipped)}"
         if self.stages_missing:
             tail += f", missing {', '.join(self.stages_missing)}"
         if self.walk_exhausted:
@@ -323,6 +376,7 @@ class CycleShape:
             "executions": [e.to_dict() for e in self.executions],
             "stages_entered": list(self.stages_entered),
             "stages_missing": list(self.stages_missing),
+            "stages_declared_skipped": list(self.stages_declared_skipped),
             "stage_coverage": self.stage_coverage,
             "walk_exhausted": self.walk_exhausted,
             "observer_execution_arn": self.observer_execution_arn,
@@ -410,13 +464,26 @@ def build_cycle_shape(
     )
 
     union: set[str] = set()
-    for outcome, _role, _states in contributors:
+    all_states: list[str] = []
+    for outcome, _role, states in contributors:
         union.update(outcome.stages_entered)
+        all_states.extend(states)
     entered = tuple(s for s in spine if s in union)
     # See work.classify_work: a pending-definition stage not entered is not
     # missing (registry.PENDING_DEFINITION_STAGES, alpha-engine-config-I10762).
     pending = pending_definition_stages_for(pipeline)
-    missing = tuple(s for s in spine if s not in union and s not in pending)
+    # A cadence-declared skip is EVIDENCE in the walk, never an inference from
+    # absence: only a marker state the cycle actually entered can excuse a
+    # stage (registry.CADENCE_SKIP_MARKER_STAGES, alpha-engine-config-I11170).
+    # A stage that was declared skipped and then entered anyway is reported as
+    # entered — the declaration does not erase observed work.
+    declared = declared_skip_stages_for(pipeline, all_states)
+    declared_skipped = tuple(s for s in spine if s in declared and s not in union)
+    missing = tuple(
+        s
+        for s in spine
+        if s not in union and s not in pending and s not in declared_skipped
+    )
 
     common: dict[str, Any] = {
         "pipeline": pipeline,
@@ -425,6 +492,7 @@ def build_cycle_shape(
         "stage_spine": spine,
         "stages_entered": entered,
         "stages_missing": missing,
+        "stages_declared_skipped": declared_skipped,
         "walk_exhausted": walk_exhausted,
         "observer_execution_arn": observer,
     }
@@ -435,8 +503,20 @@ def build_cycle_shape(
         # fired stays invisible for a month.
         return CycleShape(verdict=CycleVerdict.INCOMPLETE, reason="no_executions", **common)
 
+    if not entered and all(o.verdict is WorkVerdict.SKIPPED for o, _r, _s in contributors):
+        # Every contributor reached a declared skip terminal and no spine
+        # stage ran. Checked BEFORE the coverage branch so a cadence-skip
+        # marker can never turn a cycle in which nothing happened into a
+        # COMPLETED one.
+        return CycleShape(verdict=CycleVerdict.SKIPPED, reason="declared_skip", **common)
+
     if not missing:
         reason = "recovered_across_executions" if len(contributors) > 1 else "full_cycle"
+        if declared_skipped:
+            # Never a bare ``full_cycle``: the spine was not all run, part of
+            # it was excused by the cadence, and a reader must be able to see
+            # the difference (alpha-engine-config-I11170).
+            reason += "_with_declared_skips"
         return CycleShape(verdict=CycleVerdict.COMPLETED, reason=reason, **common)
 
     if all(o.verdict is WorkVerdict.SKIPPED for o, _r, _s in contributors):

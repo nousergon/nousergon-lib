@@ -265,3 +265,198 @@ def test_walk_exhaustion_is_stated_not_swallowed():
     )
     assert shape.walk_exhausted is True
     assert "walk cap reached" in shape.explain()
+
+
+# ── Cadence-declared skips (alpha-engine-config-I11170) ──────────────────────
+
+PARITY_SPINE = ("A", "ParityParallel", "PitParityCompare", "Director")
+PARITY_MARKER = "MarkParityVerdictUnknownByCadence"
+
+
+def _parity_outcome(status, entered, *, name="e", arn="arn"):
+    return classify_work(
+        state_machine_name=PIPELINE,
+        status=status,
+        entered_states=list(entered),
+        execution_arn=arn,
+        execution_name=name,
+        stage_spine=PARITY_SPINE,
+        skip_terminals=frozenset({"WeeklyRunDaySkip"}),
+    )
+
+
+def test_a_cadence_declared_skip_is_not_a_missing_stage():
+    """Measured 2026-09-18: `skip_parity: true` on the live Saturday trigger.
+
+    The cycle read ``incomplete (partial_cycle), 15/16, missing
+    PitParityCompare`` on a run that SUCCEEDED with
+    ``degraded_summary.degraded: false``. With the marker state in the walk,
+    the two parity stages are excused rather than missing.
+    """
+    states = ["A", PARITY_MARKER, "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.verdict is CycleVerdict.COMPLETED
+    assert shape.stages_missing == ()
+    assert shape.stages_declared_skipped == ("ParityParallel", "PitParityCompare")
+    assert shape.has_declared_skips is True
+
+
+def test_the_reason_says_the_cycle_was_allowed_to_skip():
+    """A bare ``full_cycle`` would make an excused cycle read as an exhaustive one."""
+    states = ["A", PARITY_MARKER, "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.reason == "full_cycle_with_declared_skips"
+    assert "declared-skipped ParityParallel, PitParityCompare" in shape.explain()
+
+
+def test_a_recovery_that_completes_a_skipped_cycle_says_both_things():
+    states_a = ["A"]
+    states_b = [PARITY_MARKER, "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[
+            (_parity_outcome(RunStatus.FAILED, states_a, name="sched", arn="arn:a"), "weekly", states_a),
+            (
+                _parity_outcome(RunStatus.SUCCEEDED, states_b, name="rerun", arn="arn:b"),
+                "watch-rerun",
+                states_b,
+            ),
+        ],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.verdict is CycleVerdict.COMPLETED
+    assert shape.reason == "recovered_across_executions_with_declared_skips"
+    assert shape.is_recovery_tail is True
+
+
+def test_a_complete_cycle_with_no_skip_marker_still_reads_full_cycle():
+    """The unchanged case: everything ran, so nothing is excused and nothing says so."""
+    states = ["A", "ParityParallel", "PitParityCompare", "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.verdict is CycleVerdict.COMPLETED
+    assert shape.reason == "full_cycle"
+    assert shape.stages_declared_skipped == ()
+    assert "declared-skipped" not in shape.explain()
+
+
+def test_absence_without_a_marker_stays_missing():
+    """``sf-pipeline-policy.md`` §2.3a — absence is UNKNOWN, never a pass.
+
+    Inferring the skip from the stage's own absence is the tautology that
+    would forgive every missing stage on every pipeline.
+    """
+    states = ["A", "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.verdict is CycleVerdict.INCOMPLETE
+    assert shape.reason == "partial_cycle"
+    assert shape.stages_missing == ("ParityParallel", "PitParityCompare")
+    assert shape.stages_declared_skipped == ()
+
+
+def test_a_marker_excuses_only_the_stages_it_names():
+    """One genuinely missing stage keeps the cycle INCOMPLETE."""
+    spine = PARITY_SPINE + ("ReportCard",)
+    outcome = classify_work(
+        state_machine_name=PIPELINE,
+        status=RunStatus.SUCCEEDED,
+        entered_states=["A", PARITY_MARKER, "Director"],
+        execution_arn="arn",
+        execution_name="e",
+        stage_spine=spine,
+    )
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(outcome, "weekly", ["A", PARITY_MARKER, "Director"])],
+        stage_spine=spine,
+    )
+    assert shape.verdict is CycleVerdict.INCOMPLETE
+    assert shape.stages_missing == ("ReportCard",)
+    assert shape.stages_declared_skipped == ("ParityParallel", "PitParityCompare")
+
+
+def test_a_declared_skip_stage_that_ran_anyway_counts_as_entered():
+    """The declaration never erases observed work — entered wins over excused."""
+    states = ["A", PARITY_MARKER, "ParityParallel", "PitParityCompare", "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.stages_declared_skipped == ()
+    assert shape.reason == "full_cycle"
+    assert shape.stages_entered == PARITY_SPINE
+
+
+def test_a_skip_terminal_cycle_is_still_SKIPPED_not_completed():
+    """A cadence marker must never turn a cycle in which nothing ran into COMPLETED."""
+    states = [PARITY_MARKER, "WeeklyRunDaySkip"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    assert shape.verdict is CycleVerdict.SKIPPED
+    assert shape.reason == "declared_skip"
+
+
+def test_the_declared_skips_reach_the_completion_marker_payload():
+    """``merge_cycle_shape`` stamps ``to_dict()``, so the field must be in it."""
+    from nousergon_lib.pipeline_status.completion_marker import merge_cycle_shape
+
+    states = ["A", PARITY_MARKER, "Director"]
+    shape = build_cycle_shape(
+        pipeline=PIPELINE,
+        run_date="2026-09-18",
+        outcomes=[(_parity_outcome(RunStatus.SUCCEEDED, states), "weekly", states)],
+        stage_spine=PARITY_SPINE,
+    )
+    payload = shape.to_dict()
+    assert payload["stages_declared_skipped"] == ["ParityParallel", "PitParityCompare"]
+    merged = merge_cycle_shape({"status": "SUCCEEDED"}, shape)
+    assert merged["cycle"]["stages_declared_skipped"] == [
+        "ParityParallel",
+        "PitParityCompare",
+    ]
+    assert merged["cycle_verdict"] == "completed"
+
+
+def test_an_unknown_state_name_declares_nothing():
+    from nousergon_lib.pipeline_status.registry import declared_skip_stages_for
+
+    assert declared_skip_stages_for(PIPELINE, []) == frozenset()
+    assert declared_skip_stages_for(PIPELINE, ["SomeOtherState"]) == frozenset()
+    assert declared_skip_stages_for("ne-preopen-trading-pipeline", [PARITY_MARKER]) == frozenset()
+    assert declared_skip_stages_for("no-such-pipeline", [PARITY_MARKER]) == frozenset()
+
+
+def test_the_accessor_resolves_an_arn_like_the_other_registry_readers():
+    from nousergon_lib.pipeline_status.registry import declared_skip_stages_for
+
+    arn = f"arn:aws:states:us-east-1:711398986525:stateMachine:{PIPELINE}"
+    assert declared_skip_stages_for(arn, [PARITY_MARKER]) == frozenset(
+        {"ParityParallel", "PitParityCompare"}
+    )

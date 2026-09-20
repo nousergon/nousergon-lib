@@ -27,6 +27,7 @@ how the two stay in sync without a runtime coupling.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Annotated, Final, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1679,6 +1680,58 @@ PENDING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
 }
 
 
+#: Cadence-declared skips, as EVIDENCE in the execution's own state walk —
+#: pipeline -> {marker state name: the spine stages its entry proves were
+#: skipped by declaration}.
+#:
+#: **Why this exists (``alpha-engine-config-I11170``).** The live Saturday
+#: EventBridge trigger's Input carries ``skip_parity: true``, so the weekly
+#: pipeline never intends to enter ``ParityParallel`` /
+#: ``PitParityCompare``. Measured 2026-09-19, the cycle markers for
+#: 2026-09-11 and 2026-09-18 both read ``incomplete (partial_cycle), stages
+#: 15/16, missing PitParityCompare`` — on a cycle whose underlying run
+#: (``watch-rerun-2026-09-18-3``) SUCCEEDED with ``degraded_summary.degraded:
+#: false``. A surface that cannot reach a non-``incomplete`` verdict while
+#: the cadence stays as declared cannot distinguish "off by design" from
+#: "broken", which is the whole job of the verdict.
+#:
+#: **The evidence rule, and why it is not a config read.** A stage is
+#: declared-skipped ONLY when a marker state whose entry PROVES the
+#: declaration is in the execution's ``all_states_entered``. The state
+#: machine enters ``MarkParityVerdictUnknownByCadence`` precisely when the
+#: cadence set ``skip_parity``, so the declaration is already a fact in the
+#: execution history and the library does not have to grow a reader for the
+#: trigger Input, ``run_scope.json`` or EventBridge — which would also make
+#: :func:`~.cycle_shape.build_cycle_shape` impure.
+#:
+#: The inverse inference is FORBIDDEN: a stage's mere ABSENCE never implies a
+#: skip. That tautology would forgive every missing stage, and
+#: ``sf-pipeline-policy.md`` §2.3a is explicit that absence is UNKNOWN, never
+#: a pass. Not-entered with no marker stays MISSING.
+#:
+#: Distinct from :data:`PENDING_DEFINITION_STAGES` in MEANING while sharing
+#: its shape: pending means "the definition cannot enter this stage yet" and
+#: is transitional; a cadence skip means "the plan for this run excluded the
+#: stage" and is as permanent as the cadence. They are also rendered
+#: differently — a declared skip is its own visible state on the cycle
+#: surface (:attr:`~.cycle_shape.CycleShape.stages_declared_skipped`), never
+#: folded into the entered count and never silently dropped.
+#:
+#: Gotcha, measured 2026-09-19: ``MarkParityVerdictUnknownByCadence`` is
+#: currently UNREACHABLE on recovery runs, because ``CheckSkipBacktester``'s
+#: skip edge jumps straight to ``CheckSkipEvaluator`` and routes around
+#: ``CheckSkipParity`` (``alpha-engine-config-I11103``, fixed in
+#: ``nousergon-data``'s ``step_function.json``). This map is written against
+#: the marker's NAME and starts changing live verdicts only once that lands.
+CADENCE_SKIP_MARKER_STAGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
+    "ne-weekly-freshness-pipeline": {
+        "MarkParityVerdictUnknownByCadence": ("ParityParallel", "PitParityCompare"),
+    },
+    "ne-preopen-trading-pipeline": {},
+    "ne-postclose-trading-pipeline": {},
+}
+
+
 def _pipeline_name(state_machine: str) -> str:
     return state_machine.rsplit(":", 1)[-1] if state_machine else ""
 
@@ -1686,6 +1739,33 @@ def _pipeline_name(state_machine: str) -> str:
 def pending_definition_stages_for(state_machine: str) -> frozenset[str]:
     """Spine stages declared ahead of their definition, for an ARN or bare name."""
     return frozenset(PENDING_DEFINITION_STAGES.get(_pipeline_name(state_machine), {}))
+
+
+def declared_skip_stages_for(
+    state_machine: str, states_entered: Iterable[str]
+) -> frozenset[str]:
+    """Spine stages a cadence-declared skip marker PROVES were skipped.
+
+    ``states_entered`` is every state name the cycle's contributing
+    executions entered — pass the union, not one execution's walk, because a
+    recovery tail can carry the marker for a cycle whose scheduled execution
+    did not.
+
+    Evidence-based and one-directional: a stage appears here only because a
+    marker state naming it was entered. An unknown pipeline, an unknown state
+    name, or an empty walk all yield the empty set, so the caller's ``missing``
+    set is unchanged — absence is never read as a declaration
+    (``sf-pipeline-policy.md`` §2.3a).
+    """
+    markers = CADENCE_SKIP_MARKER_STAGES.get(_pipeline_name(state_machine), {})
+    if not markers:
+        return frozenset()
+    skipped: set[str] = set()
+    for state in states_entered:
+        stages = markers.get(str(state))
+        if stages:
+            skipped.update(stages)
+    return frozenset(skipped)
 
 
 def undefined_spine_stages(
