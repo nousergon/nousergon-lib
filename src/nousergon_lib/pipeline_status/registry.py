@@ -613,6 +613,22 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "NotifyCompleteGatesAndHealthDegraded for the terminal marker this "
         "alert sets up.",
     ),
+    # alpha-engine-config-I11112: the same fail-open alert shape as the gate
+    # pairs above, for WeeklyPreflight — the pre-spend gate that runs
+    # sf_preflight's Lambda-eligible check profile before AcquireMutex.
+    "PublishWeeklyPreflightGateDegraded": ArtifactReason(
+        reason="Fail-open SNS alert fired when WeeklyPreflight ran but "
+        "could not execute one or more REQUIRED checks (its own Lambda "
+        "environment lacks a capability — ArcticDB, the repo collector "
+        "modules, a Polygon key, or sibling checkouts) — a coverage gap in "
+        "the probe itself, never a confirmed violation of the system it "
+        "probes (that path hard-fails via has_violation and is unaffected). "
+        "The run proceeds fail-open, unprotected against whatever the "
+        "unreached checks would have caught. No persisted artifact (the "
+        "email IS the surface); see NotifyCompleteGatesDegraded / "
+        "NotifyCompleteGatesAndHealthDegraded for the terminal marker this "
+        "alert sets up.",
+    ),
     # config#1824 (2026-07-06): run-day gate mirroring the weekday
     # TradingDayGate (config#1430) — predictor Lambda action=
     # check_weekly_run_day, pure NYSE-calendar math, true iff yesterday was
