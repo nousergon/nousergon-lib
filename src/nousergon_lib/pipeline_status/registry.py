@@ -1104,6 +1104,26 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "iterations; no artifact of its own, same treatment as "
         "WaitForCodeFreshness."
     ),
+    # alpha-engine-config-I11267 (decoupled data cutover, PR11263 §6.2c):
+    # declared PENDING ahead of its definition (PENDING_DEFINITION_STAGES
+    # above) — a bounded poll against the standalone data-collector's run
+    # manifests, replacing the retiring MorningEnrich/DataPhase1 (weekly),
+    # LaunchMorningEnrichSpot/LaunchMorningArcticAppendSpot (preopen) and
+    # LaunchPostMarketDataSpot/LaunchPostMarketArcticAppendSpot/
+    # LaunchEdgarPitFundamentalsDailySpot (postclose) legs — one shared name
+    # across all three SFs, same convention as MorningEnrich above. Lands in
+    # the cutover PR (alpha-engine-config-I11269); this entry lets a library
+    # pin bump ahead of that PR declare the stage without reddening the
+    # registry-drift guard (registry drift only complains about a
+    # substantive state with NO entry, never an unused one).
+    "WaitForCollectionManifests": ArtifactReason(
+        reason="Bounded poll against the standalone nousergon-data-collection "
+        "stack's run manifests (alpha-engine-config-I11267, PR11263 §6.2c) — "
+        "replaces the retiring per-workload spot-dispatch legs it reads "
+        "manifests for. No per-run rendered artifact of its own; the "
+        "manifests it polls are surfaced on the standalone collector's own "
+        "console rows, not here."
+    ),
     # config#1807 (2026-07-06): pre-open data phase decoupled onto a daily
     # data spot; launch is fire-and-forget from the dashboard dispatcher.
     "LaunchDailyDataSpot": ArtifactReason(
@@ -1531,8 +1551,15 @@ def lookup_registry(state_name: str) -> ArchivePageRef | ArtifactReason | None:
 #: written down where it is not obvious. See ``EvalRollingMean`` below.
 PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-weekly-freshness-pipeline": (
+        # MorningEnrich/DataPhase1 are RETIRING (alpha-engine-config-I11267,
+        # RETIRING_DEFINITION_STAGES above) — replaced by
+        # WaitForCollectionManifests (PENDING_DEFINITION_STAGES above) once
+        # the cutover PR (alpha-engine-config-I11269) lands. Both names stay
+        # declared through the transition; deliverable 4 drops the retiring
+        # pair once the cutover is verified live.
         "MorningEnrich",
         "DataPhase1",
+        "WaitForCollectionManifests",
         "RAGIngestion",
         "Scanner",
         "SignalsEnvelope",
@@ -1591,17 +1618,32 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-preopen-trading-pipeline": (
         "StartExecutorEC2",
         "CodeFreshnessGate",
+        # LaunchMorningEnrichSpot/LaunchMorningArcticAppendSpot are RETIRING
+        # (alpha-engine-config-I11267, RETIRING_DEFINITION_STAGES above) —
+        # replaced by WaitForCollectionManifests (PENDING_DEFINITION_STAGES
+        # above) once the cutover PR (alpha-engine-config-I11269) lands. Both
+        # names stay declared through the transition; deliverable 4 drops the
+        # retiring pair once the cutover is verified live.
         "LaunchMorningEnrichSpot",
         "LaunchMorningArcticAppendSpot",
+        "WaitForCollectionManifests",
         "PredictorInference",
         "CheckPredictorCoverage",
         "RunMorningPlanner",
         "RunDaemon",
     ),
     "ne-postclose-trading-pipeline": (
+        # LaunchPostMarketDataSpot/LaunchPostMarketArcticAppendSpot/
+        # LaunchEdgarPitFundamentalsDailySpot are RETIRING (alpha-engine-
+        # config-I11267, RETIRING_DEFINITION_STAGES above) — replaced by
+        # WaitForCollectionManifests (PENDING_DEFINITION_STAGES above) once
+        # the cutover PR (alpha-engine-config-I11269) lands. All three names
+        # stay declared through the transition; deliverable 4 drops the
+        # retiring trio once the cutover is verified live.
         "LaunchPostMarketDataSpot",
         "LaunchPostMarketArcticAppendSpot",
         "LaunchEdgarPitFundamentalsDailySpot",
+        "WaitForCollectionManifests",
         "CaptureSnapshot",
         "EODReconcile",
         "StopTradingInstance",
@@ -1674,9 +1716,111 @@ SKIP_TERMINALS: Final[dict[str, frozenset[str]]] = {
 #: without the marker — the marker cannot silently outlive its reason.
 #: Every value must name the tracking issue, so a reader can find why.
 PENDING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
-    "ne-weekly-freshness-pipeline": {},
-    "ne-preopen-trading-pipeline": {},
-    "ne-postclose-trading-pipeline": {},
+    "ne-weekly-freshness-pipeline": {
+        "WaitForCollectionManifests": "alpha-engine-config-I11267 (decoupled data cutover, "
+        "PR11263 §6.2c): replaces the MorningEnrich/DataPhase1 legs with a bounded poll "
+        "against the standalone data-collector's run manifests. Declared here ahead of the "
+        "nousergon-data cutover PR (alpha-engine-config-I11269); the two retiring stages "
+        "this replaces are in RETIRING_DEFINITION_STAGES below.",
+    },
+    "ne-preopen-trading-pipeline": {
+        "WaitForCollectionManifests": "alpha-engine-config-I11267 (decoupled data cutover, "
+        "PR11263 §6.2c): replaces the LaunchMorningEnrichSpot/LaunchMorningArcticAppendSpot "
+        "legs with a bounded poll against the standalone data-collector's run manifests. "
+        "See RETIRING_DEFINITION_STAGES below for the stages it replaces.",
+    },
+    "ne-postclose-trading-pipeline": {
+        "WaitForCollectionManifests": "alpha-engine-config-I11267 (decoupled data cutover, "
+        "PR11263 §6.2c): replaces the LaunchPostMarketDataSpot/LaunchPostMarketArcticAppendSpot/"
+        "LaunchEdgarPitFundamentalsDailySpot legs with a bounded poll against the standalone "
+        "data-collector's run manifests. See RETIRING_DEFINITION_STAGES below for the stages "
+        "it replaces.",
+    },
+}
+
+
+#: Spine stages DECLARED here as retiring — the mirror image of
+#: :data:`PENDING_DEFINITION_STAGES` for the REMOVE direction —
+#: pipeline -> {stage: tracking reference}.
+#:
+#: **Why this exists (alpha-engine-config-I11267).** ``PENDING_DEFINITION_STAGES``
+#: solves the ADD direction: a stage declared in the library before its
+#: definition exists. Nothing solved the opposite direction until now — a
+#: stage whose DEFINITION is about to be removed while the library (and every
+#: pin of it) still declares it substantive. Dropping the registry entry
+#: outright the moment removal is planned reds
+#: ``crucible-dashboard``'s ``test_every_substantive_state_has_registry_entry``
+#: for the whole pre-cutover window, because ``nousergon-data`` ``main`` still
+#: defines the state (the state stays live until the cutover PR,
+#: alpha-engine-config-I11269, merges — no earlier than 2026-09-23).
+#:
+#: An entry here is the explicit, reviewable statement "this stage's
+#: definition is going away; both a live and a dropped definition are
+#: expected". It changes exactly two things, mirroring
+#: :data:`PENDING_DEFINITION_STAGES` items 1-2 in the opposite direction:
+#:
+#: 1. :func:`undefined_spine_stages` does not report the stage once the
+#:    definition drops it, so a consumer's existence check tolerates EITHER
+#:    merge order instead of deadlocking.
+#: 2. :func:`~.work.classify_work` and :func:`~.cycle_shape.build_cycle_shape`
+#:    do not count the stage as MISSING when an execution did not enter it —
+#:    once the definition has dropped the state, no execution can ever enter
+#:    it again, and calling every future cycle ``partial_success`` for that
+#:    would be a false finding that never resolves on its own.
+#:
+#: What a retiring entry does NOT change: the state's own
+#: :data:`STATE_TO_ARCHIVE_PAGE` / :data:`SUBSTANTIVE_RESOURCES` /
+#: :data:`WAIT_GROUPING` entries. Those are KEPT (not removed) for exactly
+#: the same reason ``EvalJudgePoll`` was kept during its own transition
+#: window above — a definition that still HAS the state needs its registry
+#: entry to pass the drift test, and an unused key afterward costs nothing.
+#:
+#: An entry is transitional by construction. The repository that owns the
+#: definition should fail its own contract test on a stage that is BOTH
+#: absent from its definition and still marked retiring
+#: (:func:`stale_retiring_stages`) — that PR is the one that must also take
+#: a library release without the marker (deliverable 4,
+#: alpha-engine-config-I11267, filed once the cutover is verified live). A
+#: consumer reading another repository's ``main`` must tolerate either state,
+#: or the deadlock this marker exists to prevent comes back from the other
+#: side. Every value must name the tracking issue, so a reader can find why.
+RETIRING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
+    "ne-weekly-freshness-pipeline": {
+        "MorningEnrich": "alpha-engine-config-I11267 (decoupled data cutover, PR11263 "
+        "§6.2c): the weekly Saturday MorningEnrich leg is replaced by "
+        "WaitForCollectionManifests. Removed on the cutover PR (alpha-engine-config-I11269).",
+        "DataPhase1": "alpha-engine-config-I11267 (decoupled data cutover, PR11263 §6.2c): "
+        "the weekly DataPhase1 leg is replaced by WaitForCollectionManifests. Removed on "
+        "the cutover PR (alpha-engine-config-I11269). DataPhase2 and RAGIngestion are NOT "
+        "part of this cutover (alpha-engine-config-I10753) and stay.",
+    },
+    "ne-preopen-trading-pipeline": {
+        "LaunchMorningEnrichSpot": "alpha-engine-config-I11267 (decoupled data cutover, "
+        "PR11263 §6.2c): the weekday morning-enrich spot-dispatch leg (and its "
+        "CheckSkipMorningEnrich poll/retry companions) is replaced by "
+        "WaitForCollectionManifests. Removed on the cutover PR (alpha-engine-config-I11269).",
+        "LaunchMorningArcticAppendSpot": "alpha-engine-config-I11267 (decoupled data "
+        "cutover, PR11263 §6.2c): the weekday morning-arctic-append spot-dispatch leg (and "
+        "its poll/retry companions) is replaced by WaitForCollectionManifests. Removed on "
+        "the cutover PR (alpha-engine-config-I11269).",
+    },
+    "ne-postclose-trading-pipeline": {
+        "LaunchPostMarketDataSpot": "alpha-engine-config-I11267 (decoupled data cutover, "
+        "PR11263 §6.2c): the EOD post-market-data spot-dispatch leg (and its poll/retry "
+        "companions) is replaced by WaitForCollectionManifests. Removed on the cutover PR "
+        "(alpha-engine-config-I11269).",
+        "LaunchPostMarketArcticAppendSpot": "alpha-engine-config-I11267 (decoupled data "
+        "cutover, PR11263 §6.2c): the EOD post-market-arctic-append spot-dispatch leg (and "
+        "its poll/retry companions) is replaced by WaitForCollectionManifests. Removed on "
+        "the cutover PR (alpha-engine-config-I11269).",
+        "LaunchEdgarPitFundamentalsDailySpot": "alpha-engine-config-I11267 (decoupled data "
+        "cutover, PR11263 §6.2c): the EOD EDGAR PIT fundamentals spot-dispatch leg (and its "
+        "poll/retry companions) is replaced by WaitForCollectionManifests. Removed on the "
+        "cutover PR (alpha-engine-config-I11269). Also removes the heal-loop's "
+        "HealLaunchPostMarketDataSpot / HealLaunchArcticAppendSpot dispatch + poll pairs, "
+        "whose actuator is repointed at the standalone ne-data-collection-eod execution "
+        "(PR11263 §6.2c item 3).",
+    },
 }
 
 
@@ -1741,6 +1885,17 @@ def pending_definition_stages_for(state_machine: str) -> frozenset[str]:
     return frozenset(PENDING_DEFINITION_STAGES.get(_pipeline_name(state_machine), {}))
 
 
+def retiring_definition_stages_for(state_machine: str) -> frozenset[str]:
+    """Spine stages declared retiring, for an ARN or bare name.
+
+    Mirror of :func:`pending_definition_stages_for` for the REMOVE direction
+    (alpha-engine-config-I11267). A retiring stage's definition may be either
+    still present or already dropped — both are tolerated by
+    :func:`undefined_spine_stages`.
+    """
+    return frozenset(RETIRING_DEFINITION_STAGES.get(_pipeline_name(state_machine), {}))
+
+
 def declared_skip_stages_for(
     state_machine: str, states_entered: Iterable[str]
 ) -> frozenset[str]:
@@ -1771,7 +1926,8 @@ def declared_skip_stages_for(
 def undefined_spine_stages(
     state_machine: str, defined_states: set[str] | frozenset[str]
 ) -> tuple[str, ...]:
-    """Spine stages the definition does not contain and that are NOT pending.
+    """Spine stages the definition does not contain and that are NOT pending
+    or retiring.
 
     ``defined_states`` must be every state name at ANY depth (Parallel
     branches, Map iterators) — a top-level-only read reports nested spine
@@ -1782,7 +1938,11 @@ def undefined_spine_stages(
     name = _pipeline_name(state_machine)
     spine = PIPELINE_STAGE_ORDER[name]
     pending = pending_definition_stages_for(name)
-    return tuple(s for s in spine if s not in defined_states and s not in pending)
+    retiring = retiring_definition_stages_for(name)
+    return tuple(
+        s for s in spine
+        if s not in defined_states and s not in pending and s not in retiring
+    )
 
 
 def stale_pending_stages(
@@ -1799,6 +1959,27 @@ def stale_pending_stages(
     return tuple(
         s for s in PIPELINE_STAGE_ORDER[name]
         if s in pending_definition_stages_for(name) and s in defined_states
+    )
+
+
+def stale_retiring_stages(
+    state_machine: str, defined_states: set[str] | frozenset[str]
+) -> tuple[str, ...]:
+    """Stages still marked retiring although the definition no longer
+    contains them.
+
+    Mirror of :func:`stale_pending_stages` for the REMOVE direction
+    (alpha-engine-config-I11267). Only the repository that OWNS the
+    definition should fail on a non-empty result — on the PR that drops the
+    state, which is the change that makes the marker stale (deliverable 4,
+    filed once the cutover is verified live). A consumer reading another
+    repository's ``main`` must tolerate it, or the deadlock this marker
+    exists to prevent comes back from the other side.
+    """
+    name = _pipeline_name(state_machine)
+    return tuple(
+        s for s in PIPELINE_STAGE_ORDER[name]
+        if s in retiring_definition_stages_for(name) and s not in defined_states
     )
 
 

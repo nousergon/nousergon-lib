@@ -50,7 +50,11 @@ def new_stage_pending(new_stage_declared, monkeypatch):
 
 
 def _definition(*, with_new: bool) -> set[str]:
-    states = set(PIPELINE_STAGE_ORDER[EOD]) | {"MarketHoursBlocked"}
+    # Subtract any REAL pending stages (alpha-engine-config-I11267 added
+    # WaitForCollectionManifests to EOD's own pending map) — this helper
+    # models "the live definition", which by construction does not yet
+    # contain a stage the library declares ahead of its own definition.
+    states = (set(PIPELINE_STAGE_ORDER[EOD]) | {"MarketHoursBlocked"}) - pending_definition_stages_for(EOD)
     return states | {NEW} if with_new else states
 
 
@@ -94,7 +98,11 @@ def test_a_misspelled_stage_is_still_undefined_while_another_is_pending(new_stag
 
 def test_arn_and_bare_name_resolve_the_same_pending_set(new_stage_pending):
     arn = f"arn:aws:states:us-east-1:000000000000:stateMachine:{EOD}"
-    assert pending_definition_stages_for(arn) == pending_definition_stages_for(EOD) == {NEW}
+    # >=, not ==: alpha-engine-config-I11267 declared a real pending entry
+    # (WaitForCollectionManifests) for this pipeline too, alongside the
+    # fixture's synthetic NEW.
+    assert pending_definition_stages_for(arn) == pending_definition_stages_for(EOD)
+    assert NEW in pending_definition_stages_for(EOD)
 
 
 def test_undeclared_pipeline_raises_rather_than_passing():
