@@ -93,7 +93,21 @@ _CLIENT = re.compile(r"""boto3\s*\.\s*(?:client|resource)\s*\(\s*["']([a-z0-9-]+
 #: An entitlement string in a policy document or a policy literal. Deliberately
 #: anchored on the quote so that prose mentioning ``ce:GetCostAndUsage`` in a
 #: comment is not a finding — a comment is not a grant.
+#:
+#: LINE-LEVEL FALLBACK ONLY. For a JSON/YAML file this is used only when the
+#: head file could not be parsed structurally (see ``parse_action_values``);
+#: otherwise a Condition key shaped like aws colon SourceAccount, or a
+#: component id shaped like pipeline colon unit, reads as a grant it never
+#: was. For every other file (Python call sites, shell, etc.) it is still the
+#: only mechanism, since there is no structure to parse. DELIBERATELY
+#: UNQUOTED in this sentence — a quoted example here would be exactly the
+#: false positive this comment describes, on this file's own next diff.
 _IAM_ACTION = re.compile(r"""["']([a-z0-9-]+):[A-Z*][A-Za-z0-9*]*["']""")
+
+#: The same shape, unquoted — matched against an already-isolated Action
+#: VALUE pulled out of a parsed document, where quoting has already been
+#: stripped by the YAML/JSON loader.
+_ACTION_VALUE = re.compile(r"^([a-z0-9-]+):[A-Z*][A-Za-z0-9*]*$")
 
 #: A line that plausibly touches a schedule. CHEAP PRE-FILTER ONLY — a hit
 #: makes the gate read and parse the head file, where the real grading happens.
@@ -341,6 +355,46 @@ def _grade_gha_crons(
             )
 
 
+def _grade_actions_by_line(
+    path: str, lines: list, known: set, found: dict, counts: dict
+) -> None:
+    """The pre-context-aware behaviour: every quoted ``prefix:Word`` token on
+    an added line is graded, with no regard for whether it sits in an
+    ``Action`` value, a ``Condition`` key, or a ``Principal``. Used ONLY as the
+    fallback when a file that should be gradeable structurally could not be
+    parsed — never silently, always counted (see ``actions_context_fallback``
+    in :func:`findings`)."""
+    for line in lines:
+        for prefix in _IAM_ACTION.findall(line):
+            counts["actions"] += 1
+            if prefix in known or prefix in _NOT_A_SERVICE:
+                continue
+            found[("action", prefix, path)] = (
+                f"{path}: grants `{prefix}:*` actions, and `{prefix}` {_NO_LINE}."
+            )
+
+
+def _grade_actions_structurally(
+    path: str, touched: set, values: list, known: set, found: dict, counts: dict
+) -> None:
+    """Only an ``Action``/``NotAction`` value the diff actually added is
+    graded — resolved from the head file's real structure, not from any
+    quoted string that happens to look like one."""
+    for av in values:
+        if not av.touches(touched):
+            continue
+        counts["actions"] += 1
+        m = _ACTION_VALUE.match(av.value)
+        if not m:
+            continue
+        prefix = m.group(1)
+        if prefix in known or prefix in _NOT_A_SERVICE:
+            continue
+        found[("action", prefix, path)] = (
+            f"{path}: grants `{prefix}:*` actions, and `{prefix}` {_NO_LINE}."
+        )
+
+
 def _grade_cfn_schedules(
     path: str,
     touched: set,
@@ -413,6 +467,23 @@ def _grade_cfn_schedules(
                 )
 
 
+def _read_head(
+    path: str,
+    root_path: Path | None,
+    read_file: Callable[[str], str | None] | None,
+) -> str | None:
+    """The head-tree text for ``path``, or ``None`` if it cannot be read —
+    shared by the schedule class and the action class, both of which grade a
+    file's STRUCTURE rather than its added lines alone."""
+    if read_file is not None:
+        return read_file(path)
+    if root_path is not None:
+        candidate = root_path / path
+        if candidate.is_file():
+            return candidate.read_text(errors="replace")
+    return None
+
+
 def findings(
     diff: str,
     doc: dict,
@@ -449,7 +520,7 @@ def findings(
     found: dict = {}
     counts = {
         "lines": 0, "schedules": 0, "resources": 0, "clients": 0, "actions": 0,
-        "ungraded_schedules": 0, "ungraded_targets": 0,
+        "ungraded_schedules": 0, "ungraded_targets": 0, "actions_context_fallback": 0,
     }
     # Per-file, because a schedule is a BLOCK and the resources it names live
     # elsewhere in the same template.
@@ -496,6 +567,12 @@ def findings(
 
         if _CAPTURE.search(path):
             continue
+        if _IAC_FILE.search(path):
+            # A JSON/YAML file is graded STRUCTURALLY, per file, below — an
+            # `Action` value needs the file's structure to tell it apart from
+            # a `Condition` key or a component id shaped `word:word`, which a
+            # line-level regex cannot do. See the action-class pass.
+            continue
         for prefix in _IAM_ACTION.findall(line):
             counts["actions"] += 1
             if prefix in known or prefix in _NOT_A_SERVICE:
@@ -503,6 +580,28 @@ def findings(
             found[("action", prefix, path)] = (
                 f"{path}: grants `{prefix}:*` actions, and `{prefix}` {_NO_LINE}."
             )
+
+    # -- the action class, per JSON/YAML file ----------------------------------
+    #
+    # Graded structurally: an `Action`/`NotAction` value the diff added is a
+    # finding on an unbudgeted prefix; nothing else in the document is, no
+    # matter what it looks like quoted. A file this cannot parse falls back to
+    # the line-level scan and says so — never silently, and never as a pass.
+    for path, (touched, texts) in by_file.items():
+        if _TEST.search(path) or _CAPTURE.search(path) or not _IAC_FILE.search(path):
+            continue
+        text = _read_head(path, root_path, read_file)
+        if text is None:
+            counts["actions_context_fallback"] += 1
+            _grade_actions_by_line(path, texts, known, found, counts)
+            continue
+        try:
+            values = resource_map_mod.parse_action_values(text)
+        except resource_map_mod.ActionParseError:
+            counts["actions_context_fallback"] += 1
+            _grade_actions_by_line(path, texts, known, found, counts)
+            continue
+        _grade_actions_structurally(path, touched, values, known, found, counts)
 
     # -- the schedule class, per file -----------------------------------------
     for path, (touched, texts) in by_file.items():
@@ -535,13 +634,7 @@ def findings(
                 counts["ungraded_schedules"] += 1
             continue
 
-        text = None
-        if read_file is not None:
-            text = read_file(path)
-        elif root_path is not None:
-            candidate = root_path / path
-            if candidate.is_file():
-                text = candidate.read_text(errors="replace")
+        text = _read_head(path, root_path, read_file)
         if text is None:
             # NOT a pass. The head file is how a schedule becomes gradeable at
             # all, and a schedule this gate did not read must not print the

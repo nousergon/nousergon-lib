@@ -40,6 +40,9 @@ providers:
       AWS Budgets:
         iam_prefixes:
         - budgets
+      AWS CloudTrail:
+        iam_prefixes:
+        - cloudtrail
       AWS Cost Explorer:
         iam_prefixes:
         - ce
