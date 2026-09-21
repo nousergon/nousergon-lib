@@ -40,6 +40,10 @@ dependencies = [
 [project.scripts]
 llm-egress-proxy = "nousergon_lib.egress.proxy:main"
 universe-scope-lint = "nousergon_lib.contracts.universe_scope_lint:main"
+# Pre-merge cost gate (alpha-engine-config-I11228). Shipped as a console entry
+# so every fleet repo runs the SAME grader from the library it already pins,
+# rather than a reusable workflow a public repo structurally cannot call.
+nousergon-cost-gate = "nousergon_lib.cost_gate.cli:main"
 
 [project.optional-dependencies]
 arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
@@ -147,6 +151,9 @@ where = ["src"]
 "nousergon_lib" = ["transparency_inventory.yaml", "py.typed"]
 "nousergon_lib.contracts" = ["*.schema.json"]
 "nousergon_lib.gates" = ["schemas/*.json"]
+# The derived, prefix-only cost SSoT the gate grades against. GENERATED in
+# the private repo and published by PR — see cost_gate/data/README.md.
+"nousergon_lib.cost_gate" = ["data/*.yaml"]
 "nousergon_lib.rag" = ["schema.sql", "migrations/*.sql"]
 "nousergon_lib.egress" = ["gitleaks-egress.toml", "gitleaks-custom.toml", "routes.v1.json", "routes.schema.v1.json"]
 

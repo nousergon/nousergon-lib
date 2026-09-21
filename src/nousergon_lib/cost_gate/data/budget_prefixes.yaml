@@ -1,0 +1,93 @@
+# GENERATED — DO NOT EDIT BY HAND.
+#
+# Derived by allowlist from a PRIVATE cost single-source-of-truth held in
+# `nousergon/alpha-engine-config`, by that repo's
+# `scripts/derive_public_cost_ssot.py`, and published here by pull request.
+# Built by ALLOWLIST, never by redaction: a field added to the private source
+# is simply absent here until it is named in that script's `_PUBLISHABLE`
+# list, in a reviewed PR on the private repo. A redaction pass would fail
+# OPEN the moment someone added a field, silently and publicly.
+#
+# It therefore carries no budget amounts, no ceilings, no sizing rationale and
+# no infrastructure identifiers BY CONSTRUCTION —
+# `tests/test_cost_gate_no_leak.py` asserts that over the serialised bytes.
+#
+# Hand-editing this file silently forks the gate from the SSoT it claims to
+# enforce. `alpha-engine-config`'s `scripts/check_public_cost_map_in_sync.py`
+# re-derives from the live source and fails when this copy has drifted; it
+# names the regeneration command.
+#
+_doc: "GENERATED from alpha-engine-config/private-docs/EXPENSE_BUDGETS.yaml by scripts/derive_public_cost_ssot.py.\
+  \ PREFIXES ONLY \u2014 this artifact carries no budget amounts by construction (allowlist,\
+  \ not redaction). Do not edit; it is overwritten on every publish."
+capability_gate:
+  free_prefixes:
+    account: declared free in the private SSoT
+    cloudformation: declared free in the private SSoT
+    codebuild: declared free in the private SSoT
+    codeconnections: declared free in the private SSoT
+    iam: declared free in the private SSoT
+    organizations: declared free in the private SSoT
+    rolesanywhere: declared free in the private SSoT
+    scheduler: declared free in the private SSoT
+    sts: declared free in the private SSoT
+providers:
+  aws:
+    services:
+      AWS AppConfig:
+        iam_prefixes:
+        - appconfig
+      AWS Budgets:
+        iam_prefixes:
+        - budgets
+      AWS Cost Explorer:
+        iam_prefixes:
+        - ce
+      AWS Key Management Service:
+        iam_prefixes:
+        - kms
+      AWS Lambda:
+        iam_prefixes:
+        - lambda
+      AWS Step Functions:
+        iam_prefixes:
+        - states
+        - stepfunctions
+      AWS Systems Manager:
+        iam_prefixes:
+        - ssm
+      Amazon DynamoDB:
+        iam_prefixes:
+        - dynamodb
+      Amazon EC2 Container Registry (ECR):
+        iam_prefixes:
+        - ecr
+      Amazon Elastic Compute Cloud - Compute:
+        iam_prefixes:
+        - ec2
+      Amazon Simple Notification Service:
+        iam_prefixes:
+        - sns
+      Amazon Simple Storage Service:
+        iam_prefixes:
+        - s3
+      Amazon Virtual Private Cloud:
+        iam_prefixes: []
+      AmazonCloudWatch:
+        iam_prefixes:
+        - cloudwatch
+        - logs
+      CloudWatch Events:
+        iam_prefixes:
+        - events
+      CodeBuild:
+        iam_prefixes:
+        - codebuild
+      EC2 - Other:
+        iam_prefixes: []
+      Savings Plans for AWS Compute usage:
+        iam_prefixes:
+        - savingsplans
+      Tax:
+        iam_prefixes: []
+schema_version: 1
