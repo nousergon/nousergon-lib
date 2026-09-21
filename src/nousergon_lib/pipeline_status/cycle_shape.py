@@ -119,6 +119,7 @@ from .read import (
 from .registry import (
     declared_skip_stages_for,
     pending_definition_stages_for,
+    retiring_definition_stages_for,
     stage_order_for,
 )
 from .roles import CADENCE_ROLES, RECOVERY_ROLES
@@ -472,6 +473,10 @@ def build_cycle_shape(
     # See work.classify_work: a pending-definition stage not entered is not
     # missing (registry.PENDING_DEFINITION_STAGES, alpha-engine-config-I10762).
     pending = pending_definition_stages_for(pipeline)
+    # Mirror image: a retiring-definition stage not entered is not missing
+    # either — once the definition drops it, no execution can ever enter it
+    # again (registry.RETIRING_DEFINITION_STAGES, alpha-engine-config-I11267).
+    retiring = retiring_definition_stages_for(pipeline)
     # A cadence-declared skip is EVIDENCE in the walk, never an inference from
     # absence: only a marker state the cycle actually entered can excuse a
     # stage (registry.CADENCE_SKIP_MARKER_STAGES, alpha-engine-config-I11170).
@@ -482,7 +487,10 @@ def build_cycle_shape(
     missing = tuple(
         s
         for s in spine
-        if s not in union and s not in pending and s not in declared_skipped
+        if s not in union
+        and s not in pending
+        and s not in retiring
+        and s not in declared_skipped
     )
 
     common: dict[str, Any] = {

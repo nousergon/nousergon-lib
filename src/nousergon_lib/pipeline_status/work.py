@@ -81,7 +81,12 @@ from .read import (
     _raise_for_boto_error,
     _sfn_client,
 )
-from .registry import pending_definition_stages_for, skip_terminals_for, stage_order_for
+from .registry import (
+    pending_definition_stages_for,
+    retiring_definition_stages_for,
+    skip_terminals_for,
+    stage_order_for,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from mypy_boto3_stepfunctions.client import SFNClient
@@ -260,7 +265,14 @@ def classify_work(
     # execution of a definition that lacks it; not entering it is not a
     # finding (registry.PENDING_DEFINITION_STAGES, alpha-engine-config-I10762).
     pending = pending_definition_stages_for(state_machine_name)
-    missing = tuple(s for s in spine if s not in entered and s not in pending)
+    # Mirror image: a stage declared retiring may already be gone from the
+    # definition, in which case no execution can ever enter it again; not
+    # entering it is not a finding either (registry.RETIRING_DEFINITION_STAGES,
+    # alpha-engine-config-I11267).
+    retiring = retiring_definition_stages_for(state_machine_name)
+    missing = tuple(
+        s for s in spine if s not in entered and s not in pending and s not in retiring
+    )
 
     common = {
         "state_machine_name": state_machine_name,
