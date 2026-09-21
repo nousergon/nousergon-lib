@@ -1,0 +1,55 @@
+# GENERATED — DO NOT EDIT BY HAND.
+#
+# Derived by allowlist from a PRIVATE cost single-source-of-truth held in
+# `nousergon/alpha-engine-config`, by that repo's
+# `scripts/derive_public_cost_ssot.py`, and published here by pull request.
+# Built by ALLOWLIST, never by redaction: a field added to the private source
+# is simply absent here until it is named in that script's `_PUBLISHABLE`
+# list, in a reviewed PR on the private repo. A redaction pass would fail
+# OPEN the moment someone added a field, silently and publicly.
+#
+# It therefore carries no budget amounts, no ceilings, no sizing rationale and
+# no infrastructure identifiers BY CONSTRUCTION —
+# `tests/test_cost_gate_no_leak.py` asserts that over the serialised bytes.
+#
+# Hand-editing this file silently forks the gate from the SSoT it claims to
+# enforce. `alpha-engine-config`'s `scripts/check_public_cost_map_in_sync.py`
+# re-derives from the live source and fails when this copy has drifted; it
+# names the regeneration command.
+#
+resource_types:
+  AWS::CloudFront::CachePolicy: cloudfront
+  AWS::CloudFront::Distribution: cloudfront
+  AWS::CloudFront::OriginAccessControl: cloudfront
+  AWS::CloudFront::ResponseHeadersPolicy: cloudfront
+  AWS::CloudTrail::Trail: cloudtrail
+  AWS::CloudWatch::Alarm: cloudwatch
+  AWS::DynamoDB::Table: dynamodb
+  AWS::EC2::LaunchTemplate: ec2
+  AWS::Events::Rule: events
+  AWS::FIS::ExperimentTemplate: fis
+  AWS::IAM::InstanceProfile: iam
+  AWS::IAM::Role: iam
+  AWS::IAM::RolePolicy: iam
+  AWS::Lambda::Function: lambda
+  AWS::Lambda::Permission: lambda
+  AWS::Logs::Delivery: logs
+  AWS::Logs::DeliveryDestination: logs
+  AWS::Logs::DeliverySource: logs
+  AWS::Logs::LogGroup: logs
+  AWS::Logs::MetricFilter: logs
+  AWS::S3::Bucket: s3
+  AWS::S3::BucketPolicy: s3
+  AWS::S3::Object: s3
+  AWS::SNS::Subscription: sns
+  AWS::SNS::Topic: sns
+  AWS::SSM::Parameter: ssm
+  AWS::Scheduler::Schedule: scheduler
+  AWS::Scheduler::ScheduleGroup: scheduler
+  AWS::StepFunctions::StateMachine: states
+schedule_rules:
+  max_retry_attempts: 3
+  min_gha_cron_interval_minutes: 15
+schema_version: 1
+updated: 2026-09-20
+updated_by: alpha-engine-config-I11219
