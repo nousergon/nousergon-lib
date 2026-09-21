@@ -39,7 +39,7 @@ RMAP_PATH = crm.RESOURCE_MAP_PATH
 PACKAGED = [BUDGETS_PATH, RMAP_PATH]
 
 #: A currency amount in any of the spellings the private document uses:
-#: `$139`, `139 USD`, `monthly_budget_usd: 12.5`.
+#: `$100`, `100 USD`, `monthly_budget_usd: 12.5`.
 _DOLLAR = re.compile(r"\$\s*\d|\d\s*(?:usd|USD)\b")
 
 #: An AWS account id.
@@ -137,8 +137,8 @@ def test_the_shipped_bounds_match_this_packages_defaults():
 def test_the_leak_patterns_actually_fire():
     """A detector nobody has seen fire is unverified. Each pattern is proven
     against the exact shape it exists to catch."""
-    assert _DOLLAR.search("monthly ceiling $139")
-    assert _DOLLAR.search("limit: 139 USD")
+    assert _DOLLAR.search("monthly ceiling $100")
+    assert _DOLLAR.search("limit: 100 USD")
     assert _ACCOUNT_ID.search("account 123456789012 owns it")
     assert not _ACCOUNT_ID.search("updated: 2026-09-20")
     assert _ARN.search("arn:aws:sns:us-east-1:1:alerts")
