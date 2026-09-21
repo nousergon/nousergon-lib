@@ -85,6 +85,7 @@ from .registry import (
     PENDING_DEFINITION_STAGES,
     PIPELINE_LABELS,
     PIPELINE_STAGE_ORDER,
+    RETIRING_DEFINITION_STAGES,
     SKIP_TERMINALS,
     STATE_TO_ARCHIVE_PAGE,
     SUBSTANTIVE_RESOURCES,
@@ -93,9 +94,11 @@ from .registry import (
     ArtifactReason,
     declared_skip_stages_for,
     pending_definition_stages_for,
+    retiring_definition_stages_for,
     skip_terminals_for,
     stage_order_for,
     stale_pending_stages,
+    stale_retiring_stages,
     undefined_spine_stages,
 )
 from .roles import (
@@ -150,6 +153,7 @@ __all__ = [
     "PENDING_DEFINITION_STAGES",
     "PIPELINE_LABELS",
     "PIPELINE_STAGE_ORDER",
+    "RETIRING_DEFINITION_STAGES",
     "SKIP_TERMINALS",
     "UndeclaredPipeline",
     "WorkOutcome",
@@ -181,8 +185,10 @@ __all__ = [
     "read_work_outcome",
     "declared_skip_stages_for",
     "pending_definition_stages_for",
+    "retiring_definition_stages_for",
     "skip_terminals_for",
     "stage_order_for",
     "stale_pending_stages",
+    "stale_retiring_stages",
     "undefined_spine_stages",
 ]
