@@ -29,14 +29,10 @@ capability_gate:
     iam: declared free in the private SSoT
     organizations: declared free in the private SSoT
     rolesanywhere: declared free in the private SSoT
-    scheduler: declared free in the private SSoT
     sts: declared free in the private SSoT
 providers:
   aws:
     services:
-      AWS AppConfig:
-        iam_prefixes:
-        - appconfig
       AWS Budgets:
         iam_prefixes:
         - budgets
@@ -52,6 +48,9 @@ providers:
       AWS Lambda:
         iam_prefixes:
         - lambda
+      AWS Resource Groups Tagging API:
+        iam_prefixes:
+        - resourcegroupstaggingapi
       AWS Step Functions:
         iam_prefixes:
         - states
@@ -59,6 +58,8 @@ providers:
       AWS Systems Manager:
         iam_prefixes:
         - ssm
+        - appconfig
+        - appconfigdata
       Amazon DynamoDB:
         iam_prefixes:
         - dynamodb
@@ -68,6 +69,9 @@ providers:
       Amazon Elastic Compute Cloud - Compute:
         iam_prefixes:
         - ec2
+      Amazon EventBridge Scheduler:
+        iam_prefixes:
+        - scheduler
       Amazon Simple Notification Service:
         iam_prefixes:
         - sns
