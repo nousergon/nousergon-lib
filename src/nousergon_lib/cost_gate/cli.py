@@ -117,6 +117,14 @@ def main(argv: list | None = None) -> int:
             f"whose billing service could not be resolved. These are UNKNOWN, "
             f"not approved."
         )
+    if counts["actions_context_fallback"]:
+        print(
+            f"  FALLBACK  {counts['actions_context_fallback']} JSON/YAML file(s) "
+            f"could not be parsed structurally, so their Action values were "
+            f"graded by a line-level scan instead of by document context. That "
+            f"scan can false-positive on a Condition key or a bare component id "
+            f"— fix the file's syntax to get context-aware grading back."
+        )
 
     if not issues:
         print("\n0 findings. Every service this diff reaches has a budget line.")

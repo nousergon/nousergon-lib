@@ -240,6 +240,89 @@ def parse_cfn_resources(text: str) -> list:
     return out
 
 
+#: The two policy-document keys that grant IAM capability, in either the
+#: single-string or list-of-strings form (`iam-policy-json` / `iam-policy-yaml`
+#: are the two serialisations the fleet writes; both parse through the same
+#: loader as this module's CloudFormation reader does).
+_ACTION_KEYS = frozenset({"Action", "NotAction"})
+
+
+class ActionValue:
+    """One ``Action``/``NotAction`` string, with the line span it occupies.
+
+    The span is what lets the gate ask "did this diff touch THIS action
+    value?" instead of "does this file contain this string anywhere?" — the
+    same question :class:`CfnResource` answers for a schedule, reusing the
+    same mechanism rather than inventing a second one.
+    """
+
+    __slots__ = ("value", "first_line", "last_line")
+
+    def __init__(self, value: str, first_line: int, last_line: int) -> None:
+        self.value = value
+        self.first_line = first_line
+        self.last_line = last_line
+
+    def touches(self, lines: set) -> bool:
+        return any(self.first_line <= n <= self.last_line for n in lines)
+
+
+class ActionParseError(ResourceMapError):
+    """The document could not be parsed structurally, so an ``Action`` value
+    inside it cannot be told apart from a ``Condition`` key or free text by
+    position. The caller falls back to a line-level scan and MUST say so in
+    its output — never read this as "no actions here"."""
+
+
+def _collect_action_scalars(node: yaml.Node, out: list) -> None:
+    """Every scalar directly under an ``Action``/``NotAction`` key, wherever
+    in the document it appears — a policy document nests ``Statement`` lists
+    and inline `PolicyDocument` blocks at arbitrary depth."""
+    if isinstance(node, yaml.ScalarNode):
+        out.append(ActionValue(node.value, node.start_mark.line + 1, node.end_mark.line + 1))
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _collect_action_scalars(item, out)
+    # A MappingNode under Action/NotAction names no fleet policy shape this
+    # gate understands; skipping it is conservative (fewer findings), and the
+    # fail-closed property is preserved by the line-fallback on parse failure
+    # rather than by guessing at a shape here.
+
+
+def _walk_for_actions(node: yaml.Node, out: list) -> None:
+    if isinstance(node, yaml.MappingNode):
+        for key_node, value_node in node.value:
+            key = getattr(key_node, "value", None)
+            if key in _ACTION_KEYS:
+                _collect_action_scalars(value_node, out)
+            else:
+                _walk_for_actions(value_node, out)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _walk_for_actions(item, out)
+
+
+def parse_action_values(text: str) -> list:
+    """Every ``Action``/``NotAction`` string value in ``text``, with its line
+    span — structural, not line-by-line, so a `Condition` key shaped like
+    ``aws:SourceAccount`` or a `Principal` never reads as a grant.
+
+    Raises :class:`ActionParseError` when ``text`` does not parse as YAML/JSON
+    at all. That is deliberate: a document this cannot read structurally must
+    never report "zero actions" as though it had looked — the caller is
+    expected to fall back to a line-level scan and say so, not to swallow the
+    gap.
+    """
+    try:
+        root = yaml.compose(text, Loader=CfnLoader)
+    except yaml.YAMLError as exc:
+        raise ActionParseError(f"could not parse structurally: {exc}") from exc
+    out: list = []
+    if root is not None:
+        _walk_for_actions(root, out)
+    return out
+
+
 def resolve_target_service(
     arn: Any,
     by_logical_id: dict,
