@@ -75,6 +75,9 @@ providers:
       Amazon Simple Notification Service:
         iam_prefixes:
         - sns
+      Amazon Simple Queue Service:
+        iam_prefixes:
+        - sqs
       Amazon Simple Storage Service:
         iam_prefixes:
         - s3
