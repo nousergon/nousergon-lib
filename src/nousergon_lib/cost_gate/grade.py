@@ -102,6 +102,22 @@ _CLIENT = re.compile(r"""boto3\s*\.\s*(?:client|resource)\s*\(\s*["']([a-z0-9-]+
 #: only mechanism, since there is no structure to parse. DELIBERATELY
 #: UNQUOTED in this sentence — a quoted example here would be exactly the
 #: false positive this comment describes, on this file's own next diff.
+#:
+#: LINE-LEVEL DISAMBIGUATION RULE (no document structure to consult, so this is
+#: necessarily narrower than the structural pass): a candidate match is graded
+#: as an entitlement UNLESS either holds —
+#:
+#:   1. its prefix is not a real AWS IAM service prefix shape at all — today
+#:      that is exactly the ``aws`` global-condition-key namespace, tracked in
+#:      ``_NOT_A_SERVICE`` alongside the GitHub-permissions prefixes it already
+#:      held; or
+#:   2. it is the VALUE of a quoted dict/JSON key, on the SAME line, and that
+#:      key is not Action-shaped (``Action``/``Actions``/``NotAction``) — the
+#:      boto3 EC2 filter-dict shape ``{"Name": "tag:Name", "Values": [...]}``
+#:      and a component-id field (``"id": "pipeline:unit"``) both read this
+#:      way: a real grant is written as a bare list element or as the value of
+#:      an Action-shaped key, never as the value of ``Name``/``Key``/``id``/
+#:      any other field name. See ``_is_keyed_by_non_action``.
 _IAM_ACTION = re.compile(r"""["']([a-z0-9-]+):[A-Z*][A-Za-z0-9*]*["']""")
 
 #: The same shape, unquoted — matched against an already-isolated Action
@@ -144,7 +160,26 @@ _NOT_A_SERVICE = frozenset({
     "actions", "contents", "id-token", "pull-requests", "issues", "checks",
     "packages", "statuses", "deployments", "security-events", "metadata",
     "models", "pages", "discussions", "attestations", "repository-projects",
+    # `aws` is IAM's GLOBAL CONDITION KEY namespace (`aws:SourceAccount`,
+    # `aws:sourceVpc`, `aws:CalledVia`, ...), never a service prefix — there is
+    # no `boto3.client("aws")` and no service literally named `aws`. In a
+    # structurally-parsed policy document this is already excluded because a
+    # Condition key is not an Action value; this entry is what gives the
+    # LINE-LEVEL fallback (source files, and IaC files that failed to parse)
+    # the same answer with no document structure to consult.
+    "aws",
 })
+
+#: A quoted JSON/dict KEY immediately preceding a colon, on the same line as a
+#: candidate `word:Word` match — used to tell whether that value sits under an
+#: Action-shaped key or under something else entirely. LINE-LEVEL ONLY: there
+#: is no document structure to walk here, so only same-line context counts.
+_KEYED_BY = re.compile(r"""["'](?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']\s*:\s*$""")
+
+#: Key names that plausibly introduce an IAM action/entitlement value. A
+#: `word:Word` token keyed by anything ELSE on the same line is someone else's
+#: value, not a grant, no matter how it is shaped.
+_ACTION_KEY_NAMES = frozenset({"action", "actions", "notaction"})
 
 #: A TEST. Its call sites and grant strings are both fixtures. This gate's own
 #: test file constructs a `textract` client and names `textract:*` actions to
@@ -325,6 +360,18 @@ def cron_interval_minutes(expr: str) -> int | None:
     return 1440  # a fixed minute AND a fixed hour: at most once a day
 
 
+def _note_ungraded(counts: dict, key: str, detail: str) -> None:
+    """Increment ``counts[key]`` (``ungraded_schedules``/``ungraded_targets``)
+    and record WHAT could not be read, so the "NOT GRADED" line in the CLI
+    output can name it instead of only counting it. A could-not-grade that
+    names no file is indistinguishable from one that never happened —
+    alpha-engine-config-I11289 was exactly a caller unable to identify which
+    of ~150 commits, let alone which file within it, tripped this counter.
+    """
+    counts[key] += 1
+    counts["ungraded"].append(detail)
+
+
 def _grade_gha_crons(
     path: str,
     lines: list,
@@ -340,7 +387,10 @@ def _grade_gha_crons(
         expr = m.group(1).strip()
         interval = cron_interval_minutes(expr)
         if interval is None:
-            counts["ungraded_schedules"] += 1
+            _note_ungraded(
+                counts, "ungraded_schedules",
+                f"{path}: workflow schedule `{expr}` — cron expression could not be parsed",
+            )
             continue
         if interval < min_interval:
             found[("cron", expr, path)] = (
@@ -355,18 +405,36 @@ def _grade_gha_crons(
             )
 
 
+def _is_keyed_by_non_action(line: str, match_start: int) -> bool:
+    """True when the quoted ``word:Word`` token starting at ``match_start`` on
+    ``line`` is immediately preceded by ``"<key>":`` for a key that is not
+    Action-shaped — see the ``_IAM_ACTION`` docstring for the rule and its
+    rationale. Only same-line context is available at the line level, so the
+    check is deliberately narrow: no preceding key at all (a bare list
+    element) is NOT suppressed — that is the shape a real grant takes when
+    each action sits on its own line.
+    """
+    m = _KEYED_BY.search(line[:match_start].rstrip())
+    return m is not None and m.group("key").lower() not in _ACTION_KEY_NAMES
+
+
 def _grade_actions_by_line(
     path: str, lines: list, known: set, found: dict, counts: dict
 ) -> None:
     """The pre-context-aware behaviour: every quoted ``prefix:Word`` token on
     an added line is graded, with no regard for whether it sits in an
-    ``Action`` value, a ``Condition`` key, or a ``Principal``. Used ONLY as the
-    fallback when a file that should be gradeable structurally could not be
-    parsed — never silently, always counted (see ``actions_context_fallback``
+    ``Action`` value, a ``Condition`` key, or a ``Principal`` — except for the
+    same-line keyed-value disambiguation documented on ``_IAM_ACTION``. Used
+    ONLY as the fallback when a file that should be gradeable structurally
+    could not be parsed, or is not a structured file at all (Python, shell,
+    ...) — never silently, always counted (see ``actions_context_fallback``
     in :func:`findings`)."""
     for line in lines:
-        for prefix in _IAM_ACTION.findall(line):
+        for m in _IAM_ACTION.finditer(line):
             counts["actions"] += 1
+            if _is_keyed_by_non_action(line, m.start()):
+                continue
+            prefix = m.group(1)
             if prefix in known or prefix in _NOT_A_SERVICE:
                 continue
             found[("action", prefix, path)] = (
@@ -428,13 +496,20 @@ def _grade_cfn_schedules(
             single = props.get("Target")
             targets = [single] if isinstance(single, dict) else []
         if not targets:
-            counts["ungraded_schedules"] += 1
+            _note_ungraded(
+                counts, "ungraded_schedules",
+                f"{path}: schedule `{res.logical_id}` declares no `Target(s)` to resolve",
+            )
             continue
 
         for target in targets:
             counts["schedules"] += 1
             if not isinstance(target, dict):
-                counts["ungraded_schedules"] += 1
+                _note_ungraded(
+                    counts, "ungraded_schedules",
+                    f"{path}: schedule `{res.logical_id}` has a `Target` entry that is "
+                    f"not a mapping and could not be read",
+                )
                 continue
 
             retry = target.get("RetryPolicy")
@@ -458,7 +533,11 @@ def _grade_cfn_schedules(
                 target.get("Arn"), by_lid, resource_types
             )
             if prefix is None:
-                counts["ungraded_targets"] += 1
+                _note_ungraded(
+                    counts, "ungraded_targets",
+                    f"{path}: schedule `{res.logical_id}`'s target `Arn` could not be "
+                    f"resolved to a billing service",
+                )
                 continue
             if prefix not in known:
                 found[("target", prefix, path)] = (
@@ -521,6 +600,11 @@ def findings(
     counts = {
         "lines": 0, "schedules": 0, "resources": 0, "clients": 0, "actions": 0,
         "ungraded_schedules": 0, "ungraded_targets": 0, "actions_context_fallback": 0,
+        # Named detail for every ungraded_schedules/ungraded_targets increment
+        # above — see _note_ungraded. A count with no name attached is exactly
+        # the diagnostics gap alpha-engine-config-I11289 hit: "1 schedule not
+        # graded" over 150 commits, with no way to say which one.
+        "ungraded": [],
     }
     # Per-file, because a schedule is a BLOCK and the resources it names live
     # elsewhere in the same template.
@@ -573,8 +657,11 @@ def findings(
             # a `Condition` key or a component id shaped `word:word`, which a
             # line-level regex cannot do. See the action-class pass.
             continue
-        for prefix in _IAM_ACTION.findall(line):
+        for m in _IAM_ACTION.finditer(line):
             counts["actions"] += 1
+            if _is_keyed_by_non_action(line, m.start()):
+                continue
+            prefix = m.group(1)
             if prefix in known or prefix in _NOT_A_SERVICE:
                 continue
             found[("action", prefix, path)] = (
@@ -631,7 +718,12 @@ def findings(
             # and a signal that fires on everything is read as firing on
             # nothing.
             if any(_SDK_SCHEDULE.search(line) for line in texts):
-                counts["ungraded_schedules"] += 1
+                _note_ungraded(
+                    counts, "ungraded_schedules",
+                    f"{path}: names an SDK schedule call site "
+                    f"(`create_schedule`/`put_rule`/`put_targets`/`ScheduleExpression=`) "
+                    f"whose cadence and retry bound cannot be read from Python source",
+                )
             continue
 
         text = _read_head(path, root_path, read_file)
@@ -639,7 +731,11 @@ def findings(
             # NOT a pass. The head file is how a schedule becomes gradeable at
             # all, and a schedule this gate did not read must not print the
             # same green zero as one it read and approved.
-            counts["ungraded_schedules"] += 1
+            _note_ungraded(
+                counts, "ungraded_schedules",
+                f"{path}: head file could not be read (absent from `--root`, or no "
+                f"`read_file` supplied) — its schedule(s) could not be graded",
+            )
             continue
 
         _grade_cfn_schedules(
@@ -666,56 +762,114 @@ class MergeBaseUnreachable(RuntimeError):
     """
 
 
-def _git(args: list, *, check: bool = True) -> subprocess.CompletedProcess:
+class RootNotAGitWorkTree(RuntimeError):
+    """``--root`` does not name a path inside a git work tree.
+
+    Every git invocation in this module is anchored on ``--root`` via
+    ``cwd=`` — NEVER on the process's own working directory (see
+    ``resolve_root``). That means a ``--root`` this gate cannot resolve to a
+    work tree cannot be graded at all: a named, exit-2 cause here, rather
+    than a bare subprocess traceback, or — the actual defect this class
+    exists to close — a silent grade of whatever repo the process happened to
+    be launched from.
+    """
+
+
+def resolve_root(root: Path | str) -> Path:
+    """Validate ``root`` against git ITSELF, anchored on ``root``, and return
+    its resolved absolute path — the value every subsequent git call in this
+    module passes as ``cwd``.
+
+    Raises :class:`RootNotAGitWorkTree` when ``root`` is not a directory, or
+    is a directory git does not recognise as (inside) a work tree when asked
+    with ``cwd=root``. This is the fix for the CWD/``--root`` disagreement:
+    the process's OWN working directory is never consulted here, so it is
+    irrelevant which repo the caller happened to launch the CLI from.
+    """
+    root_path = Path(root).resolve()
+    if not root_path.is_dir():
+        raise RootNotAGitWorkTree(f"--root {root} does not exist or is not a directory")
+    probe = _git(["rev-parse", "--is-inside-work-tree"], cwd=root_path, check=False)
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        cause = probe.stderr.strip() or probe.stdout.strip() or f"exit {probe.returncode}"
+        raise RootNotAGitWorkTree(
+            f"--root {root} is not inside a git work tree ({cause}). Every git "
+            "ref this gate resolves (--base/--head) is resolved AGAINST "
+            "--root, never against the process's own working directory — "
+            "pass the checkout that actually holds the history to grade."
+        )
+    return root_path
+
+
+def _git(
+    args: list, *, cwd: Path | str | None = None, check: bool = True
+) -> subprocess.CompletedProcess:
+    """Run git. ``cwd`` — always ``--root``, resolved by :func:`resolve_root` —
+    is the ONLY thing that decides which repo's history this reads.
+    ``subprocess.run(cwd=...)`` is used rather than a bare process launch plus
+    ``git -C``, because it also fixes the historical failure mode: a caller
+    invoking this CLI from a shell whose CWD is a DIFFERENT repo's checkout
+    used to grade THAT repo's history instead of the one named by ``--root``,
+    silently and without error (alpha-engine-config-I11289)."""
     return subprocess.run(
         ["git", *args],  # noqa: S607 — git from PATH
+        cwd=cwd,
         capture_output=True, text=True, check=check,
     )
 
 
-def is_shallow() -> bool:
-    return _git(["rev-parse", "--is-shallow-repository"], check=False).stdout.strip() == "true"
+def is_shallow(root: Path | str | None = None) -> bool:
+    return (
+        _git(["rev-parse", "--is-shallow-repository"], cwd=root, check=False)
+        .stdout.strip() == "true"
+    )
 
 
-def merge_base(base: str, head: str) -> str | None:
+def merge_base(base: str, head: str, root: Path | str | None = None) -> str | None:
     """The merge base, deepening a shallow clone once if that is what is missing.
 
     The repair is here and not only in a workflow because this runs from repos
     whose checkout step it does not own. Detecting a shallow clone and
     reporting it would leave the caller to fix a condition this can fix itself.
+
+    ``root`` is passed to every git call as ``cwd`` — see ``resolve_root``.
     """
-    probe = _git(["merge-base", base, head], check=False)
+    probe = _git(["merge-base", base, head], cwd=root, check=False)
     if probe.returncode == 0 and probe.stdout.strip():
         return probe.stdout.strip()
-    if is_shallow():
-        deepen = _git(["fetch", "--quiet", "--unshallow", "--no-tags", "origin"], check=False)
+    if is_shallow(root):
+        deepen = _git(
+            ["fetch", "--quiet", "--unshallow", "--no-tags", "origin"], cwd=root, check=False
+        )
         if deepen.returncode != 0:
             return None
-        probe = _git(["merge-base", base, head], check=False)
+        probe = _git(["merge-base", base, head], cwd=root, check=False)
         if probe.returncode == 0 and probe.stdout.strip():
             return probe.stdout.strip()
     return None
 
 
-def git_diff(base: str, head: str) -> str:
-    """What HEAD adds relative to its merge base with ``base``.
+def git_diff(base: str, head: str, root: Path | str | None = None) -> str:
+    """What HEAD adds relative to its merge base with ``base``, resolved
+    entirely against ``root`` (see ``resolve_root``) — never against the
+    process's own working directory.
 
     Equivalent to ``git diff base...head``, but the merge base is resolved
     explicitly so an unreachable one produces a named error instead of a bare
     exit-128 traceback.
     """
-    mb = merge_base(base, head)
+    mb = merge_base(base, head, root)
     if mb is None:
         raise MergeBaseUnreachable(
             f"no merge base between {base!r} and {head!r} in this checkout"
-            + (" (the clone is SHALLOW and could not be deepened)" if is_shallow() else "")
+            + (" (the clone is SHALLOW and could not be deepened)" if is_shallow(root) else "")
             + ". The pre-merge cost gate grades what a branch ADDS, which is "
             "undefined without a merge base. Remedy: check out with "
             "`fetch-depth: 0`, or `git fetch --unshallow --no-tags origin` "
             "before running this. Do NOT substitute a two-dot diff — it would "
             "grade every change that landed on the base since the branch was cut."
         )
-    return _git(["diff", "--unified=0", f"{mb}..{head}"]).stdout
+    return _git(["diff", "--unified=0", f"{mb}..{head}"], cwd=root).stdout
 
 
 def load_yaml_doc(path: Path | str, what: str) -> dict:

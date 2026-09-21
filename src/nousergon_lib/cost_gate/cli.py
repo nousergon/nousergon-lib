@@ -77,11 +77,27 @@ def main(argv: list | None = None) -> int:
     doc = grade.load_ssot(args.ssot) if args.ssot else grade.load_ssot()
     rmap = resource_map_mod.load(args.resource_map) if args.resource_map else resource_map_mod.load()
 
+    # `--diff-file` bypasses git entirely (used by history replays and unit
+    # tests that hand over an arbitrary directory as `--root`), so `--root`
+    # is validated as a git work tree only when this CLI is about to run git
+    # against it. Either way `--root` is resolved to an absolute path once,
+    # here, and that is the ONLY value passed to git as `cwd` and to the
+    # grader for reading head-tree files — never the process's own CWD.
+    try:
+        root_path = (
+            Path(args.root).resolve()
+            if args.diff_file
+            else grade.resolve_root(args.root)
+        )
+    except grade.RootNotAGitWorkTree as exc:
+        print(f"::error title=pre-merge cost gate could not grade this diff::{exc}")
+        return 2
+
     try:
         diff = (
             Path(args.diff_file).read_text()
             if args.diff_file
-            else grade.git_diff(args.base, args.head)
+            else grade.git_diff(args.base, args.head, root=root_path)
         )
     except grade.MergeBaseUnreachable as exc:
         print(f"::error title=pre-merge cost gate could not grade this diff::{exc}")
@@ -90,7 +106,7 @@ def main(argv: list | None = None) -> int:
     issues, counts = grade.findings(
         diff, doc,
         resource_map=rmap,
-        root=args.root,
+        root=root_path,
         repo_visibility=args.repo_visibility,
     )
 
@@ -117,6 +133,11 @@ def main(argv: list | None = None) -> int:
             f"whose billing service could not be resolved. These are UNKNOWN, "
             f"not approved."
         )
+        # Named, not just counted: alpha-engine-config-I11289 hit a
+        # could-not-grade in this repo's own history that the CLI gave no
+        # file-level detail for, over 150 commits of replay.
+        for detail in counts["ungraded"]:
+            print(f"    ? {detail}")
     if counts["actions_context_fallback"]:
         print(
             f"  FALLBACK  {counts['actions_context_fallback']} JSON/YAML file(s) "

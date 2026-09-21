@@ -659,6 +659,7 @@ def test_warn_only_downgrades_findings_to_0(tmp_path, capsys):
 def test_warn_only_does_not_downgrade_could_not_grade(tmp_path, monkeypatch, capsys):
     """A gate that could not run at all is a broken control, not a soft
     finding. Exit 2 survives ``--warn-only``."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)  # noqa: S607 — a real work tree
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         gate, "git_diff",
@@ -671,6 +672,7 @@ def test_warn_only_does_not_downgrade_could_not_grade(tmp_path, monkeypatch, cap
 def test_a_no_merge_base_run_exits_2_not_1(tmp_path, monkeypatch, capsys):
     """"I could not grade this" and "I graded it and it is unbudgeted" are
     different states with different remedies."""
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)  # noqa: S607 — a real work tree
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         gate, "git_diff",
@@ -693,6 +695,103 @@ def test_the_ungraded_count_is_printed_not_swallowed(tmp_path, capsys):
     d.write_text(_diff("scripts/x.py", "  c.create_schedule(ScheduleExpression='x')"))
     cli.main(["--diff-file", str(d), "--root", str(tmp_path)])
     assert "NOT GRADED" in capsys.readouterr().out
+
+
+def test_the_ungraded_count_names_the_file_not_just_a_number(tmp_path, capsys):
+    """alpha-engine-config-I11289: a could-not-grade in this repo's own
+    150-commit history could not be identified from the CLI's output — it
+    printed a count with no file attached. The NOT GRADED line must now name
+    what it could not read."""
+    d = tmp_path / "x.diff"
+    d.write_text(_diff("scripts/x.py", "  c.create_schedule(ScheduleExpression='x')"))
+    cli.main(["--diff-file", str(d), "--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "scripts/x.py" in out
+    assert "SDK schedule call site" in out
+
+
+def test_findings_reports_the_ungraded_detail_in_its_counts():
+    issues, counts = gate.findings(
+        _diff("scripts/x.py", "  c.create_schedule(ScheduleExpression='x')"), DOC
+    )
+    assert counts["ungraded_schedules"] == 1
+    assert len(counts["ungraded"]) == 1
+    assert "scripts/x.py" in counts["ungraded"][0]
+
+
+# -- `--root` is authoritative for git ref resolution, never the process's
+# -- own CWD -------------------------------------------------------------
+#
+# Refs alpha-engine-config-I11289. Measured independently by five dispatched
+# workers plus the orchestrating session: `--base`/`--head` used to be
+# resolved by git against the process's CURRENT WORKING DIRECTORY, so running
+# the CLI from a shell `cd`'d into a DIFFERENT repo silently graded that
+# repo's history instead of the one named by `--root` — no error, a
+# plausible-looking wrong answer. Every git call in `grade.py` now takes
+# `cwd=root` explicitly (see `resolve_root`/`_git`), and this is the
+# regression test that proves it end to end with two real, unrelated repos.
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)  # noqa: S607
+
+
+def _init_repo_with_two_commits(root: Path, second_commit_adds: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", cwd=root)
+    _git("config", "user.email", "test@example.com", cwd=root)
+    _git("config", "user.name", "Test", cwd=root)
+    (root / "a.py").write_text("x = 1\n")
+    _git("add", "a.py", cwd=root)
+    _git("commit", "-q", "-m", "base", cwd=root)
+    (root / "a.py").write_text("x = 1\n" + second_commit_adds)
+    _git("add", "a.py", cwd=root)
+    _git("commit", "-q", "-m", "head", cwd=root)
+
+
+def test_root_is_graded_even_when_cwd_is_a_different_repo(tmp_path, monkeypatch):
+    """Repo A (the process's CWD) and Repo B (`--root`) are two unrelated
+    repos with different histories. `--base HEAD~1 --head HEAD` resolves in
+    BOTH — the bug this fix closes is exactly that ambiguity. The CLI must
+    grade B, not A, regardless of where the process was launched from."""
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _init_repo_with_two_commits(repo_a, "y = 2\n")  # no finding: not a grant
+    _init_repo_with_two_commits(repo_b, 'c = boto3.client("textract")\n')  # a real finding
+
+    monkeypatch.chdir(repo_a)
+    rc_graded_as_b = cli.main(["--base", "HEAD~1", "--head", "HEAD", "--root", str(repo_b)])
+    assert rc_graded_as_b == 1  # repo B's diff has an unbudgeted finding
+
+    monkeypatch.chdir(repo_a)
+    rc_graded_as_a = cli.main(["--base", "HEAD~1", "--head", "HEAD", "--root", str(repo_a)])
+    assert rc_graded_as_a == 0  # repo A's own diff has none
+
+
+def test_a_root_outside_any_git_work_tree_exits_2_with_a_named_cause(tmp_path):
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+    rc = cli.main(["--base", "HEAD~1", "--head", "HEAD", "--root", str(not_a_repo)])
+    assert rc == 2
+
+
+def test_a_root_outside_any_git_work_tree_names_the_cause(tmp_path, capsys):
+    not_a_repo = tmp_path / "plain-dir"
+    not_a_repo.mkdir()
+    cli.main(["--base", "HEAD~1", "--head", "HEAD", "--root", str(not_a_repo)])
+    out = capsys.readouterr().out
+    assert "is not inside a git work tree" in out
+    assert str(not_a_repo) in out
+
+
+def test_diff_file_mode_does_not_require_root_to_be_a_git_work_tree(tmp_path):
+    """`--diff-file` bypasses git entirely, so an arbitrary directory handed
+    as `--root` (used only for reading head-tree files) is fine — this is the
+    pre-existing shape most unit tests in this file use."""
+    d = tmp_path / "x.diff"
+    d.write_text(_diff("scripts/x.py", 'c = boto3.client("textract")'))
+    rc = cli.main(["--diff-file", str(d), "--root", str(tmp_path)])
+    assert rc == 1
 
 
 # -- the injected SSoT is really used ----------------------------------------
@@ -954,6 +1053,114 @@ def test_a_creation_actions_registry_key_is_not_an_action(tmp_path):
     ))
     assert issues == []
     assert counts["actions_context_fallback"] == 0
+
+
+# -- the LINE-LEVEL fallback is also context-aware ---------------------------
+#
+# Refs alpha-engine-config-I11289. Every case above grades a JSON/YAML file
+# that parses structurally. A `.py`/`.sh` source file never does — it always
+# goes through the line-level fallback, which had no context awareness at
+# all until this fix. `flow-doctor`'s false positive was exactly this shape,
+# in a `.py` file the structural pass never sees.
+
+
+def test_a_boto3_filter_dict_name_value_is_not_an_action():
+    """`flow-doctor`'s false positive, reproduced: a boto3 EC2 `describe_*`
+    filter dict entry (`Filters=[{"Name": "tag:Name", "Values": [...]}]`) is
+    not an IAM grant — `tag:Name` here is the VALUE of a `Name` key, not an
+    Action string. Source is a `.py` file, so this exercises the LINE-LEVEL
+    path directly (no structural parse exists for Python)."""
+    issues, counts = gate.findings(
+        _diff(
+            "flow_doctor/remediation/executor.py",
+            '    {"Name": "tag:Name", "Values": [target]},',
+        ),
+        DOC,
+    )
+    assert issues == []
+    assert counts["actions"] == 1
+
+
+def test_an_aws_condition_key_in_a_python_source_line_is_not_an_action():
+    """`aws:SourceAccount`-style condition keys are IAM's global-condition-key
+    namespace, never a service prefix, so the line-level fallback must clear
+    them the same way the structural pass already does."""
+    issues, _ = gate.findings(
+        _diff(
+            "scripts/build_trust_policy.py",
+            '    condition = {"aws:SourceAccount": account_id}',
+        ),
+        DOC,
+    )
+    assert issues == []
+
+
+def test_a_component_id_value_in_a_python_source_line_is_not_an_action():
+    """A component-id string keyed by something other than Action
+    (`"id": "pipeline:Unit"`) reads the same way `tag:Name` does — the value
+    of an unrelated key, not a grant. Capitalised suffix so it actually
+    matches the entitlement shape (`_IAM_ACTION` requires an uppercase/`*`
+    character after the colon) and so exercises the disambiguation rule
+    rather than merely missing the regex, as the all-lowercase
+    `pipeline:daily-close` id shape does."""
+    issues, counts = gate.findings(
+        _diff(
+            "scripts/registry.py",
+            '    unit = {"id": "ne-weekly-freshness-pipeline:DailyClose"}',
+        ),
+        DOC,
+    )
+    assert issues == []
+    assert counts["actions"] == 1
+
+
+def test_a_quoted_action_with_no_preceding_key_in_python_is_still_a_finding():
+    """A bare list element — the shape a real grant takes when building a
+    policy document by hand in Python — has no key on the same line at all,
+    so it is NOT suppressed. Uses `textract` (unbudgeted): the canonical
+    positive fixture in this file — the PR that motivated this fix (I11289)
+    names `ce:GetCostAndUsage` as the illustrative "must stay a finding"
+    shape, but `ce` is itself budgeted (see
+    `test_the_packaged_ssot_and_resource_map_load`), so that exact string
+    would pass on approval, not on being excluded from grading — this test
+    isolates the mechanism instead."""
+    issues, counts = gate.findings(
+        _diff("scripts/build_policy.py", '    actions = ["textract:DetectDocumentText"]'),
+        DOC,
+    )
+    assert len(issues) == 1
+    assert "textract" in issues[0]
+    assert counts["actions"] == 1
+
+
+def test_a_quoted_action_keyed_by_action_in_python_is_still_a_finding():
+    """The value of an Action-shaped key stays graded even at the line level —
+    the disambiguation rule narrows what is EXCLUDED, not what is included."""
+    issues, _ = gate.findings(
+        _diff(
+            "scripts/build_policy.py",
+            '    stmt = {"Effect": "Allow", "Action": "textract:DetectDocumentText"}',
+        ),
+        DOC,
+    )
+    assert len(issues) == 1
+    assert "textract" in issues[0]
+
+
+def test_ce_get_cost_and_usage_in_a_policy_dict_is_graded_as_an_action():
+    """The issue's own illustrative shape (I11289): `ce:GetCostAndUsage`
+    inside a policy-building Python dict must still be GRADED as an
+    entitlement string — it passes here because `ce` is budgeted, not
+    because the line-level fallback stopped looking at it."""
+    issues, counts = gate.findings(
+        _diff(
+            "scripts/build_policy.py",
+            '    stmt = {"Effect": "Allow", "Action": "ce:GetCostAndUsage"}',
+        ),
+        DOC,
+    )
+    assert issues == []
+    assert counts["actions"] == 1
 
 
 def test_an_action_string_value_on_an_unbudgeted_prefix_is_still_a_finding(tmp_path):
