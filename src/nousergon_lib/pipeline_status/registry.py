@@ -429,6 +429,37 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "by a fan-in coverage breach, which the alert deliberately does not "
         "try to tell apart. No persisted artifact (the email IS the surface)."
     ),
+    "PublishCostCoverageGap": ArtifactReason(
+        reason="WARNING-severity SNS notice fired when AggregateCosts finds a "
+        "cost fan-in COVERAGE GAP — at least one stage of the weekly cycle ran "
+        "and emitted no cost record, so its LLM spend is attributed to nothing. "
+        "Distinct from PublishAggregateCostsDegraded above, which covers every "
+        "OTHER way that stage can fail and still terminates the run DEGRADED. "
+        "Per Brian's 2026-09-21 ruling (alpha-engine-config-I11298, his words: "
+        "'proceed with rec b') a coverage gap ends the run SUCCEEDED carrying a "
+        "named cost_coverage_gap sub-status, because cost attribution is "
+        "accounting and feeds no report card, champion promotion or signal set "
+        "— so this notice is what carries the gap to a reader, and the trade is "
+        "explicit. Alert class weekly_cost_coverage_gap, tier tracked-only. No "
+        "persisted artifact: the notice plus $.cost_coverage_gap_detail on the "
+        "execution record and $.cost_coverage_gap on the completion marker ARE "
+        "the surface."
+    ),
+    "PublishDirectorSubStatusDegraded": ArtifactReason(
+        reason="WARNING-severity SNS alert fired when the weekly Director "
+        "completes and writes its action plan while one of its named "
+        "sub-results — retro / director_loop / director_issues / "
+        "deploy_success — errored or reported a status in neither vocabulary "
+        "(sf-pipeline-policy.md §2.3b, alpha-engine-config-I11299). Non-fatal "
+        "for trading: the weekly pipeline places no orders and the plan, the "
+        "carry-over ledger and the report card are unaffected; the run "
+        "terminates DEGRADED. Reached by ANY errored leg and the alert "
+        "deliberately does not try to tell them apart — "
+        "$.director_result.Payload.degraded_sub_results names which, on the "
+        "execution record. A guard REFUSAL is explicitly not this state: it "
+        "takes the clean terminal and is named by $.director_retro_refused. "
+        "No persisted artifact (the email IS the surface)."
+    ),
     "PredictorTraining": ArchivePageRef(
         page="host_predictor?tab=Archives",
         artifact_label="Predictor training summary",
