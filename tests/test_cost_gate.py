@@ -895,3 +895,169 @@ def test_an_unresolvable_target_is_none_and_never_a_guess():
     assert crm.resolve_target_service(crm.Intrinsic("Sub", 7), {}, {}) is None
     assert crm.resolve_target_service(crm.Intrinsic("Unknown", "x"), {}, {}) is None
     assert crm.resolve_target_service({"Ref": "D"}, {"D": "AWS::Unmapped::Thing"}, {}) is None
+
+
+# -- the action class is context-aware ---------------------------------------
+#
+# Refs alpha-engine-config-I11228 (the false positives), alpha-engine-config-I11285
+# (this fix). A token shaped `word:Word` is graded as an IAM action ONLY when
+# it is the value of an `Action`/`NotAction` key in a JSON/YAML document — not
+# a `Condition` key, not a `Principal`, not a bare component id that happens to
+# contain a colon.
+
+
+def test_a_component_id_with_a_colon_is_not_an_action(tmp_path):
+    """`nousergon-data`'s false positive: a registry entry id shaped
+    `pipeline:unit`, not a `service:Action` grant. No `Action`/`NotAction` key
+    is anywhere in the document, so nothing structural is found."""
+    issues, counts = _graded(
+        tmp_path, "registry.d/units/x.yaml",
+        "id: ne-weekly-freshness-pipeline:daily-close\n"
+        "kind: unit\n",
+    )
+    assert issues == []
+    assert counts["actions_context_fallback"] == 0
+
+
+def test_a_condition_key_is_not_an_action(tmp_path):
+    """`nous-ergon-ops`'s false positive, reproduced as a synthetic trust
+    policy: `aws:SourceAccount` is a Condition operator's argument, not a
+    grant of a service called `aws`. `sts:AssumeRole` is the real Action and
+    is declared free, so this is a clean pass end to end."""
+    issues, counts = _graded(tmp_path, "infrastructure/iam/trust-policy.json", (
+        '{\n'
+        '  "Version": "2012-10-17",\n'
+        '  "Statement": [\n'
+        '    {\n'
+        '      "Effect": "Allow",\n'
+        '      "Principal": {"Service": "example.amazonaws.com"},\n'
+        '      "Action": "sts:AssumeRole",\n'
+        '      "Condition": {\n'
+        '        "StringEquals": {"aws:SourceAccount": "000000000000"}\n'
+        '      }\n'
+        '    }\n'
+        '  ]\n'
+        '}\n'
+    ))
+    assert issues == []
+    assert counts["actions_context_fallback"] == 0
+
+
+def test_a_creation_actions_registry_key_is_not_an_action(tmp_path):
+    """The private twin's worked-around shape: a registry key NAMED
+    `creation_actions` whose string values read like grants
+    (`rds:CreateDBInstance`) but are not under an `Action`/`NotAction` key."""
+    issues, counts = _graded(tmp_path, "private-docs/EXPENSE_BUDGETS.yaml", (
+        "capability_gate:\n"
+        "  creation_actions:\n"
+        "    - rds:CreateDBInstance\n"
+    ))
+    assert issues == []
+    assert counts["actions_context_fallback"] == 0
+
+
+def test_an_action_string_value_on_an_unbudgeted_prefix_is_still_a_finding(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.json", (
+        '{\n'
+        '  "Statement": [\n'
+        '    {"Effect": "Allow", "Action": "sagemaker:CreateEndpoint", "Resource": "*"}\n'
+        '  ]\n'
+        '}\n'
+    ))
+    assert len(issues) == 1
+    assert "sagemaker" in issues[0]
+
+
+def test_an_action_list_value_on_an_unbudgeted_prefix_is_still_a_finding(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.json", (
+        '{\n'
+        '  "Statement": [\n'
+        '    {"Effect": "Allow", "Action": ["s3:GetObject", "sagemaker:CreateEndpoint"]}\n'
+        '  ]\n'
+        '}\n'
+    ))
+    assert len(issues) == 1
+    assert "sagemaker" in issues[0]
+
+
+def test_an_action_value_in_yaml_form_is_still_graded(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.yaml", (
+        "Statement:\n"
+        "  - Effect: Allow\n"
+        "    Action: sagemaker:CreateEndpoint\n"
+    ))
+    assert len(issues) == 1
+    assert "sagemaker" in issues[0]
+
+
+def test_a_not_action_value_on_an_unbudgeted_prefix_is_still_a_finding(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.json", (
+        '{\n'
+        '  "Statement": [\n'
+        '    {"Effect": "Deny", "NotAction": "sagemaker:CreateEndpoint"}\n'
+        '  ]\n'
+        '}\n'
+    ))
+    assert len(issues) == 1
+    assert "sagemaker" in issues[0]
+
+
+def test_a_condition_next_to_a_real_unbudgeted_action_flags_only_the_action(tmp_path):
+    """A `Condition` block containing `aws:` keys sits in the SAME statement
+    as a real unbudgeted `Action` — exactly the action is flagged, and
+    nothing about the condition is."""
+    issues, _ = _graded(tmp_path, "infra/policy.json", (
+        '{\n'
+        '  "Statement": [\n'
+        '    {\n'
+        '      "Effect": "Allow",\n'
+        '      "Action": "sagemaker:CreateEndpoint",\n'
+        '      "Condition": {\n'
+        '        "StringEquals": {"aws:SourceAccount": "000000000000"}\n'
+        '      }\n'
+        '    }\n'
+        '  ]\n'
+        '}\n'
+    ))
+    assert len(issues) == 1
+    assert "sagemaker" in issues[0]
+
+
+def test_a_non_parsing_iac_file_falls_back_loudly(tmp_path):
+    """Malformed JSON must never read as zero actions found — the gate falls
+    back to the line-level scan and COUNTS that it did, so the fallback is
+    visible in the output rather than silent."""
+    issues, counts = _graded(tmp_path, "infra/broken.json", (
+        '{\n  "Statement": [\n    {"Action": "textract:DetectDocumentText"\n'
+        # deliberately truncated / malformed JSON
+    ))
+    assert len(issues) == 1
+    assert "textract" in issues[0]
+    assert counts["actions_context_fallback"] == 1
+
+
+def test_a_head_file_that_cannot_be_read_falls_back_too():
+    """No ``root`` and no ``read_file`` — the same shape a caller hits when
+    grading a diff without a checkout to read from."""
+    issues, counts = gate.findings(
+        _diff("infra/x.json", '        "textract:DetectDocumentText",'), DOC
+    )
+    assert len(issues) == 1
+    assert "textract" in issues[0]
+    assert counts["actions_context_fallback"] == 1
+
+
+def test_a_test_fixture_json_naming_an_unbudgeted_action_is_not_graded(tmp_path):
+    """The action class, like the client class, must not red the test file
+    that proves it works."""
+    issues, _ = _graded(tmp_path, "tests/fixtures/policy.json", (
+        '{"Statement": [{"Action": "textract:DetectDocumentText"}]}\n'
+    ))
+    assert issues == []
+
+
+def test_a_captured_policy_backup_json_is_not_a_new_grant(tmp_path):
+    issues, _ = _graded(tmp_path, "private-docs/retirement/roles_backup_260920.json", (
+        '{"Statement": [{"Action": "textract:DetectDocumentText"}]}\n'
+    ))
+    assert issues == []
