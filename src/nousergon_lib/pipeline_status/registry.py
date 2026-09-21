@@ -613,6 +613,25 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "NotifyCompleteGatesAndHealthDegraded for the terminal marker this "
         "alert sets up.",
     ),
+    # alpha-engine-config-I11112: the same fail-open alert shape as the gate
+    # pairs above, for WeeklyPreflight — the pre-spend gate that runs
+    # sf_preflight's Lambda-eligible check profile before AcquireMutex.
+    "PublishWeeklyPreflightBlindSpotNotice": ArtifactReason(
+        reason="VERDICT notice (not a failure alert) fired when WeeklyPreflight "
+        "ran and found no confirmed violation, but could not execute one or "
+        "more REQUIRED checks (its own Lambda environment lacks a capability "
+        "— ArcticDB, the repo collector modules, a Polygon key, or sibling "
+        "checkouts). Mirrors PublishModelZooUnservableNotice's framing: a "
+        "known, tracked capability gap in the probe's own environment is a "
+        "verdict about that environment, not a stage failure, so the run "
+        "proceeds and terminates SUCCEEDED — it does NOT set $.gate_degraded "
+        "or $.degraded_summary (unlike PublishLibPinGateDegraded and "
+        "siblings, all of which terminate the run at DegradedRun). No "
+        "persisted artifact (the email IS the surface); the blind spot is "
+        "recorded on both completion markers via $.weekly_preflight_blind_spot. "
+        "A REQUIRED check that RUNS and finds a real violation is unaffected "
+        "— that path hard-fails via has_violation.",
+    ),
     # config#1824 (2026-07-06): run-day gate mirroring the weekday
     # TradingDayGate (config#1430) — predictor Lambda action=
     # check_weekly_run_day, pure NYSE-calendar math, true iff yesterday was
