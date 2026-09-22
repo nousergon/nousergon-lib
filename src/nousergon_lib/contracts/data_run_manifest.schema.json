@@ -142,6 +142,11 @@
       "description": "MetricRecord-shaped rows this run emitted, rendered onto the board. Open-shaped to match `krepis.metrics.MetricRecord`'s forward-compatible contract.",
       "type": "array",
       "items": { "type": "object" }
+    },
+    "reason_truncated_bytes": {
+      "description": "Present only when `run_unit` cut `reason` to stay within its `REASON_MAX_LEN` (2000 chars). The count of bytes actually removed — not the field's full length — so a reader can tell a two-line elision from a reason that is 4% of the story. `reason` itself keeps both ends (head:tail 3:5, `alpha-engine-config-I11358`) rather than the head alone, because the failing entry of a window scan is typically the LAST thing an exception message says. ADDITIVE and optional: a manifest with no truncation, and every manifest written before this field existed, omits it and still validates — no schema version bump.",
+      "minimum": 1,
+      "type": "integer"
     }
   },
   "$defs": {

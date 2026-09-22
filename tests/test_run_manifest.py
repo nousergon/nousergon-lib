@@ -16,6 +16,7 @@ from nousergon_lib import contracts
 from nousergon_lib.run_manifest import (
     DEFAULT_MANIFEST_PREFIX,
     NOT_APPLICABLE_REASONS,
+    REASON_MAX_LEN,
     SCHEMA_VERSION,
     TRIGGERS,
     VERSION_CAPTURES,
@@ -172,6 +173,53 @@ def test_no_third_success_state_is_representable():
     manifest = dict(sink.writes[0][1])
     manifest["status"] = "degraded"
     assert contracts.conformance_errors("data_run_manifest", manifest) != []
+
+
+# ── a long reason keeps its tail, not just its head (I11358) ─────────────
+
+
+def test_an_undersized_reason_is_returned_byte_identical():
+    """A reason well under the cap is untouched — no marker, no truncation
+    field on the manifest at all."""
+    sink = RecordingSink()
+
+    def body(ctx: UnitRun):
+        raise RuntimeError("short and unremarkable failure")
+
+    with pytest.raises(RuntimeError):
+        _run(body, sink)
+
+    manifest = sink.writes[0][1]
+    assert manifest["reason"] == "RuntimeError: short and unremarkable failure"
+    assert "reason_truncated_bytes" not in manifest
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
+def test_a_6000_char_reason_keeps_its_tail_where_the_failing_date_lives():
+    """The 2026-09-21 defect this closes: a window scan's failing entry is the
+    LAST thing the exception message says, and a head-only cut at 2000 chars
+    dropped it silently. The tail must survive, and the manifest must say it
+    was cut."""
+    sink = RecordingSink()
+    tail = "FAILING_DATE=2026-09-21 status=short_fetch_guard_refused".rjust(200, "-")
+    body_text = ("2026-09-08 ok, " * 400)[: 6000 - len(tail)]
+    long_message = f"{body_text}{tail}"
+    assert len(long_message) == 6000
+    assert long_message[-200:] == tail
+
+    def body(ctx: UnitRun):
+        raise RuntimeError(long_message)
+
+    with pytest.raises(RuntimeError):
+        _run(body, sink)
+
+    manifest = sink.writes[0][1]
+    assert len(manifest["reason"]) <= REASON_MAX_LEN
+    assert "2026-09-21" in manifest["reason"]
+    assert tail in manifest["reason"]
+    assert "reason_truncated" in manifest["reason"]
+    assert manifest["reason_truncated_bytes"] > 0
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
 
 
 # ── refusals that happen BEFORE the body runs ─────────────────────────────

@@ -86,6 +86,9 @@ __all__ = [
     "CODE_SHA_ENV",
     "DEFAULT_MANIFEST_PREFIX",
     "NOT_APPLICABLE_REASONS",
+    "REASON_HEAD_RATIO",
+    "REASON_MAX_LEN",
+    "REASON_TAIL_RATIO",
     "SCHEMA_VERSION",
     "TRIGGERS",
     "VERSION_CAPTURES",
@@ -158,6 +161,52 @@ _ESCALATED_ENV = "NE_DATA_ESCALATED_ON_DEMAND"
 _REGION_ENVS = ("AWS_REGION", "AWS_DEFAULT_REGION")
 
 _UNIT_ID_RE = re.compile(r"^D[0-9]{2}[A-Z]?$")
+
+#: The final `reason` field's hard cap. Named so the cut site never carries a
+#: bare literal (`alpha-engine-config-I11358`) — the schema's own
+#: `reason.maxLength` (`contracts/data_run_manifest.schema.json`) is asserted
+#: against this constant in `tests/test_run_manifest.py`, so the two cannot
+#: drift.
+REASON_MAX_LEN = 2000
+
+#: How a truncated reason is split. `nousergon-data/run_units.py::truncate_reason`
+#: (`alpha-engine-config-I11353`) solved this one layer up first: the failing
+#: entry of a window scan is typically the LAST thing a producer's exception
+#: message says, so a head-only cut (the previous behaviour here) drops
+#: precisely the cause and keeps only context nobody needed. 3:5 head:tail
+#: keeps enough of the head to name the exception type and enough of the tail
+#: to carry the failure detail. Lifted into the library on second adoption
+#: (`policy-shared-code`) so every producer through `run_unit` benefits, not
+#: only the one collector that first solved it for itself.
+REASON_HEAD_RATIO = 3
+REASON_TAIL_RATIO = 5
+
+
+def _truncate_reason(reason: str, *, max_len: int = REASON_MAX_LEN) -> tuple[str, int]:
+    """Bound ``reason`` to ``max_len``, keeping BOTH ends (head:tail 3:5).
+
+    Returns ``(bounded, dropped_bytes)``. ``dropped_bytes`` is ``0`` when
+    ``reason`` already fit — the caller uses that to decide whether
+    ``reason_truncated_bytes`` belongs on the manifest at all. The marker
+    names the exact count removed, mirroring
+    ``nousergon-data/run_units.py::truncate_reason``'s marker shape, so a
+    reader can tell "two lines elided" from "this field is 4% of the story".
+    """
+    if len(reason) <= max_len:
+        return reason, 0
+    total = REASON_HEAD_RATIO + REASON_TAIL_RATIO
+    # Reserve the marker's own length first, measured rather than guessed: the
+    # dropped count appears INSIDE the marker, so a fixed reserve is wrong by
+    # however many digits it has.
+    probe = f" …[reason_truncated: {len(reason)} bytes]… "
+    budget = max(0, max_len - len(probe))
+    head_len = budget * REASON_HEAD_RATIO // total
+    tail_len = budget - head_len
+    head = reason[:head_len]
+    tail = reason[len(reason) - tail_len :] if tail_len else ""
+    dropped = len(reason) - head_len - tail_len
+    marker = f" …[reason_truncated: {dropped} bytes]… "
+    return f"{head}{marker}{tail}"[:max_len], dropped
 
 
 class NotApplicable(Exception):
@@ -555,7 +604,14 @@ def _rfc3339(moment: dt.datetime) -> str:
     return moment.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _build_manifest(ctx: UnitRun, *, status: str, reason: str, finished: dt.datetime) -> dict[str, Any]:
+def _build_manifest(
+    ctx: UnitRun,
+    *,
+    status: str,
+    reason: str,
+    finished: dt.datetime,
+    reason_truncated_bytes: int = 0,
+) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": ctx.run_id,
@@ -580,6 +636,7 @@ def _build_manifest(ctx: UnitRun, *, status: str, reason: str, finished: dt.date
         **({"excluded": list(ctx.excluded)} if ctx.excluded else {}),
         **({"guards": list(ctx.guards)} if ctx.guards else {}),
         **({"metrics": list(ctx.metrics)} if ctx.metrics else {}),
+        **({"reason_truncated_bytes": reason_truncated_bytes} if reason_truncated_bytes else {}),
     }
 
 
@@ -655,6 +712,7 @@ def run_unit(
 
     status = "failed"
     reason = "run did not reach a terminal state"
+    reason_truncated_bytes = 0
     value: Any = None
     try:
         value = fn(ctx)
@@ -670,10 +728,17 @@ def run_unit(
         )
     except BaseException as exc:  # noqa: BLE001 -- recorded and RE-RAISED below
         status = "failed"
-        reason = f"{type(exc).__name__}: {exc}"[:2000] or type(exc).__name__
+        raw_reason = f"{type(exc).__name__}: {exc}" or type(exc).__name__
+        reason, reason_truncated_bytes = _truncate_reason(raw_reason)
         raise
     finally:
-        manifest = _build_manifest(ctx, status=status, reason=reason, finished=dt.datetime.now(dt.timezone.utc))
+        manifest = _build_manifest(
+            ctx,
+            status=status,
+            reason=reason,
+            finished=dt.datetime.now(dt.timezone.utc),
+            reason_truncated_bytes=reason_truncated_bytes,
+        )
         key = manifest_key(unit_id, trading_day, ctx.run_id, prefix)
         if sink is None:
             logger.info(
