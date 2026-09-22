@@ -72,6 +72,7 @@ Refs alpha-engine-config-I11228.
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 from collections.abc import Callable
@@ -211,12 +212,93 @@ _WORKFLOW = re.compile(r"(^|/)\.github/workflows/[^/]+\.ya?ml$")
 #: A file that could hold a CloudFormation template.
 _IAC_FILE = re.compile(r"\.(ya?ml|json|template)$", re.IGNORECASE)
 
-#: Creating a schedule through the SDK rather than a template. Narrow on
-#: purpose: it separates code that MAKES a schedule from code that merely
-#: mentions one, which this module's own source does in a docstring.
+#: Creating a schedule through the SDK rather than a template.
+#:
+#: CHEAP PRE-FILTER ONLY, exactly like ``_SCHEDULE``. A hit makes the gate
+#: parse the head file and ask whether any of these tokens is really a CALL
+#: (see :func:`parse_sdk_schedule_calls`); a miss is conclusive. It is NOT a
+#: verdict on its own, because the same four tokens occur as ordinary text in
+#: any module that *searches for* them — including this one, whose own
+#: pattern list and "not graded" message both name all four. Grading the
+#: token rather than the syntax made this module's own source report a
+#: permanently unresolvable schedule (alpha-engine-config-I11289): the
+#: scanner matched its own pattern list. Same class as the `Condition`-key
+#: and component-id false positives above — a token graded outside the
+#: context that gives it meaning.
 _SDK_SCHEDULE = re.compile(
     r"(create_schedule|update_schedule|put_rule|put_targets|ScheduleExpression\s*=)"
 )
+
+#: The boto3 methods that create or retarget a schedule.
+_SDK_SCHEDULE_METHODS = frozenset({
+    "create_schedule", "update_schedule", "put_rule", "put_targets",
+})
+
+#: The keyword argument that carries a cadence into any of them.
+_SDK_SCHEDULE_KWARG = "ScheduleExpression"
+
+
+class SdkScheduleParseError(RuntimeError):
+    """``text`` is not parseable Python, so an SDK schedule call site in it
+    cannot be told apart from the same token in a string literal, a comment
+    or a pattern list by position. The caller falls back to the line-level
+    pre-filter and reports the file as NOT GRADED — never as "no schedule
+    here". The twin of :class:`resource_map.ActionParseError`, and for the
+    same reason."""
+
+
+def parse_sdk_schedule_calls(text: str) -> list:
+    """Every ``(first_line, last_line)`` span in ``text`` occupied by a REAL
+    SDK schedule call site, resolved from Python SYNTAX rather than from text.
+
+    Three shapes count, and nothing else does:
+
+      * a call whose callee is named ``create_schedule`` / ``update_schedule``
+        / ``put_rule`` / ``put_targets`` — ``client.put_rule(...)`` or a bare
+        ``put_rule(...)``;
+      * any call passing ``ScheduleExpression=`` as a keyword argument;
+      * an assignment to a name or attribute called ``ScheduleExpression``,
+        which is the remaining shape the ``ScheduleExpression\\s*=`` branch of
+        the pre-filter was written for.
+
+    A string literal, a comment, a docstring or a regex alternation
+    *containing* any of those tokens is none of those three, so it is not a
+    call site. That is the whole fix for the self-match: it needs no
+    per-file exclusion, so it also covers the next module that names these
+    strings — a test fixture, a doc example, a second grader.
+
+    Raises :class:`SdkScheduleParseError` when ``text`` does not parse.
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError) as exc:  # ValueError: NUL bytes
+        raise SdkScheduleParseError(f"could not parse as Python: {exc}") from exc
+
+    spans: list = []
+
+    def span(node: ast.AST) -> tuple:
+        first = getattr(node, "lineno", 0)
+        return (first, getattr(node, "end_lineno", None) or first)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in _SDK_SCHEDULE_METHODS or any(
+                kw.arg == _SDK_SCHEDULE_KWARG for kw in node.keywords
+            ):
+                spans.append(span(node))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                tname = (
+                    target.attr if isinstance(target, ast.Attribute)
+                    else getattr(target, "id", None)
+                )
+                if tname == _SDK_SCHEDULE_KWARG:
+                    spans.append(span(node))
+                    break
+    return spans
 
 #: The one sentence every finding ends with. It names the remedy rather than
 #: the suppression, because the alternative is that the next reader disables
@@ -370,6 +452,43 @@ def _note_ungraded(counts: dict, key: str, detail: str) -> None:
     """
     counts[key] += 1
     counts["ungraded"].append(detail)
+
+
+def _note_fallback(counts: dict, path: str, reason: str) -> None:
+    """Increment ``actions_context_fallback`` and record WHICH file fell back
+    and why. The count alone told a caller that some file in the diff was
+    graded by the weaker line-level scan without saying which, so the one
+    action it asks for — fix that file's syntax — could not be taken
+    (alpha-engine-config-I11289). Same shape as :func:`_note_ungraded`."""
+    counts["actions_context_fallback"] += 1
+    counts["fallback"].append(f"{path}: {reason}")
+
+
+def _sdk_schedule_is_real(
+    path: str,
+    touched: set,
+    root_path: Path | None,
+    read_file: Callable[[str], str | None] | None,
+) -> bool:
+    """Whether the SDK-schedule pre-filter hit on ``path`` names a real call
+    site the diff touched.
+
+    FAIL-CLOSED. ``True`` (report it ungraded) whenever the question cannot
+    be answered structurally: a non-Python source file, a head file that
+    cannot be read, or one that will not parse. ``False`` only when the head
+    file parsed and holds no schedule call site on any line the diff added —
+    the token was text, not syntax.
+    """
+    if not path.endswith(".py"):
+        return True
+    text = _read_head(path, root_path, read_file)
+    if text is None:
+        return True
+    try:
+        spans = parse_sdk_schedule_calls(text)
+    except SdkScheduleParseError:
+        return True
+    return any(first <= n <= last for first, last in spans for n in touched)
 
 
 def _grade_gha_crons(
@@ -605,6 +724,10 @@ def findings(
         # the diagnostics gap alpha-engine-config-I11289 hit: "1 schedule not
         # graded" over 150 commits, with no way to say which one.
         "ungraded": [],
+        # Named detail for every actions_context_fallback increment — see
+        # _note_fallback. The remedy the fallback line names ("fix the file's
+        # syntax") is unactionable without the file's name.
+        "fallback": [],
     }
     # Per-file, because a schedule is a BLOCK and the resources it names live
     # elsewhere in the same template.
@@ -679,13 +802,17 @@ def findings(
             continue
         text = _read_head(path, root_path, read_file)
         if text is None:
-            counts["actions_context_fallback"] += 1
+            _note_fallback(
+                counts, path,
+                "head file could not be read (absent from `--root`, or no "
+                "`read_file` supplied)",
+            )
             _grade_actions_by_line(path, texts, known, found, counts)
             continue
         try:
             values = resource_map_mod.parse_action_values(text)
-        except resource_map_mod.ActionParseError:
-            counts["actions_context_fallback"] += 1
+        except resource_map_mod.ActionParseError as exc:
+            _note_fallback(counts, path, str(exc))
             _grade_actions_by_line(path, texts, known, found, counts)
             continue
         _grade_actions_structurally(path, touched, values, known, found, counts)
@@ -717,7 +844,13 @@ def findings(
             # ungraded schedule would put a NOT GRADED line on most Python PRs,
             # and a signal that fires on everything is read as firing on
             # nothing.
-            if any(_SDK_SCHEDULE.search(line) for line in texts):
+            #
+            # The pre-filter hit is confirmed against the head file's SYNTAX
+            # before it is reported: the same four tokens are ordinary text
+            # in any module that searches for them, this one included.
+            if any(_SDK_SCHEDULE.search(line) for line in texts) and _sdk_schedule_is_real(
+                path, touched, root_path, read_file
+            ):
                 _note_ungraded(
                     counts, "ungraded_schedules",
                     f"{path}: names an SDK schedule call site "

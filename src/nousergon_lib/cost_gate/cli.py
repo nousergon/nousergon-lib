@@ -146,6 +146,10 @@ def main(argv: list | None = None) -> int:
             f"scan can false-positive on a Condition key or a bare component id "
             f"— fix the file's syntax to get context-aware grading back."
         )
+        # Named, not just counted: "fix the file's syntax" is unactionable
+        # when the message names no file (alpha-engine-config-I11289).
+        for detail in counts["fallback"]:
+            print(f"    ? {detail}")
 
     if not issues:
         print("\n0 findings. Every service this diff reaches has a budget line.")
