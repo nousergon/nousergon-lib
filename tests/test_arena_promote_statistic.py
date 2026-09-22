@@ -40,12 +40,12 @@ from nousergon_lib.arena.engine import ArenaConfigError
 
 
 def _config(**kw) -> ArenaConfig:
-    base = dict(
-        slot="research",
-        slot_kind="producer",
-        benchmark="population",
-        promote_evidence=EVIDENCE_POINT,
-    )
+    base = {
+        "slot": "research",
+        "slot_kind": "producer",
+        "benchmark": "population",
+        "promote_evidence": EVIDENCE_POINT,
+    }
     base.update(kw)
     return ArenaConfig(**base)
 
