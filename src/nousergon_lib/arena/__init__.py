@@ -60,6 +60,8 @@ from .arms import (
 from .confseq import ConfSeqBound, confidence_sequence
 from .engine import (
     ARENA_CYCLE_SCHEMA_VERSION,
+    STATISTIC_INFORMATION_RATIO,
+    STATISTIC_MEAN_DIFF,
     ArenaConfig,
     ArenaCycle,
     ArmExclusion,
@@ -72,6 +74,7 @@ from .engine import (
     assert_training_integrity,
     decide_pointer,
     evaluate_retirements,
+    promotion_statistic,
     run_cycle,
 )
 from .ladder import LadderRung, ScoreLadder, build_ladder
@@ -114,6 +117,7 @@ __all__ = [
     "DEFAULT_SCORE_FLOOR",
     "EVIDENCE_ANYTIME_VALID",
     "EVIDENCE_POINT",
+    "promotion_statistic",
     "ImmutableArmError",
     "LadderRung",
     "PairVerdict",
@@ -122,6 +126,8 @@ __all__ = [
     "PointerDecision",
     "RetirementVerdict",
     "ScoreLadder",
+    "STATISTIC_INFORMATION_RATIO",
+    "STATISTIC_MEAN_DIFF",
     "ServingPrecondition",
     "build_ladder",
     "confidence_sequence",
