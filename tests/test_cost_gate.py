@@ -1268,3 +1268,190 @@ def test_a_captured_policy_backup_json_is_not_a_new_grant(tmp_path):
         '{"Statement": [{"Action": "textract:DetectDocumentText"}]}\n'
     ))
     assert issues == []
+
+
+# -- an SDK schedule call site is SYNTAX, not a token ------------------------
+#
+# Refs alpha-engine-config-I11289. The gate reported one permanently
+# unresolvable schedule over 150 commits of this repo's own history, and the
+# file it could not grade was THE GRADER'S OWN SOURCE: `grade.py` names
+# `create_schedule`/`put_rule`/`put_targets`/`ScheduleExpression=` because
+# those are the patterns it searches FOR, and the scanner matched its own
+# pattern list. Same class as the `Condition`-key, component-id and
+# `tag:Name` false positives above — a token graded outside the context that
+# gives it meaning — so it is fixed the same way, structurally, and NOT with
+# a path exclusion: a hardcoded `grade.py` denylist would blind the gate to a
+# real schedule added to that file and would not cover the next module that
+# names these strings.
+
+
+_GRADE_PY = "src/nousergon_lib/cost_gate/grade.py"
+_GRADE_PY_SOURCE = Path(gate.__file__).read_text()
+
+
+def test_the_graders_own_pattern_list_is_not_a_schedule_call_site():
+    """The regression that closes I11289's unidentified schedule: `grade.py`'s
+    REAL source, added in full, grades with zero NOT-GRADED schedules. Uses
+    the live file rather than a copy of its pattern list, so it keeps holding
+    as that list changes."""
+    issues, counts = gate.findings(
+        _whole_file_diff(_GRADE_PY, _GRADE_PY_SOURCE),
+        DOC, resource_map=RMAP,
+        read_file=lambda path: _GRADE_PY_SOURCE if path == _GRADE_PY else None,
+    )
+    assert counts["ungraded_schedules"] == 0
+    assert counts["ungraded"] == []
+    assert issues == []
+
+
+def test_a_real_put_rule_call_is_still_reported_ungraded(tmp_path):
+    """The fail-closed half: a genuine call site in a file that parses
+    perfectly is still NOT GRADED — its cadence and retry bound are not
+    readable from Python source. Narrowing what counts as a call site must
+    not narrow what happens to a real one."""
+    issues, counts = _graded(
+        tmp_path, "scripts/make_rule.py",
+        'import boto3\n'
+        'client = boto3.client("events")\n'
+        'client.put_rule(Name="x", ScheduleExpression="rate(1 hour)")\n',
+    )
+    assert counts["ungraded_schedules"] == 1
+    assert "scripts/make_rule.py" in counts["ungraded"][0]
+    assert issues == []  # `events` is budgeted; the client class is separate
+
+
+def test_a_bare_schedule_expression_assignment_is_still_a_call_site(tmp_path):
+    """The `ScheduleExpression\\s*=` branch of the pre-filter was written for an
+    assignment, not only a keyword argument. It keeps its meaning."""
+    _, counts = _graded(
+        tmp_path, "scripts/build.py", 'ScheduleExpression = "cron(0 3 * * ? *)"\n'
+    )
+    assert counts["ungraded_schedules"] == 1
+
+
+def test_a_schedule_token_only_in_a_docstring_is_not_a_call_site(tmp_path):
+    """The general case the self-match is one instance of: a module that
+    merely NAMES these tokens — a doc example, a test fixture, a second
+    grader — creates no schedule."""
+    issues, counts = _graded(
+        tmp_path, "scripts/docs.py",
+        '"""Create one with `put_rule(ScheduleExpression=...)`."""\n'
+        'PATTERNS = ("create_schedule", "update_schedule", "put_targets")\n',
+    )
+    assert counts["ungraded_schedules"] == 0
+    assert issues == []
+
+
+def test_a_python_file_that_will_not_parse_is_ungraded_not_passed(tmp_path):
+    """FAIL-CLOSED. Syntax this cannot read must not read as "no schedule
+    here" — the same rule the Action class applies on a parse failure."""
+    _, counts = _graded(
+        tmp_path, "scripts/broken.py", 'def f(:\n    put_rule(ScheduleExpression="x")\n'
+    )
+    assert counts["ungraded_schedules"] == 1
+
+
+def test_a_python_head_file_that_cannot_be_read_is_ungraded_not_passed():
+    """No `--root` and no `read_file`, so the question cannot be answered at
+    all. Fail-closed, exactly as before this fix."""
+    _, counts = gate.findings(
+        _diff("scripts/x.py", '    c.create_schedule(ScheduleExpression="x")'),
+        DOC, resource_map=RMAP,
+    )
+    assert counts["ungraded_schedules"] == 1
+
+
+def test_a_call_site_the_diff_did_not_touch_is_not_regraded(tmp_path):
+    """The span check is the same one the schedule and Action classes use: a
+    diff that adds an unrelated line to a file holding a call site elsewhere
+    has added no schedule."""
+    target = tmp_path / "scripts/m.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        'import boto3\n'
+        'c = boto3.client("events")\n'
+        'c.put_rule(Name="x", ScheduleExpression="rate(1 hour)")\n'
+        '# unrelated\n'
+    )
+    diff = (
+        "diff --git a/scripts/m.py b/scripts/m.py\n"
+        "--- a/scripts/m.py\n+++ b/scripts/m.py\n"
+        "@@ -3,0 +4 @@\n+# the real put_rule(ScheduleExpression=...) call is on line 3, untouched\n"
+    )
+    _, counts = gate.findings(diff, DOC, resource_map=RMAP, root=tmp_path)
+    assert counts["ungraded_schedules"] == 0
+
+
+def test_parse_sdk_schedule_calls_refuses_unparseable_python():
+    with pytest.raises(gate.SdkScheduleParseError):
+        gate.parse_sdk_schedule_calls("def f(:\n")
+
+
+# -- the FALLBACK line names the file too ------------------------------------
+#
+# Refs alpha-engine-config-I11289. The fallback notice told a caller that some
+# JSON/YAML file in the diff had been graded by the weaker line-level scan and
+# named no file, so the one action it asks for — fix that file's syntax —
+# could not be taken. Measured live against a `krepis` replay, which printed
+# `FALLBACK 1 JSON/YAML file(s)` and nothing else.
+
+
+def test_the_fallback_detail_names_the_file_in_its_counts():
+    issues, counts = gate.findings(
+        _diff("infra/broken.json", '  "Action": "textract:DetectDocumentText",'),
+        DOC, resource_map=RMAP,
+        read_file=lambda path: '{"Action": [oops\n',
+    )
+    assert counts["actions_context_fallback"] == 1
+    assert "infra/broken.json" in counts["fallback"][0]
+    assert len(issues) == 1  # fail-closed: the line scan still grades it
+
+
+def test_an_unreadable_head_file_is_named_in_the_fallback_detail():
+    _, counts = gate.findings(
+        _diff("infra/gone.json", '  "Action": "sts:AssumeRole",'),
+        DOC, resource_map=RMAP,
+    )
+    assert counts["actions_context_fallback"] == 1
+    assert "infra/gone.json" in counts["fallback"][0]
+    assert "could not be read" in counts["fallback"][0]
+
+
+def test_the_cli_prints_the_fallback_file_not_just_a_count(tmp_path, capsys):
+    broken = tmp_path / "infra" / "broken.json"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text('{"Action": [oops\n')
+    d = tmp_path / "x.diff"
+    d.write_text(_diff("infra/broken.json", '  "Action": "textract:DetectDocumentText",'))
+    cli.main(["--diff-file", str(d), "--root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert "FALLBACK" in out
+    # Named on its OWN line under the FALLBACK notice — the finding text also
+    # contains the path, so asserting only "the path appears somewhere" would
+    # pass on the pre-fix output that named no file at all.
+    assert "    ? infra/broken.json" in out
+
+
+# -- the real-world shapes of the component-id false positive -----------------
+#
+# Refs alpha-engine-config-I11285. The synthetic fixture above uses an
+# all-lowercase id (`pipeline:daily-close`), which does not even match the
+# entitlement regex — it proves the pass is clean without exercising the
+# disambiguation. These use the LITERAL strings from `nousergon-data`'s
+# generated registry rows, whose suffix IS capitalised and therefore does
+# match: `ne-weekly-freshness-pipeline:DataPhase1`, both as a bare YAML
+# scalar and quoted inside a prose field.
+
+
+def test_the_real_registry_row_component_id_shape_is_not_an_action(tmp_path):
+    issues, counts = _graded(
+        tmp_path, "registry.d/data-collector-d09-signal-returns.yaml",
+        "component_id: data-collector-d09-signal-returns\n"
+        "owning_repo: nousergon-data\n"
+        "origin: ne-weekly-freshness-pipeline:DataPhase1\n"
+        "log_location_reason: Owning pipeline 'ne-weekly-freshness-pipeline:DataPhase1'\n"
+        "  (plan 4.4).\n"
+        "alert_channel: sns:alpha-engine-alerts\n",
+    )
+    assert issues == []
+    assert counts["actions_context_fallback"] == 0
