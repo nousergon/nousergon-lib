@@ -56,7 +56,7 @@ def _window(scores_a, scores_b) -> PairedWindow:
         arm_a="a",
         arm_b="b",
         dates=dates,
-        diffs=tuple(x - y for x, y in zip(scores_a, scores_b, strict=True)),
+        diffs=tuple(x - y for x, y in zip(scores_a, scores_b)),
         scores_a=tuple(scores_a),
         scores_b=tuple(scores_b),
     )

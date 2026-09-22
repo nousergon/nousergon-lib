@@ -832,11 +832,17 @@ def _promotable(
         if c.status == "measured" and c.window.measurable and _age_eligible(config, c.window)
     ]
     if config.promote_evidence == EVIDENCE_POINT:
-        return [
-            (promotion_statistic(config, c.window), c)
-            for c in eligible
-            if _leads(config, c.window)
-        ]
+        # Built as a loop rather than a comprehension so the None filter and
+        # the rank key come from ONE evaluation of the statistic. A
+        # comprehension calling it twice would be two evaluations of a value
+        # that must agree, which is the shape this function's docstring
+        # promises cannot happen.
+        ranked: list[tuple[float, Comparison]] = []
+        for c in eligible:
+            value = promotion_statistic(config, c.window)
+            if value is not None and value > 0:
+                ranked.append((value, c))
+        return ranked
     return [(c.bound.lower, c) for c in eligible if c.bound is not None and c.bound.supported]
 
 
