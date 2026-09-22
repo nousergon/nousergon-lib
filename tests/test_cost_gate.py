@@ -34,6 +34,52 @@ DOC = gate.load_ssot()
 RMAP = crm.load()
 
 
+def _mapped_but_unbudgeted():
+    """Every prefix the resource map knows that the budget map does NOT.
+
+    DERIVED, never hardcoded. Two tests below need a CloudFormation type whose
+    billing service has no budget line, and the obvious move is to name one --
+    which is what this file used to do, with ``AWS::CloudFront::Distribution``.
+    That coupling breaks the moment the named service gets a budget line, and
+    it broke exactly that way on 2026-09-22: the private SSoT gave
+    ``cloudfront`` a $0.00 line after the pre-merge gate raised five true
+    findings on a live, enabled distribution nothing budgeted, and the
+    auto-opened republish PR went red on these two tests alone.
+
+    The set is meant to SHRINK -- a budget line is the remedy this gate prints
+    -- so a fixture pinned to a member of it is a test that fails on success.
+    The same fix landed in the private twin
+    (``alpha-engine-config/scripts/test_check_diff_cost.py``) in the same pass;
+    this is the second call site of one defect, not a second defect.
+    """
+    budgeted = {
+        prefix
+        for provider in (DOC.get("providers") or {}).values()
+        for row in (provider.get("services") or {}).values()
+        for prefix in (row.get("iam_prefixes") or [])
+    }
+    free = set((DOC.get("capability_gate") or {}).get("free_prefixes") or {})
+    return {
+        cfn_type: prefix
+        for cfn_type, prefix in RMAP["resource_types"].items()
+        if prefix not in budgeted and prefix not in free
+    }
+
+
+#: One ``(CloudFormation type, billing prefix)`` whose service has no budget
+#: line, or ``None`` when every mapped service is budgeted -- a GOOD state, and
+#: the two tests that need this fixture skip loudly rather than fail.
+UNBUDGETED_FIXTURE = next(iter(sorted(_mapped_but_unbudgeted().items())), None)
+
+_NO_FIXTURE = (
+    "every mapped resource type now has a budget line, so there is no "
+    "unbudgeted service left to build this fixture from. That is the goal "
+    "state, not a failure -- but it means these two assertions are no longer "
+    "exercised by real data. Re-express them against a synthetic SSoT if the "
+    "set stays empty."
+)
+
+
 def _diff(path: str, *added: str) -> str:
     body = "\n".join(f"+{ln}" for ln in added)
     return (
@@ -237,14 +283,18 @@ def test_an_unmapped_resource_type_is_a_finding():
 
 
 def test_a_mapped_type_on_an_unbudgeted_service_is_a_finding():
-    """``cloudfront`` is mapped deliberately even without a budget line — so
-    the message names the real remedy rather than reading as a map defect."""
+    """A type can be mapped and still have no budget line — and when it is, the
+    message names the real remedy rather than reading as a map defect. The
+    fixture is DERIVED from the live maps; see ``_mapped_but_unbudgeted``."""
+    if UNBUDGETED_FIXTURE is None:
+        pytest.skip(_NO_FIXTURE)
+    cfn_type, prefix = UNBUDGETED_FIXTURE
     issues, _ = gate.findings(
-        _diff("infra/x.yaml", "    Type: AWS::CloudFront::Distribution"),
+        _diff("infra/x.yaml", f"    Type: {cfn_type}"),
         DOC, resource_map=RMAP,
     )
     assert len(issues) == 1
-    assert "bills to `cloudfront`" in issues[0]
+    assert f"bills to `{prefix}`" in issues[0]
 
 
 def test_a_free_resource_type_passes():
@@ -346,10 +396,13 @@ def test_a_schedule_retrying_above_the_declared_maximum_is_a_finding(tmp_path):
 def test_a_schedule_targeting_an_unbudgeted_service_is_a_finding(tmp_path):
     """The target is a ``!GetAtt`` at a logical id declared elsewhere in the
     template — which is why this class is graded structurally."""
-    issues, _ = _graded(tmp_path, "infra/s.yaml", _template("""
+    if UNBUDGETED_FIXTURE is None:
+        pytest.skip(_NO_FIXTURE)
+    cfn_type, prefix = UNBUDGETED_FIXTURE
+    issues, _ = _graded(tmp_path, "infra/s.yaml", _template(f"""
   Edge:
-    Type: AWS::CloudFront::Distribution
-    Properties: {}
+    Type: {cfn_type}
+    Properties: {{}}
   Sched:
     Type: AWS::Scheduler::Schedule
     Properties:
@@ -359,7 +412,7 @@ def test_a_schedule_targeting_an_unbudgeted_service_is_a_finding(tmp_path):
         RetryPolicy:
           MaximumRetryAttempts: 1
 """))
-    assert any("targets a `cloudfront` resource" in i for i in issues)
+    assert any(f"targets a `{prefix}` resource" in i for i in issues)
 
 
 def test_an_events_rule_target_is_graded_through_a_ref(tmp_path):
