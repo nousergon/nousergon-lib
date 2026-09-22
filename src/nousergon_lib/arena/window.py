@@ -30,7 +30,7 @@ a zero score or by omission from an expectation set.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -212,6 +212,26 @@ class PairedWindow:
     scores_a: tuple[float, ...]
     scores_b: tuple[float, ...]
     unmeasurable_reason: str | None = None
+    #: Each arm's own information ratio ON THIS WINDOW — see
+    #: :func:`_information_ratio`. STORED rather than computed on demand
+    #: because :meth:`to_dict` emits only aggregates and :meth:`from_dict`
+    #: therefore has no per-date series to recompute them from: a reader
+    #: reconstructing a cycle must get back the ratio that DECIDED it, not a
+    #: null standing in for a number the artifact actually carried.
+    #:
+    #: Left as None by a caller, they are derived from ``scores_a``/``scores_b``
+    #: in ``__post_init__``, so every construction from real per-date data is
+    #: correct by construction and no call site can forget to pass them.
+    information_ratio_a: float | None = None
+    information_ratio_b: float | None = None
+
+    def __post_init__(self) -> None:
+        # Only fills what the caller left unset. `from_dict` passes the stored
+        # values with empty score tuples, and must keep them.
+        if self.information_ratio_a is None and self.scores_a:
+            object.__setattr__(self, "information_ratio_a", _information_ratio(self.scores_a))
+        if self.information_ratio_b is None and self.scores_b:
+            object.__setattr__(self, "information_ratio_b", _information_ratio(self.scores_b))
 
     @property
     def measurable(self) -> bool:
@@ -243,6 +263,25 @@ class PairedWindow:
             )
         return sum(self.diffs) / len(self.diffs)
 
+    @property
+    def ir_diff(self) -> float | None:
+        """``information_ratio_a - information_ratio_b``, or None when either
+        leg is unestimable.
+
+        WHY A SLOT WOULD DECIDE ON THIS. When arms in a slot are allowed
+        DIFFERENT widths on purpose — the "what does depth cost?" experiment —
+        a raw mean selects for concentration rather than skill, because mean
+        alpha per name declines with depth whenever a ranking carries any
+        signal. IR ~= IC x sqrt(breadth) prices that: a narrow arm must beat a
+        wider one by enough to pay for the dispersion its concentration bought.
+
+        None rather than a signed default: an arm whose IR cannot be estimated
+        has not lost the comparison, it has not been in one, and a slot ranking
+        on this must be able to tell the two apart.
+        """
+        a, b = self.information_ratio_a, self.information_ratio_b
+        return None if a is None or b is None else a - b
+
     def to_dict(self) -> dict[str, object]:
         return {
             "arm_a": self.arm_a,
@@ -252,6 +291,12 @@ class PairedWindow:
             "start_date": self.start_date,
             "end_date": self.end_date,
             "mean_diff": self.mean_diff if self.measurable else None,
+            # Emitted on EVERY window, whatever the slot decided on, so a
+            # reader can see the statistic that did not decide alongside the
+            # one that did.
+            "information_ratio_a": self.information_ratio_a if self.measurable else None,
+            "information_ratio_b": self.information_ratio_b if self.measurable else None,
+            "ir_diff": self.ir_diff if self.measurable else None,
             "unmeasurable_reason": self.unmeasurable_reason,
         }
 
@@ -298,6 +343,11 @@ class PairedWindow:
                 scores_b=(),
                 unmeasurable_reason=str(unmeasurable_reason),
             )
+        # The stored ratios, restored verbatim. They cannot be recomputed here
+        # — `to_dict` emits no per-date scores — and a reader reconstructing a
+        # cycle must get back the number that DECIDED the pointer.
+        ir_a = data.get("information_ratio_a")
+        ir_b = data.get("information_ratio_b")
         n_dates = int(data["n_dates"])
         start_date = data.get("start_date")
         end_date = data.get("end_date")
@@ -317,7 +367,27 @@ class PairedWindow:
             scores_a=(),
             scores_b=(),
             unmeasurable_reason=None,
+            information_ratio_a=None if ir_a is None else float(ir_a),
+            information_ratio_b=None if ir_b is None else float(ir_b),
         )
+
+
+
+def _information_ratio(scores: Sequence[float]) -> float | None:
+    """Mean over SAMPLE standard deviation, or None where neither is defined.
+
+    Deliberately NOT annualised. Annualising assumes independent periods, and
+    a slot's cohort dates routinely overlap — scaling by sqrt(periods) there
+    would report a ratio inflated by the overlap rather than by skill.
+    """
+    n = len(scores)
+    if n < 2:
+        return None
+    mean = sum(scores) / n
+    var = sum((x - mean) ** 2 for x in scores) / (n - 1)
+    if var <= 0:
+        return None
+    return mean / (var ** 0.5)
 
 
 def pair_on_common_window(

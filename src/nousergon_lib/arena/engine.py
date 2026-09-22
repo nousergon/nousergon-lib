@@ -117,6 +117,15 @@ ARENA_CYCLE_SCHEMA_VERSION = 1
 #: The default benchmark: the population the arm selected FROM.
 BENCHMARK_POPULATION = "population"
 
+#: The pointer ranks on the mean paired difference. Every slot's behaviour
+#: before ``ArenaConfig.promote_statistic`` existed, and still the default.
+STATISTIC_MEAN_DIFF = "mean_diff"
+
+#: The pointer ranks on the difference of the two arms' information ratios over
+#: the pair's common window. For a slot whose arms carry different widths on
+#: purpose — see ``ArenaConfig.promote_statistic``.
+STATISTIC_INFORMATION_RATIO = "information_ratio"
+
 #: Slot kinds whose job is to beat the population they drew from, and which
 #: therefore may never be graded against SPY. Found 2026-08-17: arms were
 #: graded against SPY when SPY trailed the population they were drawn from by
@@ -231,6 +240,19 @@ class ArenaConfig:
     #: under ``point``, so the evidence the sequence would have required stays
     #: on the record even when it did not decide.
     promote_evidence: str = EVIDENCE_ANYTIME_VALID
+    #: WHICH statistic the pointer ranks on, orthogonal to the evidence bar
+    #: above. ``mean_diff`` (the default, and every slot's behaviour before
+    #: this field existed) ranks on the mean paired difference.
+    #: ``information_ratio`` ranks on the difference of the two arms' own
+    #: information ratios over the pair's common window.
+    #:
+    #: A slot needs the second exactly when its arms carry DIFFERENT WIDTHS on
+    #: purpose. A raw mean then selects for concentration rather than skill —
+    #: mean alpha per name declines with depth whenever a ranking carries any
+    #: signal — so the narrowest arm wins a comparison it did not earn. IR
+    #: prices the concentration (IR ~= IC x sqrt(breadth)).
+    #: `alpha-engine-config-I11403`, for crucible-research's `research` slot.
+    promote_statistic: str = STATISTIC_MEAN_DIFF
     #: Never retire below this many active arms. Two arms are the bare
     #: minimum for a comparison to exist at all; three leaves slack for one
     #: arm to miss a cycle or fail a serving precondition and still leave a
@@ -282,6 +304,29 @@ class ArenaConfig:
                 "promote_evidence must be 'point' or 'anytime_valid'; got "
                 f"{self.promote_evidence!r}"
             )
+        if self.promote_statistic not in (STATISTIC_MEAN_DIFF, STATISTIC_INFORMATION_RATIO):
+            raise ArenaConfigError(
+                "promote_statistic must be 'mean_diff' or 'information_ratio'; "
+                f"got {self.promote_statistic!r}"
+            )
+        if (
+            self.promote_statistic == STATISTIC_INFORMATION_RATIO
+            and self.promote_evidence != EVIDENCE_POINT
+        ):
+            raise ArenaConfigError(
+                f"slot {self.slot!r} declares promote_statistic="
+                f"{STATISTIC_INFORMATION_RATIO!r} with promote_evidence="
+                f"{self.promote_evidence!r}. The anytime-valid sequence is a "
+                "bound on the MEAN of bounded per-date differences "
+                "(champion-challenger-policy.md §5.0); it says nothing about a "
+                "difference of two ratios, and applying it there would report a "
+                "coverage guarantee the construction does not have. A slot "
+                "ranking on the information ratio must declare "
+                f"promote_evidence={EVIDENCE_POINT!r}, whose bar is the point "
+                "estimate it actually ranks on. The sequence is still computed "
+                "and emitted on mean_diff for every comparison, so the evidence "
+                "it would have required stays on the record."
+            )
         if self.slot_kind in SELECTION_SLOT_KINDS and self.benchmark != BENCHMARK_POPULATION:
             raise ArenaConfigError(
                 f"slot {self.slot!r} is a selection-stage slot ({self.slot_kind}) and must be graded "
@@ -311,6 +356,7 @@ class ArenaConfig:
             "grace_weeks": self.grace_weeks,
             "promote_min_weeks": self.promote_min_weeks,
             "promote_evidence": self.promote_evidence,
+            "promote_statistic": self.promote_statistic,
             "min_active_arms": self.min_active_arms,
             "retired_trailing_cycles": self.retired_trailing_cycles,
             "retire_evidence": self.retire_evidence,
@@ -351,6 +397,11 @@ class ArenaConfig:
             grace_weeks=int(data["grace_weeks"]),
             promote_min_weeks=int(data["promote_min_weeks"]),
             promote_evidence=str(data["promote_evidence"]),
+            # `.get` with the pre-field default: a cycle recorded before
+            # `promote_statistic` existed was decided on the mean paired
+            # difference, and reconstructing it as anything else would
+            # misreport why that pointer moved.
+            promote_statistic=str(data.get("promote_statistic", STATISTIC_MEAN_DIFF)),
             min_active_arms=int(data["min_active_arms"]),
             retired_trailing_cycles=int(data["retired_trailing_cycles"]),
             retire_evidence=str(data["retire_evidence"]),
@@ -666,6 +717,29 @@ class ArenaCycle:
         )
 
 
+def promotion_statistic(config: ArenaConfig, window: PairedWindow) -> float | None:
+    """The quantity ``config`` ranks the pointer on, for one pair's window.
+
+    ONE function, so eligibility and ranking can never be computed from two
+    different statistics — the property `_promotable`'s docstring already
+    claimed and which a second call site would quietly break.
+
+    ``None`` means "not estimable on this window", which is NOT a loss: an arm
+    whose information ratio cannot be formed (one date, or a constant series)
+    has not lost the comparison, it has not been in one. Callers must filter
+    on None before comparing.
+    """
+    if config.promote_statistic == STATISTIC_INFORMATION_RATIO:
+        return window.ir_diff
+    return window.mean_diff
+
+
+def _leads(config: ArenaConfig, window: PairedWindow) -> bool:
+    """Does the challenger lead the incumbent on the statistic that decides?"""
+    value = promotion_statistic(config, window)
+    return value is not None and value > 0
+
+
 def _age_eligible(config: ArenaConfig, window: PairedWindow) -> bool:
     """Has this pair been measured together for long enough to promote on?
 
@@ -693,16 +767,51 @@ def _measured_reason(
             f"{config.promote_min_weeks}; measured but not promotable this cycle"
         )
     if config.promote_evidence == EVIDENCE_POINT:
+        if promotion_statistic(config, window) is None:
+            return (
+                f"{config.promote_statistic} is not estimable on this window "
+                f"({window.n_dates} paired date(s)) — measured, but there is no "
+                "point estimate to rank on"
+            )
         return (
-            "leads the incumbent on point estimate (promote_evidence=point)"
-            if window.mean_diff > 0
-            else "does not lead the incumbent on point estimate (promote_evidence=point)"
+            f"leads the incumbent on point estimate of {config.promote_statistic} "
+            "(promote_evidence=point)"
+            if _leads(config, window)
+            else f"does not lead the incumbent on point estimate of "
+            f"{config.promote_statistic} (promote_evidence=point)"
         )
     return (
         "lead supported by the anytime-valid sequence"
         if bound.supported
         else "lead not supported by the anytime-valid sequence"
     )
+
+
+def _lead_margin(config: ArenaConfig, window: PairedWindow) -> float:
+    """The winner's margin, in the units the decision was taken in.
+
+    Reported as the DECIDING statistic rather than always as ``mean_diff``: a
+    pointer that moved on an information-ratio lead and whose record states a
+    mean-difference margin is a record that explains the wrong decision
+    (`principles.md` §2.1 — reconstructable from durable artifacts alone).
+    """
+    value = promotion_statistic(config, window)
+    return window.mean_diff if value is None else value
+
+
+def _fallback_rank_key(config: ArenaConfig, comparison: Comparison) -> float:
+    """The ordering key for the unfit-incumbent fallback branch.
+
+    ``-inf`` for a comparison whose deciding statistic is not estimable, so it
+    sorts BELOW every comparison that has one but stays a candidate: this
+    branch must yield an arm — the incumbent cannot serve — and dropping the
+    unestimable ones could empty it. Using zero instead would rank an
+    unmeasured arm above a genuinely losing one.
+    """
+    if config.promote_evidence == EVIDENCE_POINT:
+        value = promotion_statistic(config, comparison.window)
+        return float("-inf") if value is None else value
+    return comparison.bound.lower if comparison.bound else float("-inf")
 
 
 def _promotable(
@@ -712,9 +821,10 @@ def _promotable(
 
     Two bars, both hard: the paired-week age (``promote_min_weeks``) and the
     configured evidence mode. The rank key is the quantity the mode decided
-    on — the confidence-sequence lower bound under ``anytime_valid``, the
-    mean paired difference under ``point`` — so that ranking and eligibility
-    can never be computed from two different statistics.
+    on — the confidence-sequence lower bound under ``anytime_valid``, and
+    under ``point`` whatever ``config.promote_statistic`` names, resolved
+    through :func:`promotion_statistic` so that ranking and eligibility can
+    never be computed from two different statistics.
     """
     eligible = [
         c
@@ -722,7 +832,17 @@ def _promotable(
         if c.status == "measured" and c.window.measurable and _age_eligible(config, c.window)
     ]
     if config.promote_evidence == EVIDENCE_POINT:
-        return [(c.window.mean_diff, c) for c in eligible if c.window.mean_diff > 0]
+        # Built as a loop rather than a comprehension so the None filter and
+        # the rank key come from ONE evaluation of the statistic. A
+        # comprehension calling it twice would be two evaluations of a value
+        # that must agree, which is the shape this function's docstring
+        # promises cannot happen.
+        ranked: list[tuple[float, Comparison]] = []
+        for c in eligible:
+            value = promotion_statistic(config, c.window)
+            if value is not None and value > 0:
+                ranked.append((value, c))
+        return ranked
     return [(c.bound.lower, c) for c in eligible if c.bound is not None and c.bound.supported]
 
 
@@ -737,8 +857,8 @@ def _hold_reason(config: ArenaConfig, comparisons: Sequence[Comparison]) -> str:
     measured = [c for c in comparisons if c.status == "measured" and c.window.measurable]
     too_young = [c for c in measured if not _age_eligible(config, c.window)]
     mode = (
-        "no age-eligible challenger leads the incumbent on point estimate "
-        "(promote_evidence=point)"
+        "no age-eligible challenger leads the incumbent on point estimate of "
+        f"{config.promote_statistic} (promote_evidence=point)"
         if config.promote_evidence == EVIDENCE_POINT
         else "no age-eligible challenger's lead is supported by the anytime-valid sequence"
     )
@@ -892,9 +1012,7 @@ def decide_pointer(
         # PREFERENCE and everywhere else as a veto.
         candidates = supported or [
             (
-                c.window.mean_diff
-                if config.promote_evidence == EVIDENCE_POINT
-                else (c.bound.lower if c.bound else float("-inf")),
+                _fallback_rank_key(config, c),
                 c,
             )
             for c in comparisons
@@ -994,7 +1112,10 @@ def decide_pointer(
         moved=winner.challenger != incumbent,
         status="decided",
         reason=(
-            f"{winner.challenger} leads {incumbent} by {winner.window.mean_diff:.6g} over {winner.window.n_dates} paired date(s) ({winner.window.weeks} week(s)); "
+            f"{winner.challenger} leads {incumbent} by "
+            f"{_lead_margin(config, winner.window):.6g} "
+            f"{config.promote_statistic} over {winner.window.n_dates} paired "
+            f"date(s) ({winner.window.weeks} week(s)); "
             f"decided on the {evidence} "
             f"(promote_evidence={config.promote_evidence}, promote_min_weeks={config.promote_min_weeks})"
         ),
