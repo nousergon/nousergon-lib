@@ -60,6 +60,9 @@ providers:
         - ssm
         - appconfig
         - appconfigdata
+      Amazon CloudFront:
+        iam_prefixes:
+        - cloudfront
       Amazon DynamoDB:
         iam_prefixes:
         - dynamodb
