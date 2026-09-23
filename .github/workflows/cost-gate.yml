@@ -3,25 +3,27 @@ name: cost-gate
 # alpha-engine-config-I11228 deliverable 2 — pre-merge cost gate.
 #
 # Runs `nousergon-cost-gate` (nousergon_lib.cost_gate, nousergon-lib
-# v0.124.142) over the PR's diff: a change that adds a billable capability,
+# v0.124.153) over the PR's diff: a change that adds a billable capability,
 # an always-on resource of an unmapped type, or a schedule with no bounded
 # retry policy fails here rather than after it has spent. Exit 1 = findings,
 # exit 2 = could not grade; both fail the job, because "the gate could not
 # run" must never look like "the gate ran clean".
 #
-# --warn-only: replay over the last 150 commits on main returned 0 findings
-# but could not read one schedule's definition (NOT GRADED — unknown, not
-# approved). That falls short of the clean bar for blocking adoption, so
-# this starts warn-only and flips to blocking once a clean replay confirms
-# the schedule resolves.
+# BLOCKING since 2026-09-23. It adopted in observe mode because a replay
+# over the last 150 commits on main returned 0 findings but could not read
+# one schedule's definition (NOT GRADED — unknown, not approved). That
+# "schedule" was the grader's own pattern list in cost_gate/grade.py; PR #441
+# made a schedule call site a Python-AST match, not a text match. Re-measured
+# 2026-09-23 with the v0.124.153 tag over origin/main~150..origin/main:
+# 0 findings, 0 NOT GRADED (alpha-engine-config-I11289).
 #
 # --repo-visibility public: this repo is public, so its Actions crons are
 # free/unlimited minutes and must not be graded as spend. (Also: this is the
 # repo that PUBLISHES the gate itself — grading it with the RELEASED
-# v0.124.142 tag, not the local worktree, is not circular.)
+# v0.124.153 tag, not the local worktree, is not circular.)
 #
 # The gate is installed from nousergon-lib in ITS OWN step, pinned to the
-# v0.124.142 tag with --no-deps, deliberately isolated from this repo's own
+# v0.124.153 tag with --no-deps, deliberately isolated from this repo's own
 # version (this IS that repo — a self-referential pin bump is a separate,
 # guarded change and not part of this PR).
 #
@@ -90,10 +92,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install cost gate (nousergon-lib v0.124.142 released tag, isolated from the local worktree)
+      - name: Install cost gate (nousergon-lib v0.124.153 released tag, isolated from the local worktree)
         run: |
           set -euo pipefail
-          pip install --quiet --no-deps "git+https://github.com/nousergon/nousergon-lib@v0.124.142"
+          pip install --quiet --no-deps "git+https://github.com/nousergon/nousergon-lib@v0.124.153"
           pip install --quiet pyyaml
 
       - name: Run cost gate
@@ -103,7 +105,7 @@ jobs:
             --base "${{ steps.base.outputs.base }}" \
             --head HEAD \
             --root . \
-            --repo-visibility public --warn-only
+            --repo-visibility public
 
   # Alert (Telegram) on genuine post-merge failure of this workflow on the
   # default branch. Reusable workflow + transport in this repo. Mirrors the
