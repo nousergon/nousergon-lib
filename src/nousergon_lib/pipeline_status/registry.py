@@ -104,6 +104,9 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForEvaluatorOptimize": "EvaluatorOptimize",
     "WaitForSaturdayHealthCheck": "SaturdayHealthCheck",
     "WaitForWeeklySubstrateHealthCheck": "WeeklySubstrateHealthCheck",
+    # alpha-engine-config-I11312: the observe-mode on-spot preflight pass's
+    # poll companion rolls up into its dispatch row.
+    "WaitForWeeklyPreflightOnSpot": "WeeklyPreflightOnSpot",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
     # alpha-engine-config-I5758: ThinkTankCoverage moved off a direct
     # lambda:invoke (TimeoutSeconds 900 — the AWS Lambda MAXIMUM, which the
@@ -662,6 +665,29 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "recorded on both completion markers via $.weekly_preflight_blind_spot. "
         "A REQUIRED check that RUNS and finds a real violation is unaffected "
         "— that path hard-fails via has_violation.",
+    ),
+    # alpha-engine-config-I11312: the SECOND sf_preflight pass, run on the
+    # weekly box between SubstrateHealthGate and CheckShellRun, in OBSERVE
+    # mode (sf-pipeline-policy.md 7a) — it records a verdict and never halts.
+    "WeeklyPreflightOnSpot": ArtifactReason(
+        reason="Observe-mode on-spot preflight (alpha-engine-config-I11312) — "
+        "runs the sf_preflight checks WeeklyPreflight's Lambda profile cannot "
+        "reach (ArcticDB, repo collector modules, Polygon key) on the weekly "
+        "box after SubstrateHealthGate and before any stage is dispatched. "
+        "Never halts while in observe mode: a FAIL verdict or an unobserved "
+        "run is recorded on $.weekly_preflight_on_spot and announced by "
+        "PublishWeeklyPreflightOnSpotNotice, and the run proceeds. Its record "
+        "is an S3 JSON under health/weekly_preflight_on_spot/<run_date>/, "
+        "not a rendered page.",
+    ),
+    "PublishWeeklyPreflightOnSpotNotice": ArtifactReason(
+        reason="Observe-mode notice (alpha-engine-config-I11312) fired when "
+        "WeeklyPreflightOnSpot found a FAILING check or could not produce a "
+        "verdict. The run was NOT halted — sf-pipeline-policy.md 7a's "
+        "observe mode logs the verdict on a real surface without enforcing "
+        "it. Sets no degraded flag. No persisted artifact (the email IS the "
+        "surface); the verdict is on $.weekly_preflight_on_spot and in "
+        "health/weekly_preflight_on_spot/<run_date>/.",
     ),
     # config#1824 (2026-07-06): run-day gate mirroring the weekday
     # TradingDayGate (config#1430) — predictor Lambda action=
