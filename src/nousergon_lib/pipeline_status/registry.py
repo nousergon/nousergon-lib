@@ -150,6 +150,20 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     "WaitForCaptureSnapshot": "CaptureSnapshot",
     "WaitForEOD": "EODReconcile",
     "WaitForDailySubstrateHealthCheck": "DailySubstrateHealthCheck",
+    # All three SFs — alpha-engine-config-I11267 / I11269 (decoupled data
+    # cutover). NOT a poll companion: ``WaitForCollectionManifests`` is itself
+    # the substantive ``lambda:invoke`` Task (the collection-readiness probe),
+    # re-entered once per poll iteration, and it is a SPINE stage
+    # (PIPELINE_STAGE_ORDER / PENDING_DEFINITION_STAGES below). It is here only
+    # because every consumer's name-keyed guard
+    # (``test_wait_companions_in_json_are_in_wait_grouping`` in crucible-dashboard
+    # and nousergon-data) requires every ``WaitFor*`` state to have a row. It
+    # maps to ITSELF so the read layer's roll-up is the identity: one row under
+    # its own name and registry entry, spanning first poll entered -> last poll
+    # exited. Mapping it to any other parent would fold a spine stage into a
+    # row it is not, or (for the Pass/Choice states around it) drop the row
+    # entirely.
+    "WaitForCollectionManifests": "WaitForCollectionManifests",
 }
 
 
