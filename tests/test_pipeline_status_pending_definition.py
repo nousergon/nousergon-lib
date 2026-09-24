@@ -154,3 +154,51 @@ def test_a_cycle_missing_an_unmarked_stage_is_not_complete(new_stage_declared):
     )
     assert shape.verdict is not CycleVerdict.COMPLETED
     assert shape.stages_missing == (NEW,)
+
+
+# ── A spine stage named ``WaitFor*`` (alpha-engine-config-I11267 / I11269) ───
+#
+# Every consumer's name-keyed guard (``test_wait_companions_in_json_are_in_
+# wait_grouping`` in crucible-dashboard and nousergon-data) requires EVERY
+# ``WaitFor*`` state in a definition to have a WAIT_GROUPING row. A spine stage
+# that happens to carry that prefix (``WaitForCollectionManifests``, the
+# collection-readiness probe Task) therefore needs a row too — and the row has
+# to map to ITSELF, or the read layer folds a spine stage into some other row.
+
+
+def _wait_named_spine_stages() -> set[tuple[str, str]]:
+    return {
+        (pipeline, stage)
+        for pipeline, spine in PIPELINE_STAGE_ORDER.items()
+        for stage in spine
+        if stage.startswith("WaitFor")
+    }
+
+
+def test_there_is_a_wait_named_spine_stage_to_check():
+    """Non-vacuity: the guard below must have something to grade."""
+    assert ("ne-postclose-trading-pipeline", "WaitForCollectionManifests") in (
+        _wait_named_spine_stages()
+    )
+
+
+def test_every_wait_named_spine_stage_rolls_up_into_itself():
+    wrong = {
+        (pipeline, stage, registry.WAIT_GROUPING.get(stage))
+        for pipeline, stage in _wait_named_spine_stages()
+        if registry.WAIT_GROUPING.get(stage) != stage
+    }
+    assert not wrong, (
+        f"spine stages named WaitFor* must map to THEMSELVES in WAIT_GROUPING "
+        f"(absent fails every consumer's name-keyed wait-companion guard; any "
+        f"other parent folds a spine stage into a row it is not): {sorted(wrong, key=str)}"
+    )
+
+
+def test_a_definition_carrying_the_pending_wait_stage_passes_the_wait_companion_guard():
+    """The dashboard's guard, run over a definition that HAS the stage: every
+    ``WaitFor*`` state name must be a WAIT_GROUPING key, and every substantive
+    Task not rolled up must still have a registry entry."""
+    for pipeline, stage in _wait_named_spine_stages():
+        assert stage in registry.WAIT_GROUPING, f"{pipeline}:{stage}"
+        assert stage in registry.STATE_TO_ARCHIVE_PAGE, f"{pipeline}:{stage}"

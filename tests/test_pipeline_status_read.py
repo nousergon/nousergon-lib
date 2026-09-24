@@ -226,6 +226,28 @@ def test_materialize_tasks_absorbs_wait_companion_into_parent():
     assert row.duration_sec == pytest.approx(2400.0, abs=1.0)
 
 
+def test_materialize_tasks_self_mapped_spine_wait_stage_renders_as_one_row():
+    """alpha-engine-config-I11267: ``WaitForCollectionManifests`` is a spine
+    Task re-entered once per poll iteration, mapped to ITSELF in WAIT_GROUPING.
+    The roll-up must be the identity: one row, under its own name, spanning
+    first entered -> last exited."""
+    t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 5, 24, 9, 0, 2, tzinfo=timezone.utc)
+    t2 = datetime(2026, 5, 24, 9, 5, 2, tzinfo=timezone.utc)
+    t3 = datetime(2026, 5, 24, 9, 5, 4, tzinfo=timezone.utc)
+
+    events = [
+        _entered("WaitForCollectionManifests", t0),
+        _exited("WaitForCollectionManifests", t1),
+        _entered("WaitForCollectionManifests", t2),
+        _exited("WaitForCollectionManifests", t3),
+    ]
+    rows = _materialize_tasks(events)
+
+    assert [r.state_name for r in rows] == ["WaitForCollectionManifests"]
+    assert rows[0].duration_sec == pytest.approx(304.0, abs=1.0)
+
+
 def test_materialize_tasks_running_state_has_no_end():
     """A state with TaskStateEntered but no TaskStateExited renders as
     TaskStatus.RUNNING with no duration."""
