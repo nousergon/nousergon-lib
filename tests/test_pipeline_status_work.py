@@ -120,15 +120,18 @@ def test_real_failure_is_incomplete_and_names_the_stages_it_reached():
     assert o.verdict is WorkVerdict.INCOMPLETE
     assert o.reason == "execution_failed"
     assert o.should_alert
-    # 11/18, not 11/17: alpha-engine-config-I11267 added
-    # `WaitForCollectionManifests` to the weekly spine (declared PENDING
-    # ahead of the nousergon-data cutover PR) — the denominator moved by
-    # declaration; this execution cannot have entered a stage that does not
-    # exist in the live definition yet, so the numerator is unchanged.
-    assert o.stage_coverage == "11/18"
+    # 9/16: the spine is graded as declared NOW. alpha-engine-config-I11269
+    # (the decoupled data cutover) retired MorningEnrich/DataPhase1 from the
+    # weekly spine and landed WaitForCollectionManifests in their place. This
+    # 2026-08-15 execution entered both retired stages (they no longer count,
+    # in either direction) and could not have entered the new wait (it is
+    # missing, as it would be for any pre-cutover run).
+    assert o.stage_coverage == "9/16"
     assert "EvalRollingMean" in o.stages_entered
     assert "ParityParallel" in o.stages_missing
-    assert "MorningEnrich" in o.stages_entered
+    assert "WaitForCollectionManifests" in o.stages_missing
+    assert "MorningEnrich" not in o.stages_entered
+    assert "MorningEnrich" not in o.stages_missing
 
 
 def test_a_full_run_is_the_only_completed_verdict():
