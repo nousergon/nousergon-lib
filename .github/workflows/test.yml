@@ -134,7 +134,7 @@ jobs:
   notify-main-failure:
     needs: [test, pyright]
     if: ${{ failure() && github.ref == 'refs/heads/main' }}
-    uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@855687d6b264fa7539d27ce7bb4ed8588427c09d # main
+    uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@c8378fc9770cd3ea0e125d6229ecb97f52136c30 # main
     secrets: inherit
 
   # Rejects any dependency extra written with an underscore. pip <23.3 does not
