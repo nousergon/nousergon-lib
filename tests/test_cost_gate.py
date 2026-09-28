@@ -1250,16 +1250,19 @@ def test_an_action_value_in_yaml_form_is_still_graded(tmp_path):
     assert "sagemaker" in issues[0]
 
 
-def test_a_not_action_value_on_an_unbudgeted_prefix_is_still_a_finding(tmp_path):
+def test_a_deny_not_action_is_not_a_grant(tmp_path):
+    """A Deny grants nothing, whatever it names. Until I11674 its values were
+    graded as grants, which read `Deny` + `NotAction sagemaker:*` as a
+    sagemaker grant and missed that the ALLOW + NotAction shape is the one
+    that grants almost everything (see the I11674 tests below)."""
     issues, _ = _graded(tmp_path, "infra/policy.json", (
         '{\n'
         '  "Statement": [\n'
-        '    {"Effect": "Deny", "NotAction": "sagemaker:CreateEndpoint"}\n'
+        '    {"Effect": "Deny", "NotAction": "sagemaker:CreateEndpoint", "Resource": "*"}\n'
         '  ]\n'
         '}\n'
     ))
-    assert len(issues) == 1
-    assert "sagemaker" in issues[0]
+    assert issues == []
 
 
 def test_a_condition_next_to_a_real_unbudgeted_action_flags_only_the_action(tmp_path):
@@ -1508,3 +1511,205 @@ def test_the_real_registry_row_component_id_shape_is_not_an_action(tmp_path):
     )
     assert issues == []
     assert counts["actions_context_fallback"] == 0
+
+
+# -- IAM semantics: wildcards, NotAction, globs, standing denies (I11674) -----
+#
+# The audit's public-gate counterexamples. On the parent commit each graded
+# `[]` with actions=1: `Action: "*"`, `Allow` + `NotAction: iam:*`, and
+# `codebuild:StartBuild` under a free prefix whose declaration covers two
+# reads only. The semantics mirror the private resolver in alpha-engine-config
+# `scripts/check_capability_budget_coverage.py`, not a second invention.
+
+
+def _policy(*statements: str) -> str:
+    return '{\n  "Statement": [\n' + ",\n".join(
+        f"    {st}" for st in statements) + "\n  ]\n}\n"
+
+
+def _with(doc: dict, **gate_fields) -> dict:
+    import copy
+    out = copy.deepcopy(doc)
+    out.setdefault("capability_gate", {}).update(gate_fields)
+    return out
+
+
+def _graded_doc(tmp_path: Path, path: str, text: str, doc: dict):
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    return gate.findings(_whole_file_diff(path, text), doc, resource_map=RMAP, root=tmp_path)
+
+
+def test_action_star_is_spend_bearing(tmp_path):
+    issues, counts = _graded(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "*", "Resource": "*"}'))
+    assert counts["actions"] == 1
+    assert len(issues) == 1 and "wildcard" in issues[0]
+
+
+def test_allow_not_action_is_everything_except(tmp_path):
+    issues, counts = _graded(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "NotAction": "iam:*", "Resource": "*"}'))
+    assert counts["actions"] == 1
+    assert len(issues) == 1 and "EXCEPT" in issues[0]
+
+
+def test_allow_not_action_in_yaml_is_everything_except(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.yaml", (
+        "Statement:\n"
+        "  - Effect: Allow\n"
+        "    NotAction:\n"
+        "      - iam:*\n"
+        "      - organizations:*\n"
+        "    Resource: '*'\n"
+    ))
+    assert len(issues) == 1 and "EXCEPT" in issues[0]
+
+
+def test_a_service_glob_is_a_wildcard(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "*:Get*", "Resource": "*"}'))
+    assert len(issues) == 1 and "wildcard" in issues[0]
+
+
+@pytest.mark.parametrize("action", [
+    "SageMaker:CreateEndpoint", "sagemaker:*", "sagemaker:Create*",
+    "sagemaker:CreateEndpoin?", "SAGEMAKER:createendpoint",
+])
+def test_action_patterns_are_matched_case_insensitively(tmp_path, action):
+    issues, counts = _graded(tmp_path, "infra/policy.json", _policy(
+        f'{{"Effect": "Allow", "Action": "{action}", "Resource": "*"}}'))
+    assert counts["actions"] == 1
+    assert len(issues) == 1 and "sagemaker" in issues[0].lower()
+
+
+@pytest.mark.parametrize("action", ["CE:GetCostAndUsage", "ce:Get*", "ce:Get?ostAndUsage"])
+def test_a_mixed_case_or_glob_on_a_budgeted_prefix_passes(tmp_path, action):
+    issues, _ = _graded(tmp_path, "infra/policy.json", _policy(
+        f'{{"Effect": "Allow", "Action": "{action}", "Resource": "*"}}'))
+    assert issues == []
+
+
+def test_a_keyed_star_on_a_python_line_is_a_finding():
+    issues, _ = gate.findings(_diff(
+        "scripts/build_policy.py",
+        '    stmt = {"Effect": "Allow", "Action": "*", "Resource": "*"}'), DOC)
+    assert len(issues) == 1 and "wildcard" in issues[0]
+
+
+def test_a_keyed_not_action_on_a_python_line_is_a_finding():
+    issues, _ = gate.findings(_diff(
+        "scripts/build_policy.py",
+        '    stmt = {"Effect": "Allow", "NotAction": "iam:*", "Resource": "*"}'), DOC)
+    assert len(issues) == 1 and "EXCEPT" in issues[0]
+
+
+def test_a_standing_deny_subtracts_what_it_fully_covers(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "sagemaker:CreateEndpoint", "Resource": "*"}',
+        '{"Effect": "Deny", "Action": "sagemaker:*", "Resource": "*"}'))
+    assert issues == []
+
+
+@pytest.mark.parametrize("deny", [
+    '{"Effect": "Deny", "Action": "sagemaker:*", "Resource": "*", '
+    '"Condition": {"Bool": {"aws:MultiFactorAuthPresent": "false"}}}',
+    '{"Effect": "Deny", "Action": "sagemaker:*", "NotResource": "arn:x"}',
+    '{"Effect": "Deny", "Action": "sagemaker:*", "Resource": "arn:x"}',
+    '{"Effect": "Deny", "Action": "sagemaker:Describe*", "Resource": "*"}',
+])
+def test_a_deny_that_is_not_standing_or_not_covering_does_not_subtract(tmp_path, deny):
+    issues, _ = _graded(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "sagemaker:CreateEndpoint", "Resource": "*"}', deny))
+    assert len(issues) == 1 and "sagemaker" in issues[0]
+
+
+def test_a_deny_in_another_policy_document_does_not_subtract(tmp_path):
+    text = (
+        '{"RoleA": {"PolicyDocument": {"Statement": [\n'
+        '  {"Effect": "Allow", "Action": "sagemaker:CreateEndpoint", "Resource": "*"}\n'
+        ']}},\n'
+        ' "RoleB": {"PolicyDocument": {"Statement": [\n'
+        '  {"Effect": "Deny", "Action": "sagemaker:*", "Resource": "*"}\n'
+        ']}}}\n'
+    )
+    issues, _ = _graded(tmp_path, "infra/policy.json", text)
+    assert len(issues) == 1
+
+
+def test_star_is_not_subtracted_by_a_narrower_standing_deny(tmp_path):
+    issues, _ = _graded(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "*", "Resource": "*"}',
+        '{"Effect": "Deny", "Action": "ce:*", "Resource": "*"}'))
+    assert len(issues) == 1 and "wildcard" in issues[0]
+
+
+def _as_regenerated(doc: dict) -> dict:
+    """DOC as alpha-engine-config's derivation publishes it once I11674 lands:
+    `free_actions` for codebuild, and the $0 CodeBuild line `approved: false`.
+    Measured against that branch's `derive_budget_prefixes` output, not
+    invented here."""
+    import copy
+    out = _with(doc, free_actions={
+        "codebuild": ["codebuild:BatchGetProjects", "codebuild:ListProjects"]})
+    out = copy.deepcopy(out)
+    for provider in out["providers"].values():
+        for name, row in provider["services"].items():
+            row["approved"] = name != "CodeBuild"
+    return out
+
+
+def test_free_actions_narrows_a_free_prefix(tmp_path):
+    """`codebuild` is free for ListProjects + BatchGetProjects ONLY; the audit's
+    public repro accepted `codebuild:StartBuild` because the gate read the bare
+    prefix. With `free_actions` published, only the two reads pass."""
+    doc = _as_regenerated(DOC)
+    assert "codebuild" in gate.approved_prefixes(doc)[1]
+    for action in ("codebuild:StartBuild", "codebuild:*", "codebuild:Start*"):
+        issues, _ = _graded_doc(tmp_path, "infra/policy.json", _policy(
+            f'{{"Effect": "Allow", "Action": "{action}", "Resource": "*"}}'), doc)
+        assert len(issues) == 1 and "codebuild" in issues[0], action
+    for action in ("codebuild:ListProjects", "CodeBuild:batchgetprojects"):
+        issues, _ = _graded_doc(tmp_path, "infra/policy.json", _policy(
+            f'{{"Effect": "Allow", "Action": "{action}", "Resource": "*"}}'), doc)
+        assert issues == [], action
+
+
+def test_a_narrowed_free_prefix_does_not_approve_a_client():
+    doc = _as_regenerated(DOC)
+    issues, _ = gate.findings(_diff("scripts/x.py", '    c = boto3.client("codebuild")'), doc)
+    assert len(issues) == 1 and "codebuild" in issues[0]
+    # Without the narrowing, a free prefix approves the client wholesale.
+    import copy
+    wholesale = copy.deepcopy(doc)
+    wholesale["capability_gate"].pop("free_actions")
+    issues, _ = gate.findings(_diff("scripts/x.py", '    c = boto3.client("codebuild")'), wholesale)
+    assert issues == []
+
+
+def test_an_unapproved_service_line_does_not_approve_its_prefix(tmp_path):
+    import copy
+    doc = copy.deepcopy(DOC)
+    doc["providers"]["aws"]["services"]["Synthetic Zero Line"] = {
+        "iam_prefixes": ["textract"], "approved": False}
+    assert "textract" not in gate.approved_prefixes(doc)[0]
+    assert gate.unapproved_prefixes(doc)["textract"] == "Synthetic Zero Line"
+    issues, _ = _graded_doc(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "textract:AnalyzeDocument", "Resource": "*"}'), doc)
+    assert len(issues) == 1 and "UNAPPROVED" in issues[0]
+    doc["providers"]["aws"]["services"]["Synthetic Zero Line"]["approved"] = True
+    issues, _ = _graded_doc(tmp_path, "infra/policy.json", _policy(
+        '{"Effect": "Allow", "Action": "textract:AnalyzeDocument", "Resource": "*"}'), doc)
+    assert issues == []
+
+
+def test_the_iam_glob_helpers_match_the_private_resolver():
+    assert gate.action_matches("ce:Get*", "CE:GetCostAndUsage")
+    assert gate.action_matches("ce:Get?ostAndUsage", "ce:GetCostAndUsage")
+    assert not gate.action_matches("ce:Get*", "ce:CreateAnomalyMonitor")
+    assert gate.globs_overlap("codebuild:*", "codebuild:StartBuild")
+    assert gate.pattern_within("codebuild:ListProjects", "codebuild:List*")
+    assert not gate.pattern_within("codebuild:*", "codebuild:List*")
+    assert gate.is_wildcard_pattern("*") and gate.is_wildcard_pattern("*:Get*")
+    assert not gate.is_wildcard_pattern("s3:*")
