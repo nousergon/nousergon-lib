@@ -26,7 +26,7 @@ config (the backtester passes ``"backtest.phase"``).
 
 Public surface: ``PhaseStatus``, ``PhaseOutcome``, ``PhaseRegistry``,
 ``PhaseContext``, ``PhaseTimeoutError``, ``phase``, ``load_phase_hard_caps``,
-``MARKER_SCHEMA_VERSION``.
+``MARKER_SCHEMA_VERSION``, ``REHEARSAL_EXECUTION_PREFIX``.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import enum
 import faulthandler
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -166,7 +167,26 @@ def phase(name: str, *, logger_name: str = DEFAULT_PHASE_LOGGER, **context):
         sys.stdout.flush()
 
 
-def _marker_key(marker_prefix: str, date: str, phase_name: str) -> str:
+#: SF execution names that start with this are rehearsals of the weekly run
+#: (nous-ergon-ops `weekly-sf-rehearsal.yml`).
+REHEARSAL_EXECUTION_PREFIX = "rehearsal-"
+
+
+def _marker_key(
+    marker_prefix: str, date: str, phase_name: str, run_token: str | None = None
+) -> str:
+    """Where a phase's completion marker lives.
+
+    A rehearsal's markers are namespaced under its own execution name
+    (alpha-engine-config-I11660). Before, a rehearsal shared the weekly's
+    run_date and left ``status=ok`` markers at the shared key. The real
+    weekly then auto-skipped those phases and shipped the rehearsal's
+    outputs as its own evidence. A non-rehearsal run never reads under
+    ``.rehearsal/``. A rehearsal still resumes its own markers across a
+    relaunch or redrive of the same execution.
+    """
+    if run_token and run_token.startswith(REHEARSAL_EXECUTION_PREFIX):
+        return f"{marker_prefix}/{date}/.phases/.rehearsal/{run_token}/{phase_name}.json"
     return f"{marker_prefix}/{date}/.phases/{phase_name}.json"
 
 
@@ -274,8 +294,13 @@ class PhaseRegistry:
         hard_caps: dict[str, float] | None = None,
         s3_client=None,
         phase_logger_name: str = DEFAULT_PHASE_LOGGER,
+        run_token: str | None = None,
     ):
         self.date = date
+        # The SF execution name. The spot launchers export it as RUN_TOKEN
+        # (krepis.ssm_log_capture --correlation-id). It is only read to tell
+        # a rehearsal from a real run; see `_marker_key`.
+        self.run_token = run_token if run_token is not None else os.environ.get("RUN_TOKEN", "")
         self.bucket = bucket
         self.marker_prefix = marker_prefix
         self._explicit_skip = set(skip_phases or [])
@@ -309,7 +334,7 @@ class PhaseRegistry:
         return self._client()
 
     def _marker_key(self, phase_name: str) -> str:
-        return _marker_key(self.marker_prefix, self.date, phase_name)
+        return _marker_key(self.marker_prefix, self.date, phase_name, self.run_token)
 
     def _read_marker(self, phase_name: str) -> dict | None:
         """Return the marker dict for (date, phase), or None if absent/corrupt.
@@ -514,6 +539,7 @@ class PhaseRegistry:
                     "schema_version": MARKER_SCHEMA_VERSION,
                     "phase": name,
                     "date": self.date,
+                    "run_token": self.run_token or None,
                     "status": status,
                     "started_at": started_at,
                     "completed_at": completed_at,
