@@ -154,7 +154,7 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # cutover). NOT a poll companion: ``WaitForCollectionManifests`` is itself
     # the substantive ``lambda:invoke`` Task (the collection-readiness probe),
     # re-entered once per poll iteration, and it is a SPINE stage
-    # (PIPELINE_STAGE_ORDER / PENDING_DEFINITION_STAGES below). It is here only
+    # (PIPELINE_STAGE_ORDER below). It is here only
     # because every consumer's name-keyed guard
     # (``test_wait_companions_in_json_are_in_wait_grouping`` in crucible-dashboard
     # and nousergon-data) requires every ``WaitFor*`` state to have a row. It
@@ -1194,18 +1194,14 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "iterations; no artifact of its own, same treatment as "
         "WaitForCodeFreshness."
     ),
-    # alpha-engine-config-I11267 (decoupled data cutover, PR11263 §6.2c):
-    # declared PENDING ahead of its definition (PENDING_DEFINITION_STAGES
-    # above) — a bounded poll against the standalone data-collector's run
-    # manifests, replacing the retiring MorningEnrich/DataPhase1 (weekly),
+    # alpha-engine-config-I11267 / I11269 (decoupled data cutover, PR11263
+    # §6.2c): a bounded poll against the standalone data-collector's run
+    # manifests, replacing the retired MorningEnrich/DataPhase1 (weekly),
     # LaunchMorningEnrichSpot/LaunchMorningArcticAppendSpot (preopen) and
     # LaunchPostMarketDataSpot/LaunchPostMarketArcticAppendSpot/
     # LaunchEdgarPitFundamentalsDailySpot (postclose) legs — one shared name
-    # across all three SFs, same convention as MorningEnrich above. Lands in
-    # the cutover PR (alpha-engine-config-I11269); this entry lets a library
-    # pin bump ahead of that PR declare the stage without reddening the
-    # registry-drift guard (registry drift only complains about a
-    # substantive state with NO entry, never an unused one).
+    # across all three SFs, same convention as MorningEnrich above. Declared
+    # PENDING ahead of its definition until the cutover PR landed it.
     "WaitForCollectionManifests": ArtifactReason(
         reason="Bounded poll against the standalone nousergon-data-collection "
         "stack's run manifests (alpha-engine-config-I11267, PR11263 §6.2c) — "
@@ -1641,14 +1637,10 @@ def lookup_registry(state_name: str) -> ArchivePageRef | ArtifactReason | None:
 #: written down where it is not obvious. See ``EvalRollingMean`` below.
 PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-weekly-freshness-pipeline": (
-        # MorningEnrich/DataPhase1 are RETIRING (alpha-engine-config-I11267,
-        # RETIRING_DEFINITION_STAGES above) — replaced by
-        # WaitForCollectionManifests (PENDING_DEFINITION_STAGES above) once
-        # the cutover PR (alpha-engine-config-I11269) lands. Both names stay
-        # declared through the transition; deliverable 4 drops the retiring
-        # pair once the cutover is verified live.
-        "MorningEnrich",
-        "DataPhase1",
+        # alpha-engine-config-I11269 (decoupled data cutover): the v1
+        # MorningEnrich/DataPhase1 legs are gone from the definition, replaced
+        # by the bounded manifest-readiness wait. Their STATE_TO_ARCHIVE_PAGE /
+        # WAIT_GROUPING entries are kept so pre-cutover executions still render.
         "WaitForCollectionManifests",
         "RAGIngestion",
         "Scanner",
@@ -1708,14 +1700,10 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-preopen-trading-pipeline": (
         "StartExecutorEC2",
         "CodeFreshnessGate",
-        # LaunchMorningEnrichSpot/LaunchMorningArcticAppendSpot are RETIRING
-        # (alpha-engine-config-I11267, RETIRING_DEFINITION_STAGES above) —
-        # replaced by WaitForCollectionManifests (PENDING_DEFINITION_STAGES
-        # above) once the cutover PR (alpha-engine-config-I11269) lands. Both
-        # names stay declared through the transition; deliverable 4 drops the
-        # retiring pair once the cutover is verified live.
-        "LaunchMorningEnrichSpot",
-        "LaunchMorningArcticAppendSpot",
+        # alpha-engine-config-I11269: LaunchMorningEnrichSpot /
+        # LaunchMorningArcticAppendSpot are gone from the definition, replaced
+        # by the bounded manifest-readiness wait (registry entries kept for
+        # pre-cutover executions).
         "WaitForCollectionManifests",
         "PredictorInference",
         "CheckPredictorCoverage",
@@ -1723,16 +1711,11 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
         "RunDaemon",
     ),
     "ne-postclose-trading-pipeline": (
-        # LaunchPostMarketDataSpot/LaunchPostMarketArcticAppendSpot/
-        # LaunchEdgarPitFundamentalsDailySpot are RETIRING (alpha-engine-
-        # config-I11267, RETIRING_DEFINITION_STAGES above) — replaced by
-        # WaitForCollectionManifests (PENDING_DEFINITION_STAGES above) once
-        # the cutover PR (alpha-engine-config-I11269) lands. All three names
-        # stay declared through the transition; deliverable 4 drops the
-        # retiring trio once the cutover is verified live.
-        "LaunchPostMarketDataSpot",
-        "LaunchPostMarketArcticAppendSpot",
-        "LaunchEdgarPitFundamentalsDailySpot",
+        # alpha-engine-config-I11269: LaunchPostMarketDataSpot /
+        # LaunchPostMarketArcticAppendSpot / LaunchEdgarPitFundamentalsDailySpot
+        # are gone from the definition, replaced by the bounded
+        # manifest-readiness wait (registry entries kept for pre-cutover
+        # executions).
         "WaitForCollectionManifests",
         "CaptureSnapshot",
         "EODReconcile",
@@ -1806,26 +1789,12 @@ SKIP_TERMINALS: Final[dict[str, frozenset[str]]] = {
 #: without the marker — the marker cannot silently outlive its reason.
 #: Every value must name the tracking issue, so a reader can find why.
 PENDING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
-    "ne-weekly-freshness-pipeline": {
-        "WaitForCollectionManifests": "alpha-engine-config-I11267 (decoupled data cutover, "
-        "PR11263 §6.2c): replaces the MorningEnrich/DataPhase1 legs with a bounded poll "
-        "against the standalone data-collector's run manifests. Declared here ahead of the "
-        "nousergon-data cutover PR (alpha-engine-config-I11269); the two retiring stages "
-        "this replaces are in RETIRING_DEFINITION_STAGES below.",
-    },
-    "ne-preopen-trading-pipeline": {
-        "WaitForCollectionManifests": "alpha-engine-config-I11267 (decoupled data cutover, "
-        "PR11263 §6.2c): replaces the LaunchMorningEnrichSpot/LaunchMorningArcticAppendSpot "
-        "legs with a bounded poll against the standalone data-collector's run manifests. "
-        "See RETIRING_DEFINITION_STAGES below for the stages it replaces.",
-    },
-    "ne-postclose-trading-pipeline": {
-        "WaitForCollectionManifests": "alpha-engine-config-I11267 (decoupled data cutover, "
-        "PR11263 §6.2c): replaces the LaunchPostMarketDataSpot/LaunchPostMarketArcticAppendSpot/"
-        "LaunchEdgarPitFundamentalsDailySpot legs with a bounded poll against the standalone "
-        "data-collector's run manifests. See RETIRING_DEFINITION_STAGES below for the stages "
-        "it replaces.",
-    },
+    # Every pipeline keeps its (possibly empty) map: consumers and tests index
+    # by pipeline name. WaitForCollectionManifests left this map when the
+    # cutover PR landed its definition (alpha-engine-config-I11269).
+    "ne-weekly-freshness-pipeline": {},
+    "ne-preopen-trading-pipeline": {},
+    "ne-postclose-trading-pipeline": {},
 }
 
 
@@ -1875,42 +1844,13 @@ PENDING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
 #: or the deadlock this marker exists to prevent comes back from the other
 #: side. Every value must name the tracking issue, so a reader can find why.
 RETIRING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
-    "ne-weekly-freshness-pipeline": {
-        "MorningEnrich": "alpha-engine-config-I11267 (decoupled data cutover, PR11263 "
-        "§6.2c): the weekly Saturday MorningEnrich leg is replaced by "
-        "WaitForCollectionManifests. Removed on the cutover PR (alpha-engine-config-I11269).",
-        "DataPhase1": "alpha-engine-config-I11267 (decoupled data cutover, PR11263 §6.2c): "
-        "the weekly DataPhase1 leg is replaced by WaitForCollectionManifests. Removed on "
-        "the cutover PR (alpha-engine-config-I11269). DataPhase2 and RAGIngestion are NOT "
-        "part of this cutover (alpha-engine-config-I10753) and stay.",
-    },
-    "ne-preopen-trading-pipeline": {
-        "LaunchMorningEnrichSpot": "alpha-engine-config-I11267 (decoupled data cutover, "
-        "PR11263 §6.2c): the weekday morning-enrich spot-dispatch leg (and its "
-        "CheckSkipMorningEnrich poll/retry companions) is replaced by "
-        "WaitForCollectionManifests. Removed on the cutover PR (alpha-engine-config-I11269).",
-        "LaunchMorningArcticAppendSpot": "alpha-engine-config-I11267 (decoupled data "
-        "cutover, PR11263 §6.2c): the weekday morning-arctic-append spot-dispatch leg (and "
-        "its poll/retry companions) is replaced by WaitForCollectionManifests. Removed on "
-        "the cutover PR (alpha-engine-config-I11269).",
-    },
-    "ne-postclose-trading-pipeline": {
-        "LaunchPostMarketDataSpot": "alpha-engine-config-I11267 (decoupled data cutover, "
-        "PR11263 §6.2c): the EOD post-market-data spot-dispatch leg (and its poll/retry "
-        "companions) is replaced by WaitForCollectionManifests. Removed on the cutover PR "
-        "(alpha-engine-config-I11269).",
-        "LaunchPostMarketArcticAppendSpot": "alpha-engine-config-I11267 (decoupled data "
-        "cutover, PR11263 §6.2c): the EOD post-market-arctic-append spot-dispatch leg (and "
-        "its poll/retry companions) is replaced by WaitForCollectionManifests. Removed on "
-        "the cutover PR (alpha-engine-config-I11269).",
-        "LaunchEdgarPitFundamentalsDailySpot": "alpha-engine-config-I11267 (decoupled data "
-        "cutover, PR11263 §6.2c): the EOD EDGAR PIT fundamentals spot-dispatch leg (and its "
-        "poll/retry companions) is replaced by WaitForCollectionManifests. Removed on the "
-        "cutover PR (alpha-engine-config-I11269). Also removes the heal-loop's "
-        "HealLaunchPostMarketDataSpot / HealLaunchArcticAppendSpot dispatch + poll pairs, "
-        "whose actuator is repointed at the standalone ne-data-collection-eod execution "
-        "(PR11263 §6.2c item 3).",
-    },
+    # Every pipeline keeps its (possibly empty) map, as for
+    # PENDING_DEFINITION_STAGES. The seven v1 data stages marked here by
+    # alpha-engine-config-I11267 left the spine with this map when the cutover
+    # PR removed their states (alpha-engine-config-I11269).
+    "ne-weekly-freshness-pipeline": {},
+    "ne-preopen-trading-pipeline": {},
+    "ne-postclose-trading-pipeline": {},
 }
 
 

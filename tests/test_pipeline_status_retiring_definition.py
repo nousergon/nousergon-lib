@@ -176,3 +176,40 @@ def test_a_cycle_missing_an_unmarked_stage_is_not_complete(old_stage_declared):
     )
     assert shape.verdict is not CycleVerdict.COMPLETED
     assert shape.stages_missing == (OLD,)
+
+
+# ── The decoupled data cutover's retirement, completed (alpha-engine-config-I11269) ──
+
+_RETIRED_BY_THE_CUTOVER = {
+    "ne-weekly-freshness-pipeline": ("MorningEnrich", "DataPhase1"),
+    "ne-preopen-trading-pipeline": ("LaunchMorningEnrichSpot", "LaunchMorningArcticAppendSpot"),
+    "ne-postclose-trading-pipeline": (
+        "LaunchPostMarketDataSpot",
+        "LaunchPostMarketArcticAppendSpot",
+        "LaunchEdgarPitFundamentalsDailySpot",
+    ),
+}
+
+
+@pytest.mark.parametrize("pipeline", sorted(_RETIRED_BY_THE_CUTOVER))
+def test_the_cutover_stages_left_the_spine_and_their_markers_with_them(pipeline):
+    """The lockstep release for the cutover PR: the retired stages are gone
+    from the spine AND from the retiring map (a marker that outlives its state
+    fails nousergon-data's stale-retiring contract test), and the stage that
+    replaced them is no longer pending (a pending marker on a landed state
+    fails its stale-pending test)."""
+    spine = PIPELINE_STAGE_ORDER[pipeline]
+    retired = _RETIRED_BY_THE_CUTOVER[pipeline]
+    assert not set(retired) & set(spine), f"{pipeline}: {set(retired) & set(spine)}"
+    assert not set(retired) & retiring_definition_stages_for(pipeline)
+    assert "WaitForCollectionManifests" in spine
+    assert "WaitForCollectionManifests" not in registry.pending_definition_stages_for(pipeline)
+
+
+@pytest.mark.parametrize("pipeline", sorted(_RETIRED_BY_THE_CUTOVER))
+def test_the_cutover_stages_keep_their_registry_entries_for_history(pipeline):
+    """Leaving the spine is not leaving the registry: executions from before the
+    cutover still carry these states, and a state with no entry drops its row
+    from every historical execution the dashboard renders."""
+    for stage in _RETIRED_BY_THE_CUTOVER[pipeline]:
+        assert stage in STATE_TO_ARCHIVE_PAGE, f"{pipeline}:{stage}"
