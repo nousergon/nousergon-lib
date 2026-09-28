@@ -14,7 +14,16 @@ WHAT COUNTS AS APPROVED
 The approved set is read from the SSoT document and from nowhere else::
 
     approved = every `iam_prefixes` entry on a budgeted service line
+               (a row published `approved: false` approves nothing)
              + `capability_gate.free_prefixes`
+               (narrowed to `capability_gate.free_actions` where listed)
+
+An entitlement is graded as an IAM GRANT, with the same semantics as the
+private resolver (I11674): `*` and a glob in the service part are wildcards,
+`Allow` + `NotAction` is "everything except" and so a wildcard, action globs
+(`svc:*`, `svc:Get*`, `?`) match case-insensitively, a Deny grants nothing,
+and a Deny subtracts from an Allow in the same policy document only when it
+is unconditional, has no `NotResource`, and has `Resource: "*"`.
 
 This adds **no second registry to maintain**: widening the gate means editing
 the SSoT in a PR, which is the approval, which is the whole design.
@@ -76,6 +85,7 @@ import ast
 import re
 import subprocess
 from collections.abc import Callable
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -119,12 +129,26 @@ _CLIENT = re.compile(r"""boto3\s*\.\s*(?:client|resource)\s*\(\s*["']([a-z0-9-]+
 #:      way: a real grant is written as a bare list element or as the value of
 #:      an Action-shaped key, never as the value of ``Name``/``Key``/``id``/
 #:      any other field name. See ``_is_keyed_by_non_action``.
-_IAM_ACTION = re.compile(r"""["']([a-z0-9-]+):[A-Z*][A-Za-z0-9*]*["']""")
+_IAM_ACTION = re.compile(r"""["']([a-z0-9-]+):[A-Z*?][A-Za-z0-9*?]*["']""")
+
+#: A quoted value directly keyed by ``Action``/``NotAction`` on the same line
+#: (I11674). Graded as a GRANT whatever its shape — ``"*"``,
+#: ``"CodeBuild:StartBuild"``, ``"ce:Get?ostAndUsage"`` — because the key says
+#: what it is. The unkeyed ``_IAM_ACTION`` shape stays narrow (lower-case
+#: prefix), since without a key a mixed-case ``Word:Word`` string is far more
+#: often not a grant.
+_KEYED_ACTION = re.compile(
+    r"""["'](?P<key>Action|NotAction|Actions)["']\s*:\s*["'](?P<value>[^"']+)["']""",
+    re.IGNORECASE,
+)
+
+#: A same-line ``"Effect": "Deny"`` — a Deny grants nothing.
+_DENY_ON_LINE = re.compile(r"""["']Effect["']\s*:\s*["']Deny["']""", re.IGNORECASE)
 
 #: The same shape, unquoted — matched against an already-isolated Action
 #: VALUE pulled out of a parsed document, where quoting has already been
 #: stripped by the YAML/JSON loader.
-_ACTION_VALUE = re.compile(r"^([a-z0-9-]+):[A-Z*][A-Za-z0-9*]*$")
+_ACTION_VALUE = re.compile(r"^([A-Za-z0-9-]+):[A-Za-z*?][A-Za-z0-9*?]*$")
 
 #: A line that plausibly touches a schedule. CHEAP PRE-FILTER ONLY — a hit
 #: makes the gate read and parse the head file, where the real grading happens.
@@ -349,14 +373,192 @@ def approved_prefixes(doc: dict) -> tuple:
     """``(prefix -> the budgeted service that covers it, free prefixes)``.
 
     Both come from the SSoT. A prefix in neither map is unbudgeted capability.
+    A service row carrying ``approved: false`` (a line named so that any spend
+    on it is unapproved, e.g. a bare zero line) does NOT approve its prefixes;
+    see :func:`unapproved_prefixes`. A row without the field is approved, which
+    is how every row read before the field was published.
     """
     budgeted: dict = {}
     for provider in (doc.get("providers") or {}).values():
         for svc, row in (provider.get("services") or {}).items():
-            for prefix in (row.get("iam_prefixes") or []):
-                budgeted[prefix] = svc
-    free = set((doc.get("capability_gate") or {}).get("free_prefixes") or {})
+            if (row or {}).get("approved", True) is False:
+                continue
+            for prefix in ((row or {}).get("iam_prefixes") or []):
+                budgeted[str(prefix).lower()] = svc
+    free = {str(p).lower()
+            for p in ((doc.get("capability_gate") or {}).get("free_prefixes") or {})}
     return budgeted, free
+
+
+def unapproved_prefixes(doc: dict) -> dict:
+    """``prefix -> service`` for rows published with ``approved: false`` and not
+    also covered by an approved row."""
+    budgeted, _ = approved_prefixes(doc)
+    out: dict = {}
+    for provider in (doc.get("providers") or {}).values():
+        for svc, row in (provider.get("services") or {}).items():
+            if (row or {}).get("approved", True) is False:
+                for prefix in ((row or {}).get("iam_prefixes") or []):
+                    if str(prefix).lower() not in budgeted:
+                        out[str(prefix).lower()] = svc
+    return out
+
+
+def free_actions(doc: dict) -> dict:
+    """``capability_gate.free_actions``: a free prefix listed here is free ONLY
+    for these action patterns. Any other action under it is graded against the
+    prefix's service line, like any prefix that is not free. Same semantics as
+    the private resolver (alpha-engine-config-I11674)."""
+    gate = (doc.get("capability_gate") or {}).get("free_actions") or {}
+    return {str(k).lower(): [str(a) for a in (v if isinstance(v, list) else [v])]
+            for k, v in gate.items()}
+
+
+class Approval:
+    """The approved set, read once per grading run."""
+
+    __slots__ = ("budgeted", "free", "free_actions", "unapproved")
+
+    def __init__(self, doc: dict) -> None:
+        self.budgeted, self.free = approved_prefixes(doc)
+        self.free_actions = free_actions(doc)
+        self.unapproved = unapproved_prefixes(doc)
+
+    @property
+    def wholesale(self) -> set:
+        """Prefixes approved for EVERY action — what a client construction, a
+        resource or a schedule target may bill to. A free prefix narrowed by
+        ``free_actions`` is not in it: a CodeBuild client can call StartBuild."""
+        return set(self.budgeted) | {p for p in self.free if p not in self.free_actions}
+
+
+# -- IAM action-glob semantics ------------------------------------------------
+#
+# Mirrors the private resolver in alpha-engine-config
+# `scripts/check_capability_budget_coverage.py` (I11674), so the public and
+# private gates answer the same question the same way: `*` and `?` are globs,
+# matching is case-insensitive, and a pattern the gate cannot prove is inside
+# an approved one is NOT inside it.
+
+
+@lru_cache(maxsize=4096)
+def _glob_regex(pattern: str) -> re.Pattern:
+    out = []
+    for ch in pattern:
+        if ch == "*":
+            out.append(".*")
+        elif ch == "?":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+    return re.compile("".join(out), re.IGNORECASE | re.DOTALL)
+
+
+def action_matches(pattern: str, action: str) -> bool:
+    """Does the IAM action glob *pattern* match the concrete *action*?"""
+    return _glob_regex(str(pattern)).fullmatch(str(action)) is not None
+
+
+@lru_cache(maxsize=8192)
+def globs_overlap(a: str, b: str) -> bool:
+    """Is there ANY action string both globs match?"""
+    a, b = a.lower(), b.lower()
+
+    @cache
+    def ov(i: int, j: int) -> bool:
+        if i == len(a) and j == len(b):
+            return True
+        if i < len(a) and a[i] == "*":
+            return ov(i + 1, j) or (j < len(b) and ov(i, j + 1))
+        if j < len(b) and b[j] == "*":
+            return ov(i, j + 1) or (i < len(a) and ov(i + 1, j))
+        if i < len(a) and j < len(b) and (a[i] == "?" or b[j] == "?" or a[i] == b[j]):
+            return ov(i + 1, j + 1)
+        return False
+
+    return ov(0, 0)
+
+
+def pattern_within(inner: str, outer: str) -> bool:
+    """Is every action *inner* matches also matched by *outer*? Conservative:
+    where containment cannot be proven the answer is False, the direction that
+    produces a finding."""
+    inner, outer = str(inner), str(outer)
+    if "*" not in inner and "?" not in inner:
+        return action_matches(outer, inner)
+    if "?" in inner or "?" in outer:
+        return inner.lower() == outer.lower()
+    return action_matches(outer, inner)
+
+
+def _service_part(pattern: str) -> str:
+    return str(pattern).split(":", 1)[0].strip().lower()
+
+
+def is_wildcard_pattern(pattern: str) -> bool:
+    """``*``, anything without a service prefix, or a glob in the prefix."""
+    p = str(pattern).strip()
+    if ":" not in p:
+        return True
+    svc = _service_part(p)
+    return "*" in svc or "?" in svc
+
+
+def grade_action_pattern(pattern: str, approval: Approval) -> tuple:
+    """``(issue, service prefix)`` for one granted action pattern; ``issue`` is
+    ``None`` when approved, else ``"wildcard"``, ``"unapproved"``,
+    ``"narrowed-free"`` or ``"no-line"``."""
+    p = str(pattern).strip()
+    if is_wildcard_pattern(p):
+        return "wildcard", "*"
+    svc = _service_part(p)
+    if svc in _NOT_A_SERVICE:
+        return None, svc
+    narrowed = False
+    if svc in approval.free:
+        allowed = approval.free_actions.get(svc)
+        if allowed is None or any(pattern_within(p, a) for a in allowed):
+            return None, svc
+        narrowed = True
+    if svc in approval.budgeted:
+        return None, svc
+    if svc in approval.unapproved:
+        return "unapproved", svc
+    return ("narrowed-free" if narrowed else "no-line"), svc
+
+
+def _action_finding(path: str, pattern: str, issue: str, svc: str,
+                    approval: Approval) -> tuple:
+    if issue == "wildcard":
+        return ("action", "*", path), (
+            f"{path}: grants `{pattern}` — a wildcard across services, which "
+            f"covers every per-request-billed action. No budget line approves "
+            f"it; narrow it to the actions the principal needs."
+        )
+    if issue == "unapproved":
+        return ("action", svc, path), (
+            f"{path}: grants `{pattern}`, and `{svc}` is on a service line the "
+            f"cost SSoT marks UNAPPROVED — named so that any spend on it is "
+            f"unapproved, not so that it is budgeted."
+        )
+    if issue == "narrowed-free":
+        allowed = ", ".join(approval.free_actions.get(svc, []))
+        return ("action", svc, path), (
+            f"{path}: grants `{pattern}`; `{svc}` is declared free ONLY for "
+            f"[{allowed}], and `{svc}` has no approved budget line for anything "
+            f"else."
+        )
+    return ("action", svc, path), (
+        f"{path}: grants `{svc}:*` actions, and `{svc}` {_NO_LINE}."
+    )
+
+
+def _not_action_finding(path: str, excluded: list) -> tuple:
+    return ("action", "*", path), (
+        f"{path}: grants every action EXCEPT {sorted(excluded)} (Allow + "
+        f"NotAction) — that is a wildcard, and it covers every per-request-"
+        f"billed action outside the exclusion. No budget line approves it."
+    )
 
 
 #: ``@@ -12,0 +13,4 @@`` — the new-file start line and count. ``--unified=0``
@@ -538,48 +740,102 @@ def _is_keyed_by_non_action(line: str, match_start: int) -> bool:
 
 
 def _grade_actions_by_line(
-    path: str, lines: list, known: set, found: dict, counts: dict
+    path: str, lines: list, approval: Approval, found: dict, counts: dict
 ) -> None:
     """The pre-context-aware behaviour: every quoted ``prefix:Word`` token on
     an added line is graded, with no regard for whether it sits in an
     ``Action`` value, a ``Condition`` key, or a ``Principal`` — except for the
-    same-line keyed-value disambiguation documented on ``_IAM_ACTION``. Used
-    ONLY as the fallback when a file that should be gradeable structurally
-    could not be parsed, or is not a structured file at all (Python, shell,
-    ...) — never silently, always counted (see ``actions_context_fallback``
-    in :func:`findings`)."""
+    same-line keyed-value disambiguation documented on ``_IAM_ACTION``. A value
+    keyed by ``Action``/``NotAction`` on the same line is graded whatever its
+    shape (``_KEYED_ACTION``). Used for non-structured files (Python, shell)
+    and as the fallback when a file that should be gradeable structurally
+    could not be parsed — never silently, always counted (see
+    ``actions_context_fallback`` in :func:`findings`)."""
     for line in lines:
+        deny = _DENY_ON_LINE.search(line) is not None
+        keyed_spans = []
+        for m in _KEYED_ACTION.finditer(line):
+            keyed_spans.append(m.span("value"))
+            counts["actions"] += 1
+            if deny:
+                continue
+            value = m.group("value")
+            if m.group("key").lower() == "notaction":
+                k, msg = _not_action_finding(path, [value])
+                found[k] = msg
+                continue
+            issue, svc = grade_action_pattern(value, approval)
+            if issue is not None:
+                k, msg = _action_finding(path, value, issue, svc, approval)
+                found[k] = msg
         for m in _IAM_ACTION.finditer(line):
+            if any(s0 <= m.start() + 1 < e0 for s0, e0 in keyed_spans):
+                continue
             counts["actions"] += 1
             if _is_keyed_by_non_action(line, m.start()):
                 continue
-            prefix = m.group(1)
-            if prefix in known or prefix in _NOT_A_SERVICE:
-                continue
-            found[("action", prefix, path)] = (
-                f"{path}: grants `{prefix}:*` actions, and `{prefix}` {_NO_LINE}."
-            )
+            value = m.group(0)[1:-1]
+            issue, svc = grade_action_pattern(value, approval)
+            if issue is not None:
+                k, msg = _action_finding(path, value, issue, svc, approval)
+                found[k] = msg
+
+
+def _denied_by(pattern: str, denies: list) -> bool:
+    """Is every action *pattern* can match refused by a STANDING Deny in the
+    same policy document? Only a standing Deny subtracts (no Condition, no
+    NotResource, ``Resource: "*"``) — the private resolver's rule."""
+    for st in denies:
+        values = [a.value for a in st.actions]
+        if st.key == "NotAction":
+            if not any(globs_overlap(pattern, x) for x in values):
+                return True
+        elif any(pattern_within(pattern, d) for d in values):
+            return True
+    return False
 
 
 def _grade_actions_structurally(
-    path: str, touched: set, values: list, known: set, found: dict, counts: dict
+    path: str, touched: set, values: list, approval: Approval, found: dict, counts: dict
 ) -> None:
     """Only an ``Action``/``NotAction`` value the diff actually added is
     graded — resolved from the head file's real structure, not from any
-    quoted string that happens to look like one."""
+    quoted string that happens to look like one — and graded as a GRANT in
+    its statement (I11674):
+
+      * a Deny grants nothing, so its values are not graded as grants;
+      * ``Allow`` + ``NotAction`` is "everything except", a wildcard;
+      * ``*`` and a glob in the service part are wildcards;
+      * a standing Deny in the same policy document subtracts what it fully
+        covers, and nothing narrower subtracts.
+    """
+    denies_by_doc: dict = {}
+    for av in values:
+        st = av.statement
+        if st is not None and st.is_standing_deny and st not in denies_by_doc.get(st.document, []):
+            denies_by_doc.setdefault(st.document, []).append(st)
+
+    not_action_done: set = set()
     for av in values:
         if not av.touches(touched):
             continue
         counts["actions"] += 1
-        m = _ACTION_VALUE.match(av.value)
-        if not m:
+        st = av.statement
+        if st is not None and st.is_deny:
             continue
-        prefix = m.group(1)
-        if prefix in known or prefix in _NOT_A_SERVICE:
+        denies = denies_by_doc.get(st.document, []) if st is not None else []
+        if st is not None and st.key == "NotAction":
+            if id(st) in not_action_done or _denied_by("*", denies):
+                continue
+            not_action_done.add(id(st))
+            k, msg = _not_action_finding(path, [a.value for a in st.actions])
+            found[k] = msg
             continue
-        found[("action", prefix, path)] = (
-            f"{path}: grants `{prefix}:*` actions, and `{prefix}` {_NO_LINE}."
-        )
+        issue, svc = grade_action_pattern(av.value, approval)
+        if issue is None or _denied_by(av.value.strip(), denies):
+            continue
+        k, msg = _action_finding(path, av.value.strip(), issue, svc, approval)
+        found[k] = msg
 
 
 def _grade_cfn_schedules(
@@ -701,8 +957,8 @@ def findings(
     ``path -> text or None`` reader — used by a history replay that hands over
     ``git show <sha>:<path>`` without checking out every commit.
     """
-    budgeted, free = approved_prefixes(doc)
-    known = set(budgeted) | free
+    approval = Approval(doc)
+    known = approval.wholesale
     rmap = resource_map if resource_map is not None else resource_map_mod.load()
     resource_types = rmap["resource_types"]
     rules = rmap.get("schedule_rules") or {}
@@ -780,16 +1036,7 @@ def findings(
             # a `Condition` key or a component id shaped `word:word`, which a
             # line-level regex cannot do. See the action-class pass.
             continue
-        for m in _IAM_ACTION.finditer(line):
-            counts["actions"] += 1
-            if _is_keyed_by_non_action(line, m.start()):
-                continue
-            prefix = m.group(1)
-            if prefix in known or prefix in _NOT_A_SERVICE:
-                continue
-            found[("action", prefix, path)] = (
-                f"{path}: grants `{prefix}:*` actions, and `{prefix}` {_NO_LINE}."
-            )
+        _grade_actions_by_line(path, [line], approval, found, counts)
 
     # -- the action class, per JSON/YAML file ----------------------------------
     #
@@ -807,15 +1054,15 @@ def findings(
                 "head file could not be read (absent from `--root`, or no "
                 "`read_file` supplied)",
             )
-            _grade_actions_by_line(path, texts, known, found, counts)
+            _grade_actions_by_line(path, texts, approval, found, counts)
             continue
         try:
             values = resource_map_mod.parse_action_values(text)
         except resource_map_mod.ActionParseError as exc:
             _note_fallback(counts, path, str(exc))
-            _grade_actions_by_line(path, texts, known, found, counts)
+            _grade_actions_by_line(path, texts, approval, found, counts)
             continue
-        _grade_actions_structurally(path, touched, values, known, found, counts)
+        _grade_actions_structurally(path, touched, values, approval, found, counts)
 
     # -- the schedule class, per file -----------------------------------------
     for path, (touched, texts) in by_file.items():

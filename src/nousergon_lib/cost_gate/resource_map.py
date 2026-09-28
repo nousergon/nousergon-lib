@@ -247,6 +247,48 @@ def parse_cfn_resources(text: str) -> list:
 _ACTION_KEYS = frozenset({"Action", "NotAction"})
 
 
+class PolicyStatement:
+    """The IAM statement an :class:`ActionValue` sits in — what the gate needs
+    to grade the value as a GRANT rather than as a string (I11674).
+
+    ``effect`` is ``"Allow"``, ``"Deny"``, or ``None`` when it is absent or not a
+    literal (an intrinsic); the grader treats ``None`` as ``Allow``, the
+    direction that produces a finding. ``key`` is ``"Action"`` or
+    ``"NotAction"``. ``resources`` holds only LITERAL scalar ``Resource``
+    values, so an intrinsic can never read as ``"*"``. ``document`` identifies
+    the enclosing policy document (the nearest mapping with a ``Statement``
+    key): a Deny subtracts only from Allows in the same document, never from
+    another role's policy that happens to share the file.
+    """
+
+    __slots__ = ("effect", "key", "actions", "has_condition", "has_not_resource",
+                 "resources", "document")
+
+    def __init__(self, *, effect, key, has_condition, has_not_resource,
+                 resources, document) -> None:
+        self.effect = effect
+        self.key = key
+        self.actions: list = []
+        self.has_condition = has_condition
+        self.has_not_resource = has_not_resource
+        self.resources = resources
+        self.document = document
+
+    @property
+    def is_deny(self) -> bool:
+        return self.effect == "Deny"
+
+    @property
+    def is_standing_deny(self) -> bool:
+        """A Deny that applies to every request: no Condition, no NotResource,
+        and a literal ``Resource: "*"``. Mirrors the private resolver's
+        ``is_standing_deny`` (alpha-engine-config
+        ``check_capability_budget_coverage.py``). Anything narrower does not
+        subtract."""
+        return (self.is_deny and not self.has_condition
+                and not self.has_not_resource and "*" in self.resources)
+
+
 class ActionValue:
     """One ``Action``/``NotAction`` string, with the line span it occupies.
 
@@ -254,14 +296,19 @@ class ActionValue:
     value?" instead of "does this file contain this string anywhere?" — the
     same question :class:`CfnResource` answers for a schedule, reusing the
     same mechanism rather than inventing a second one.
+
+    ``statement`` is the :class:`PolicyStatement` it belongs to, shared by every
+    value of that statement.
     """
 
-    __slots__ = ("value", "first_line", "last_line")
+    __slots__ = ("value", "first_line", "last_line", "statement")
 
-    def __init__(self, value: str, first_line: int, last_line: int) -> None:
+    def __init__(self, value: str, first_line: int, last_line: int,
+                 statement: PolicyStatement | None = None) -> None:
         self.value = value
         self.first_line = first_line
         self.last_line = last_line
+        self.statement = statement
 
     def touches(self, lines: set) -> bool:
         return any(self.first_line <= n <= self.last_line for n in lines)
@@ -274,32 +321,80 @@ class ActionParseError(ResourceMapError):
     its output — never read this as "no actions here"."""
 
 
-def _collect_action_scalars(node: yaml.Node, out: list) -> None:
+_PLAIN_TAGS = frozenset({"tag:yaml.org,2002:str", None})
+
+
+def _literal_scalar(node: yaml.Node) -> str | None:
+    """A plain string scalar's value; ``None`` for an intrinsic or non-scalar."""
+    if isinstance(node, yaml.ScalarNode) and (node.tag in _PLAIN_TAGS
+                                              or node.tag.startswith("tag:yaml.org")):
+        return node.value
+    return None
+
+
+def _collect_action_scalars(node: yaml.Node, out: list,
+                            statement: PolicyStatement | None = None) -> None:
     """Every scalar directly under an ``Action``/``NotAction`` key, wherever
     in the document it appears — a policy document nests ``Statement`` lists
     and inline `PolicyDocument` blocks at arbitrary depth."""
     if isinstance(node, yaml.ScalarNode):
-        out.append(ActionValue(node.value, node.start_mark.line + 1, node.end_mark.line + 1))
+        av = ActionValue(node.value, node.start_mark.line + 1, node.end_mark.line + 1,
+                         statement)
+        out.append(av)
+        if statement is not None:
+            statement.actions.append(av)
     elif isinstance(node, yaml.SequenceNode):
         for item in node.value:
-            _collect_action_scalars(item, out)
+            _collect_action_scalars(item, out, statement)
     # A MappingNode under Action/NotAction names no fleet policy shape this
     # gate understands; skipping it is conservative (fewer findings), and the
     # fail-closed property is preserved by the line-fallback on parse failure
     # rather than by guessing at a shape here.
 
 
-def _walk_for_actions(node: yaml.Node, out: list) -> None:
+def _statement_of(node: yaml.MappingNode, key: str, document: int) -> PolicyStatement:
+    fields = {getattr(k, "value", None): v for k, v in node.value}
+    effect_node = fields.get("Effect")
+    effect = _literal_scalar(effect_node) if effect_node is not None else None
+    resources: list = []
+    res = fields.get("Resource")
+    if isinstance(res, yaml.SequenceNode):
+        resources = [v for v in map(_literal_scalar, res.value) if v is not None]
+    elif res is not None:
+        lit = _literal_scalar(res)
+        resources = [lit] if lit is not None else []
+    return PolicyStatement(
+        effect=effect if effect in ("Allow", "Deny") else None,
+        key=key,
+        has_condition="Condition" in fields,
+        has_not_resource="NotResource" in fields,
+        resources=resources,
+        document=document,
+    )
+
+
+def _walk_for_actions(node: yaml.Node, out: list, document: int | None = None) -> None:
     if isinstance(node, yaml.MappingNode):
+        keys = {getattr(k, "value", None) for k, _ in node.value}
+        if "Statement" in keys:
+            document = id(node)
+        statement = None
+        action_keys = keys & _ACTION_KEYS
+        if action_keys:
+            # "Action" wins when a (malformed) statement carries both, so the
+            # grader never reads it as the narrower "everything except".
+            key = "NotAction" if action_keys == {"NotAction"} else "Action"
+            statement = _statement_of(
+                node, key, document if document is not None else id(node))
         for key_node, value_node in node.value:
             key = getattr(key_node, "value", None)
             if key in _ACTION_KEYS:
-                _collect_action_scalars(value_node, out)
+                _collect_action_scalars(value_node, out, statement)
             else:
-                _walk_for_actions(value_node, out)
+                _walk_for_actions(value_node, out, document)
     elif isinstance(node, yaml.SequenceNode):
         for item in node.value:
-            _walk_for_actions(item, out)
+            _walk_for_actions(item, out, document)
 
 
 def parse_action_values(text: str) -> list:

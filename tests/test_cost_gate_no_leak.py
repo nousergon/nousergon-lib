@@ -101,9 +101,22 @@ def test_the_budget_document_keys_are_a_closed_set():
     for provider in doc["providers"].values():
         assert set(provider) == {"services"}
         for name, row in provider["services"].items():
-            assert set(row) == {"iam_prefixes"}, name
+            # `approved` (alpha-engine-config-I11674) is a BOOLEAN approval-state
+            # discriminator — `amount > 0 or measured-zero` computed privately —
+            # and carries no amount. Anything but a bool is a leak shape.
+            assert "iam_prefixes" in row and set(row) <= {"iam_prefixes", "approved"}, name
             assert all(isinstance(p, str) for p in row["iam_prefixes"]), name
-    assert set(doc["capability_gate"]) == {"free_prefixes"}
+            if "approved" in row:
+                assert isinstance(row["approved"], bool), name
+    assert "free_prefixes" in doc["capability_gate"]
+    assert set(doc["capability_gate"]) <= {"free_prefixes", "free_actions"}
+    # `free_actions` (I11674): IAM action names only, and only for a prefix that
+    # is declared free — never prose, never an amount.
+    for prefix, actions in (doc["capability_gate"].get("free_actions") or {}).items():
+        assert prefix in doc["capability_gate"]["free_prefixes"], prefix
+        assert isinstance(actions, list) and actions, prefix
+        for a in actions:
+            assert re.fullmatch(r"[a-z0-9-]+:[A-Za-z0-9*?]+", a), a
     for prefix, reason in doc["capability_gate"]["free_prefixes"].items():
         assert re.fullmatch(r"[a-z0-9-]+", prefix), prefix
         # The private document carries a written REASON per entry, and a
