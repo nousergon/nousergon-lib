@@ -71,7 +71,14 @@ def s3():
 
 
 def _reg(s3, **kw):
-    defaults = {"date": "2026-04-23", "bucket": "test-bucket", "marker_prefix": "backtest", "s3_client": s3}
+    defaults = {
+        "date": "2026-04-23",
+        "bucket": "test-bucket",
+        "marker_prefix": "backtest",
+        "s3_client": s3,
+        # Pinned so a RUN_TOKEN in the test environment cannot move the keys.
+        "run_token": "",
+    }
     defaults.update(kw)
     return PhaseRegistry(**defaults)
 
@@ -268,3 +275,55 @@ def test_load_hard_caps_custom_key(tmp_path):
     p = tmp_path / "caps.yaml"
     p.write_text("smoke_caps:\n  smoke: 30\n")
     assert load_phase_hard_caps(p, caps_key="smoke_caps") == {"smoke": 30.0}
+
+
+# ── Rehearsal marker namespace (alpha-engine-config-I11660) ─────────────────
+
+
+def test_a_real_run_ignores_a_rehearsals_ok_marker_for_the_same_date(s3):
+    rehearsal = _reg(s3, run_token="rehearsal-2026-04-23-1")
+    with rehearsal.phase("simulate", supports_auto_skip=True) as ctx:
+        assert not ctx.skipped
+    assert s3.put_calls[-1]["Key"] == (
+        "backtest/2026-04-23/.phases/.rehearsal/rehearsal-2026-04-23-1/simulate.json"
+    )
+
+    weekly = _reg(s3, run_token="f283a70c-weekly")
+    assert weekly.should_run("simulate", supports_auto_skip=True) == (True, "default_run")
+
+
+def test_a_rehearsal_resumes_its_own_markers_but_not_another_rehearsals(s3):
+    first = _reg(s3, run_token="rehearsal-2026-04-23-1")
+    with first.phase("simulate", supports_auto_skip=True):
+        pass
+
+    relaunch = _reg(s3, run_token="rehearsal-2026-04-23-1")
+    assert relaunch.should_run("simulate", supports_auto_skip=True) == (
+        False,
+        "auto_skip_marker_ok",
+    )
+    other = _reg(s3, run_token="rehearsal-2026-04-23-2")
+    assert other.should_run("simulate", supports_auto_skip=True) == (True, "default_run")
+
+
+def test_a_real_run_still_resumes_its_own_shared_marker(s3):
+    s3.seed("test-bucket", "backtest", "2026-04-23", "simulate", {"status": "ok", "phase": "simulate"})
+    rerun = _reg(s3, run_token="watch-rerun-2026-04-23-1")
+    assert rerun.should_run("simulate", supports_auto_skip=True) == (False, "auto_skip_marker_ok")
+
+
+def test_run_token_defaults_to_the_RUN_TOKEN_environment(s3, monkeypatch):
+    def from_env():
+        return PhaseRegistry(date="2026-04-23", bucket="test-bucket", marker_prefix="backtest", s3_client=s3)
+
+    monkeypatch.setenv("RUN_TOKEN", "rehearsal-2026-04-23-3")
+    assert from_env()._marker_key("simulate").startswith("backtest/2026-04-23/.phases/.rehearsal/")
+    monkeypatch.delenv("RUN_TOKEN")
+    assert from_env()._marker_key("simulate") == "backtest/2026-04-23/.phases/simulate.json"
+
+
+def test_the_marker_records_the_run_token(s3):
+    with _reg(s3, run_token="rehearsal-2026-04-23-1").phase("simulate"):
+        pass
+    body = json.loads(s3.put_calls[-1]["Body"])
+    assert body["run_token"] == "rehearsal-2026-04-23-1"
