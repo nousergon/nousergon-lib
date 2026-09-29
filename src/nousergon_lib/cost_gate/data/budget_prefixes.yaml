@@ -21,12 +21,21 @@ _doc: "GENERATED from alpha-engine-config/private-docs/EXPENSE_BUDGETS.yaml by s
   \ PREFIXES ONLY \u2014 this artifact carries no budget amounts by construction (allowlist,\
   \ not redaction). Do not edit; it is overwritten on every publish."
 capability_gate:
+  free_actions:
+    codebuild:
+    - codebuild:BatchGetProjects
+    - codebuild:ListProjects
+    inspector2:
+    - inspector2:BatchGetAccountStatus
+    - inspector2:ListFindings
   free_prefixes:
     account: declared free in the private SSoT
     cloudformation: declared free in the private SSoT
     codebuild: declared free in the private SSoT
     codeconnections: declared free in the private SSoT
+    codestar-connections: declared free in the private SSoT
     iam: declared free in the private SSoT
+    inspector2: declared free in the private SSoT
     organizations: declared free in the private SSoT
     rolesanywhere: declared free in the private SSoT
     sts: declared free in the private SSoT
@@ -34,73 +43,111 @@ providers:
   aws:
     services:
       AWS Budgets:
+        approved: true
         iam_prefixes:
         - budgets
       AWS CloudTrail:
+        approved: true
         iam_prefixes:
         - cloudtrail
       AWS Cost Explorer:
+        approved: true
         iam_prefixes:
         - ce
+      AWS Fault Injection Simulator:
+        approved: true
+        iam_prefixes:
+        - fis
       AWS Key Management Service:
+        approved: true
         iam_prefixes:
         - kms
       AWS Lambda:
+        approved: true
         iam_prefixes:
         - lambda
       AWS Resource Groups Tagging API:
+        approved: true
         iam_prefixes:
+        - tag
         - resourcegroupstaggingapi
       AWS Step Functions:
+        approved: true
         iam_prefixes:
         - states
         - stepfunctions
       AWS Systems Manager:
+        approved: true
         iam_prefixes:
         - ssm
         - appconfig
         - appconfigdata
+        - ec2messages
+        - ssmmessages
       Amazon CloudFront:
+        approved: true
         iam_prefixes:
         - cloudfront
       Amazon DynamoDB:
+        approved: true
         iam_prefixes:
         - dynamodb
       Amazon EC2 Container Registry (ECR):
+        approved: true
         iam_prefixes:
         - ecr
       Amazon Elastic Compute Cloud - Compute:
+        approved: true
         iam_prefixes:
         - ec2
       Amazon EventBridge Scheduler:
+        approved: true
         iam_prefixes:
         - scheduler
+      Amazon Polly:
+        approved: true
+        iam_prefixes:
+        - polly
+      Amazon Simple Email Service:
+        approved: true
+        iam_prefixes:
+        - ses
       Amazon Simple Notification Service:
+        approved: true
         iam_prefixes:
         - sns
       Amazon Simple Queue Service:
+        approved: true
         iam_prefixes:
         - sqs
       Amazon Simple Storage Service:
+        approved: true
         iam_prefixes:
         - s3
       Amazon Virtual Private Cloud:
+        approved: true
         iam_prefixes: []
       AmazonCloudWatch:
+        approved: true
         iam_prefixes:
         - cloudwatch
         - logs
       CloudWatch Events:
+        approved: true
         iam_prefixes:
         - events
       CodeBuild:
+        approved: true
         iam_prefixes:
         - codebuild
       EC2 - Other:
+        approved: true
         iam_prefixes: []
       Savings Plans for AWS Compute usage:
+        approved: true
         iam_prefixes:
         - savingsplans
       Tax:
+        approved: true
         iam_prefixes: []
 schema_version: 1
