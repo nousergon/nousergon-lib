@@ -295,6 +295,17 @@ def test_a_retired_arm_is_still_scored_for_its_trailing_window():
     assert ids["a"] not in reg.scored_arms("2026-12-01", trailing_cycles=8)
 
 
+def test_a_day_before_the_retirement_scores_the_arm_rather_than_raising():
+    """alpha-engine-config-I11084: replaying 2026-09-18 read a register that
+    already carried a 2026-09-25 retirement, and the trailing-window check
+    asked elapsed_weeks for a negative span. On the earlier day the arm was
+    still active, so it is scored."""
+    reg, ids = _register({"a": "2026-01-05"})
+    reg = reg.retire(ids["a"], "2026-09-25", reason="beaten")
+    assert ids["a"] in reg.scored_arms("2026-09-18", trailing_cycles=8)
+    assert reg.state(ids["a"]).in_trailing_scoring_window("2026-09-18", trailing_cycles=8)
+
+
 # --------------------------------------------------------------------------
 # Config guards
 # --------------------------------------------------------------------------
