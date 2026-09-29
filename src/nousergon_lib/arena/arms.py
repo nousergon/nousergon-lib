@@ -294,8 +294,14 @@ class ArmState:
         "We retired the wrong one" must be detectable rather than a matter of
         opinion, so retirement stops an arm SERVING and stops it counting
         toward the cap — it does not stop it being measured.
+
+        POINT-IN-TIME: an arm retired AFTER ``as_of`` was still active on
+        ``as_of``, so it is in the window. A replay of an earlier day reads a
+        register that already carries the later retirement, and asking
+        ``elapsed_weeks`` for a negative span raised instead
+        (`alpha-engine-config-I11084`).
         """
-        if self.retired_date is None:
+        if self.retired_date is None or self.retired_date > as_of:
             return True
         return _elapsed_weeks(self.retired_date, as_of) * 7 <= trailing_cycles * cadence_days
 
