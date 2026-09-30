@@ -176,8 +176,10 @@ def _wait_named_spine_stages() -> set[tuple[str, str]]:
 
 
 def test_there_is_a_wait_named_spine_stage_to_check():
-    """Non-vacuity: the guard below must have something to grade."""
-    assert ("ne-postclose-trading-pipeline", "WaitForCollectionManifests") in (
+    """Non-vacuity: the guard below must have something to grade. (The
+    post-close WaitForCollectionManifests moved to the reconcile machine with
+    the post-close split, nousergon-data-PR1996.)"""
+    assert ("ne-postclose-reconcile-pipeline", "WaitForCollectionManifests") in (
         _wait_named_spine_stages()
     )
 

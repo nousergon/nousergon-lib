@@ -185,8 +185,13 @@ def test_undeclared_pipeline_raises_rather_than_passing():
         )
 
 
-def test_all_three_live_pipelines_have_a_declared_spine():
-    for name in ("ne-weekly-freshness-pipeline", "ne-preopen-trading-pipeline", "ne-postclose-trading-pipeline"):
+def test_all_live_pipelines_have_a_declared_spine():
+    for name in (
+        "ne-weekly-freshness-pipeline",
+        "ne-preopen-trading-pipeline",
+        "ne-postclose-trading-pipeline",
+        "ne-postclose-reconcile-pipeline",
+    ):
         assert stage_order_for(name), f"{name} has no declared substantive spine"
         assert stage_order_for(f"arn:aws:states:us-east-1:1:stateMachine:{name}") == stage_order_for(name)
 
@@ -207,6 +212,7 @@ def test_preopen_holiday_skip_is_a_task_terminal_not_a_succeed_state():
 
 def test_postclose_declares_no_skip_terminal():
     assert skip_terminals_for("ne-postclose-trading-pipeline") == frozenset()
+    assert skip_terminals_for("ne-postclose-reconcile-pipeline") == frozenset()
 
 
 # ── History handling ─────────────────────────────────────────────────────

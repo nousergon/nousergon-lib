@@ -46,6 +46,7 @@ def test_pipeline_labels_match_sf_telegram_notifier():
         "ne-weekly-freshness-pipeline": "Weekly Freshness SF",
         "ne-preopen-trading-pipeline": "Pre-open Trading SF",
         "ne-postclose-trading-pipeline": "Post-close Trading SF",
+        "ne-postclose-reconcile-pipeline": "Post-close Reconcile SF",
     }
 
 
@@ -205,3 +206,28 @@ def test_artifact_reason_is_frozen():
     reason = registry.ArtifactReason(reason="x")
     with pytest.raises((TypeError, AttributeError, ValidationError)):
         reason.reason = "y"  # type: ignore[misc]
+
+
+def test_postclose_split_moves_the_collector_stages_to_the_reconcile_machine():
+    """nousergon-data-PR1996 split the post-close run in two
+    (alpha-engine-config-I11269 follow-up). The three collector-dependent
+    spine stages moved, unrenamed, to ``ne-postclose-reconcile-pipeline``.
+
+    They must leave the post-close spine OUTRIGHT, not via
+    RETIRING_DEFINITION_STAGES: nousergon-data's contract test is strict about
+    a retiring marker whose state is gone, and a stage declared on both
+    machines would make every post-close cycle ``partial_success`` for a stage
+    that machine can no longer enter.
+    """
+    moved = ("WaitForCollectionManifests", "EODReconcile", "StopTradingInstance")
+    postclose = registry.PIPELINE_STAGE_ORDER["ne-postclose-trading-pipeline"]
+    reconcile = registry.PIPELINE_STAGE_ORDER["ne-postclose-reconcile-pipeline"]
+    assert reconcile == moved
+    assert not set(moved) & set(postclose)
+    assert "CaptureSnapshot" in postclose
+    for pipeline in ("ne-postclose-trading-pipeline", "ne-postclose-reconcile-pipeline"):
+        assert not registry.RETIRING_DEFINITION_STAGES[pipeline]
+        assert not registry.PENDING_DEFINITION_STAGES[pipeline]
+    # Every moved stage keeps the registry entry it had before the split.
+    for stage in moved:
+        assert stage in registry.STATE_TO_ARCHIVE_PAGE

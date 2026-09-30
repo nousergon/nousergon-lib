@@ -51,7 +51,9 @@ identified by its execution-name prefix instead.
 from __future__ import annotations
 
 # Cron-triggered cadence runs: ne-weekly-freshness (weekly),
-# ne-preopen-trading (daily), ne-postclose-trading (eod).
+# ne-preopen-trading (daily), ne-postclose-trading and
+# ne-postclose-reconcile (both eod — the reconcile machine is started with
+# pipeline_role "eod" by nousergon-data's alpha-engine-eod-backstop).
 CADENCE_ROLES = frozenset({"weekly", "daily", "eod"})
 
 # Overlays that may complete a cadence cycle after its scheduled run failed.

@@ -174,6 +174,10 @@ PIPELINE_LABELS: Final[dict[str, str]] = {
     "ne-weekly-freshness-pipeline": "Weekly Freshness SF",
     "ne-preopen-trading-pipeline": "Pre-open Trading SF",
     "ne-postclose-trading-pipeline": "Post-close Trading SF",
+    # alpha-engine-config-I11269 follow-up (nousergon-data-PR1996): the
+    # collector-dependent half of the post-close run, split into its own
+    # machine. Verbatim with sf-telegram-notifier's _SF_LABELS entry.
+    "ne-postclose-reconcile-pipeline": "Post-close Reconcile SF",
 }
 
 
@@ -1716,8 +1720,28 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
         # are gone from the definition, replaced by the bounded
         # manifest-readiness wait (registry entries kept for pre-cutover
         # executions).
-        "WaitForCollectionManifests",
+        #
+        # nousergon-data-PR1996 (the post-close split, alpha-engine-config-
+        # I11269 follow-up): this machine now runs only what can run right
+        # after the close. WaitForCollectionManifests / EODReconcile /
+        # StopTradingInstance moved, unrenamed, to
+        # ne-postclose-reconcile-pipeline below, so they left this spine
+        # OUTRIGHT rather than through RETIRING_DEFINITION_STAGES: the owner
+        # repo's contract test fails on a retiring marker whose state is gone
+        # (stale_retiring_stages), and PR1996 is the change that removes them
+        # here. Dropping a stage from a spine never reds a consumer's
+        # existence check, which is one-directional, so this release is safe
+        # against nousergon-data main both before and after PR1996 deploys.
         "CaptureSnapshot",
+    ),
+    # nousergon-data-PR1996: the collector-dependent half of the post-close
+    # run (infrastructure/step_function_eod_reconcile.json). Same judgment the
+    # three stages carried on the single post-close machine: the readiness
+    # wait, the reconcile, and the box stop every non-failing route converges
+    # on. The heal-loop route reaches StopTradingInstance without entering
+    # EODReconcile, which it also did before the split.
+    "ne-postclose-reconcile-pipeline": (
+        "WaitForCollectionManifests",
         "EODReconcile",
         "StopTradingInstance",
     ),
@@ -1742,12 +1766,14 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
 #:   for ``Succeed``-typed terminals misses it, which is why this is a
 #:   declared name list rather than a walk of the definition by type.
 #:
-#: ``ne-postclose-trading-pipeline`` has no skip terminal — its market-hours
-#: gate routes to ``MarketHoursBlocked``, a ``Fail``.
+#: ``ne-postclose-trading-pipeline`` and ``ne-postclose-reconcile-pipeline``
+#: have no skip terminal — their market-hours gate routes to
+#: ``MarketHoursBlocked``, a ``Fail``.
 SKIP_TERMINALS: Final[dict[str, frozenset[str]]] = {
     "ne-weekly-freshness-pipeline": frozenset({"WeeklyRunDaySkip", "ShellRunComplete"}),
     "ne-preopen-trading-pipeline": frozenset({"NotifyHolidaySkip"}),
     "ne-postclose-trading-pipeline": frozenset(),
+    "ne-postclose-reconcile-pipeline": frozenset(),
 }
 
 
@@ -1795,6 +1821,7 @@ PENDING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
     "ne-weekly-freshness-pipeline": {},
     "ne-preopen-trading-pipeline": {},
     "ne-postclose-trading-pipeline": {},
+    "ne-postclose-reconcile-pipeline": {},
 }
 
 
@@ -1851,6 +1878,7 @@ RETIRING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
     "ne-weekly-freshness-pipeline": {},
     "ne-preopen-trading-pipeline": {},
     "ne-postclose-trading-pipeline": {},
+    "ne-postclose-reconcile-pipeline": {},
 }
 
 
@@ -1903,6 +1931,7 @@ CADENCE_SKIP_MARKER_STAGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
     },
     "ne-preopen-trading-pipeline": {},
     "ne-postclose-trading-pipeline": {},
+    "ne-postclose-reconcile-pipeline": {},
 }
 
 

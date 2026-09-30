@@ -190,6 +190,13 @@ _RETIRED_BY_THE_CUTOVER = {
     ),
 }
 
+#: Where the stage that replaced the retired legs lives now. The post-close
+#: run was split after the cutover (nousergon-data-PR1996): its
+#: WaitForCollectionManifests moved, unrenamed, to the reconcile machine.
+_REPLACEMENT_HOME = {
+    "ne-postclose-trading-pipeline": "ne-postclose-reconcile-pipeline",
+}
+
 
 @pytest.mark.parametrize("pipeline", sorted(_RETIRED_BY_THE_CUTOVER))
 def test_the_cutover_stages_left_the_spine_and_their_markers_with_them(pipeline):
@@ -202,8 +209,9 @@ def test_the_cutover_stages_left_the_spine_and_their_markers_with_them(pipeline)
     retired = _RETIRED_BY_THE_CUTOVER[pipeline]
     assert not set(retired) & set(spine), f"{pipeline}: {set(retired) & set(spine)}"
     assert not set(retired) & retiring_definition_stages_for(pipeline)
-    assert "WaitForCollectionManifests" in spine
-    assert "WaitForCollectionManifests" not in registry.pending_definition_stages_for(pipeline)
+    home = _REPLACEMENT_HOME.get(pipeline, pipeline)
+    assert "WaitForCollectionManifests" in PIPELINE_STAGE_ORDER[home]
+    assert "WaitForCollectionManifests" not in registry.pending_definition_stages_for(home)
 
 
 @pytest.mark.parametrize("pipeline", sorted(_RETIRED_BY_THE_CUTOVER))
