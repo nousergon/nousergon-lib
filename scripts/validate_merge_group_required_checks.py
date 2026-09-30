@@ -52,6 +52,12 @@ from nousergon_lib.merge_queue import (  # noqa: E402, F401 — bootstrap must p
     required_contexts,
 )
 
+#: This checkout's own repository. A remote reusable-workflow call into it can be
+#: resolved from the files beside this script — which is exactly how the fleet
+#: calls the guard (`guard / merge-group required-check guard`).
+LIB_REPO = "nousergon/nousergon-lib"
+_LIB_ROOT = Path(__file__).resolve().parents[1]
+
 
 def parse_workflow_merge_group(path: Path) -> tuple[str | None, set[str]]:
     """Path-taking wrapper over :func:`nousergon_lib.merge_queue.parse_workflow`.
@@ -61,6 +67,29 @@ def parse_workflow_merge_group(path: Path) -> tuple[str | None, set[str]]:
     are natural, and this keeps the local one a one-liner.
     """
     return parse_workflow(Path(path).read_text())
+
+
+def resolve_from_lib_checkout(uses: str, root: Path = _LIB_ROOT) -> str | None:
+    """Text of a `nousergon/nousergon-lib/<path>@<ref>` reusable workflow, read
+    from this checkout; None for any other repo, or a path outside the checkout.
+
+    The checkout is lib's DEFAULT branch while the caller pins `<ref>`, so this
+    reads the called job names as they are on the default branch. That skew is
+    accepted: the alternative is reporting every lib-called required check as
+    UNKNOWN, which is the 2026-09-30 deadlock this resolver removes. Any other
+    remote stays unresolved, and :func:`coverage_gaps` treats unresolved as a
+    gap — never as coverage.
+    """
+    head, sep, _ref = uses.partition("@")
+    if not sep:
+        return None
+    parts = head.split("/", 2)
+    if len(parts) != 3 or f"{parts[0]}/{parts[1]}".lower() != LIB_REPO:
+        return None
+    target = (root / parts[2]).resolve()
+    if root.resolve() not in target.parents or not target.is_file():
+        return None
+    return target.read_text()
 
 
 def _flag(argv: list[str], name: str) -> str | None:
@@ -123,7 +152,7 @@ def main() -> int:
     # required checks against B's workflows and reports every context as
     # `UNKNOWN`, which reads as a fleet of gaps rather than as operator error.
     print(f"\nScanning {len(workflows)} workflow file(s) in {workflows_dir.resolve()}...")
-    gaps = coverage_gaps(contexts, workflows)
+    gaps = coverage_gaps(contexts, workflows, resolve=resolve_from_lib_checkout)
 
     # Only evaluated when a queue is actually running here. Requiring the guard
     # on a repo with no queue would add a required check that protects nothing,

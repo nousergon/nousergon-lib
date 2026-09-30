@@ -50,6 +50,7 @@ __all__ = [
     "job_name_matches",
     "parse_workflow",
     "required_contexts",
+    "reusable_calls",
 ]
 
 #: The guard's identity, matched against a *normalised* context (see
@@ -206,9 +207,107 @@ def job_name_matches(job_pattern: str, check_context: str) -> bool:
     return bool(re.fullmatch(pattern, check_context))
 
 
+#: A reusable-workflow reference: `owner/repo/path/to/wf.yml@ref`.
+_REMOTE_USES = re.compile(r"^(?P<repo>[^/@\s]+/[^/@\s]+)/(?P<path>[^@\s]+)@(?P<ref>\S+)$")
+
+#: GitHub nests reusable workflows at most four levels deep; the bound also
+#: makes a call cycle (which GitHub rejects anyway) terminate here.
+_MAX_REUSABLE_DEPTH = 4
+
+#: `resolve(uses)` -> the called workflow's text, or None when it cannot be read.
+ResolveFn = Callable[[str], "str | None"]
+
+
+def reusable_calls(text: str) -> list[tuple[str, str]]:
+    """`[(caller_job_display_name, uses)]` for every job that calls a reusable
+    workflow (`jobs.<id>.uses:`).
+
+    GitHub names each job of a called workflow
+    `<caller job name-or-id> / <called job name-or-id>` — the shape
+    `alpha-engine-config`'s required `guard / merge-group required-check guard`
+    has. :func:`parse_workflow` returns only the caller half, which no status
+    context ever carries alone, so these are resolved in :func:`coverage_gaps`.
+    """
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict):
+        return []
+    calls: list[tuple[str, str]] = []
+    for jid, job_def in (doc.get("jobs") or {}).items():
+        if not isinstance(job_def, dict):
+            continue
+        uses = job_def.get("uses")
+        if not isinstance(uses, str) or not uses.strip():
+            continue
+        name = job_def.get("name")
+        calls.append((name if isinstance(name, str) else str(jid), uses.strip()))
+    return calls
+
+
+def _basename(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _called_text(
+    uses: str,
+    workflows: dict[str, str],
+    resolve: ResolveFn | None,
+) -> str | None:
+    """Text of the workflow `uses` names, or None when it cannot be read.
+
+    `./.github/workflows/x.yml` is a file of the audited repo, so it is looked up
+    in `workflows` itself (by basename, since keys may be paths or bare
+    filenames). Anything else is a remote reference and is read only through
+    `resolve`; without one it stays unresolved rather than guessed.
+    """
+    if uses.startswith("./"):
+        target = _basename(uses)
+        for key, text in workflows.items():
+            if _basename(key) == target:
+                return text
+        return None
+    if _REMOTE_USES.match(uses) and resolve is not None:
+        try:
+            return resolve(uses)
+        except Exception:
+            return None
+    return None
+
+
+def _emitted_contexts(
+    text: str,
+    workflows: dict[str, str],
+    resolve: ResolveFn | None,
+    depth: int = 0,
+) -> set[str]:
+    """Context patterns this workflow's jobs emit.
+
+    Plain jobs contribute their name-or-id exactly as :func:`parse_workflow`
+    reports them (unchanged semantics). A reusable-workflow caller additionally
+    contributes `<caller> / <called job>` for every job of the called workflow,
+    recursively. A call whose target cannot be read contributes NO context:
+    claiming `<caller> / anything` would mark a required context covered that
+    may name no real job, and a context nothing emits deadlocks the queue just
+    as surely as a missing trigger. Unresolvable therefore reads as UNKNOWN —
+    the conservative answer.
+    """
+    _, jobs = parse_workflow(text)
+    contexts = set(jobs)
+    if depth >= _MAX_REUSABLE_DEPTH:
+        return contexts
+    for caller, uses in reusable_calls(text):
+        called = _called_text(uses, workflows, resolve)
+        if called is None:
+            continue
+        inner = _emitted_contexts(called, workflows, resolve, depth + 1)
+        contexts.update(f"{caller} / {j}" for j in inner)
+    return contexts
+
+
 def coverage_gaps(
     contexts: list[str],
     workflows: dict[str, str],
+    *,
+    resolve: ResolveFn | None = None,
 ) -> list[tuple[str, str | None]]:
     """`[(context, producing_workflow_or_None)]` for every required context that
     no `merge_group`-triggered workflow produces.
@@ -219,8 +318,20 @@ def coverage_gaps(
     file to edit, and `None` means no workflow in the set claims the context at
     all — which is itself worth surfacing, because a required context nothing
     produces blocks every PR forever.
+
+    **Reusable-workflow calls.** A job with `uses:` emits
+    `<caller job name-or-id> / <called job name-or-id>`, and whether it reports
+    on a `merge_group` event is decided by the CALLER's trigger — a called
+    workflow's own `on:` is just `workflow_call`. Local calls
+    (`./.github/workflows/x.yml`) are resolved from `workflows`; remote ones
+    (`owner/repo/.github/workflows/x.yml@ref`) only through `resolve`. An
+    unresolvable call never counts as coverage: a context under it stays a gap
+    with an UNKNOWN producer.
     """
-    parsed = {name: parse_workflow(text) for name, text in workflows.items()}
+    parsed = {
+        name: (parse_workflow(text)[0], _emitted_contexts(text, workflows, resolve))
+        for name, text in workflows.items()
+    }
     gaps: list[tuple[str, str | None]] = []
 
     for ctx in contexts:
