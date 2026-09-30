@@ -163,3 +163,60 @@ def test_a_guard_that_is_only_advisory_does_NOT_fail_this_check(guard):
     assert guard.should_fail([("pytest", "ci.yml")], guard_gap=False) is True
     assert guard.should_fail([("pytest", "ci.yml")], guard_gap=True) is True
     assert guard.should_fail([], guard_gap=False) is False
+
+
+# ----------------------------------------- reusable-workflow caller (2026-09-30)
+
+
+_LIB_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_lib_resolver_reads_the_called_workflow_from_this_checkout(guard):
+    text = guard.resolve_from_lib_checkout(
+        "nousergon/nousergon-lib/.github/workflows/merge-group-required-check-guard.yml@abc123"
+    )
+    assert text is not None and "merge-group required-check guard" in text
+
+
+def test_lib_resolver_refuses_other_repos_and_escapes(guard):
+    assert guard.resolve_from_lib_checkout(
+        "someone/else/.github/workflows/merge-group-required-check-guard.yml@main"
+    ) is None
+    assert guard.resolve_from_lib_checkout(
+        "nousergon/nousergon-lib/../../etc/passwd@main"
+    ) is None
+    assert guard.resolve_from_lib_checkout("./.github/workflows/x.yml") is None
+
+
+def test_alpha_engine_config_guard_context_resolves_end_to_end(guard, tmp_path, monkeypatch, capsys):
+    """The exact failure: ruleset 20141600 on alpha-engine-config requires
+    `guard / merge-group required-check guard`, and the guard printed
+    `Produced by: UNKNOWN` for its own context, failing every PR."""
+    wf_dir = tmp_path / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "merge-group-required-check-guard.yml").write_text("""
+name: Merge-group required-check guard
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+jobs:
+  guard:
+    uses: nousergon/nousergon-lib/.github/workflows/merge-group-required-check-guard.yml@6c4bdb834f0869efc5de3166b285a812053ea709
+""")
+    (wf_dir / "tests.yml").write_text(
+        "on: {pull_request: {}, merge_group: {types: [checks_requested]}}\n"
+        "jobs: {pytest: {}, cost-gate: {}}\n"
+    )
+    monkeypatch.setattr(guard, "required_contexts", lambda repo: [
+        "pytest", "cost-gate", "guard / merge-group required-check guard",
+    ])
+    monkeypatch.setattr(guard, "active_merge_queue", lambda repo: None)
+    monkeypatch.setattr(sys, "argv", [
+        "validate", "--repo", "nousergon/alpha-engine-config", "--workflows-dir", str(wf_dir),
+    ])
+    rc = guard.main()
+    out = capsys.readouterr().out
+    assert "UNKNOWN" not in out
+    assert rc == 0

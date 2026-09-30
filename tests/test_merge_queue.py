@@ -128,6 +128,105 @@ def test_one_covering_workflow_is_enough_when_several_claim_the_context():
     assert mq.coverage_gaps(["test"], wfs) == []
 
 
+# ------------------------------------------------- reusable-workflow calls
+
+_CALLED = """
+on: {workflow_call: {}}
+jobs:
+  guard:
+    name: merge-group required-check guard
+    runs-on: ubuntu-latest
+"""
+
+_CALLER_REMOTE = """
+on:
+  pull_request: {}
+  merge_group: {types: [checks_requested]}
+jobs:
+  guard:
+    uses: nousergon/nousergon-lib/.github/workflows/merge-group-required-check-guard.yml@6c4bdb8
+"""
+
+_GUARD_CTX = "guard / merge-group required-check guard"
+
+
+def test_remote_reusable_call_resolves_to_caller_slash_called_job():
+    """Regression, 2026-09-30: `alpha-engine-config` ruleset 20141600 requires
+    `guard / merge-group required-check guard` and the guard reported its own
+    context as `Produced by: UNKNOWN`, failing every PR on the repo."""
+    wfs = {"guard.yml": _CALLER_REMOTE}
+    assert mq.coverage_gaps([_GUARD_CTX], wfs, resolve=lambda uses: _CALLED) == []
+
+
+def test_remote_call_is_a_gap_when_the_caller_lacks_merge_group():
+    """The called workflow's own `on:` is irrelevant — the caller's trigger
+    decides whether the context reports for a queue entry."""
+    caller = _CALLER_REMOTE.replace("  merge_group: {types: [checks_requested]}\n", "")
+    wfs = {"guard.yml": caller}
+    assert mq.coverage_gaps([_GUARD_CTX], wfs, resolve=lambda uses: _CALLED) == [
+        (_GUARD_CTX, "guard.yml")
+    ]
+
+
+def test_unresolvable_remote_call_never_counts_as_coverage():
+    """Conservative: without the called file, `guard / <anything>` is unproven."""
+    wfs = {"guard.yml": _CALLER_REMOTE}
+    assert mq.coverage_gaps([_GUARD_CTX], wfs) == [(_GUARD_CTX, None)]
+    assert mq.coverage_gaps([_GUARD_CTX], wfs, resolve=lambda uses: None) == [
+        (_GUARD_CTX, None)
+    ]
+
+
+def test_remote_call_does_not_match_a_job_the_called_workflow_lacks():
+    wfs = {"guard.yml": _CALLER_REMOTE}
+    assert mq.coverage_gaps(["guard / something else"], wfs, resolve=lambda u: _CALLED) == [
+        ("guard / something else", None)
+    ]
+
+
+def test_local_reusable_call_resolves_from_the_workflow_set():
+    wfs = {
+        ".github/workflows/ci.yml": """
+on: {pull_request: {}, merge_group: {types: [checks_requested]}}
+jobs:
+  tests:
+    name: Tests
+    uses: ./.github/workflows/_pytest.yml
+""",
+        ".github/workflows/_pytest.yml": """
+on: {workflow_call: {}}
+jobs:
+  pytest:
+    name: pytest (py${{ matrix.py }})
+""",
+    }
+    assert mq.coverage_gaps(["Tests / pytest (py3.11)"], wfs) == []
+    assert mq.coverage_gaps(["tests / pytest (py3.11)"], wfs) == [
+        ("tests / pytest (py3.11)", None)
+    ], "an explicit caller name: replaces the job id in the context"
+
+
+def test_nested_reusable_calls_compose():
+    wfs = {
+        "a.yml": "on: {merge_group: {types: [checks_requested]}}\n"
+                 "jobs: {outer: {uses: ./.github/workflows/b.yml}}",
+        "b.yml": "on: {workflow_call: {}}\njobs: {mid: {uses: ./.github/workflows/c.yml}}",
+        "c.yml": "on: {workflow_call: {}}\njobs: {leaf: {}}",
+    }
+    assert mq.coverage_gaps(["outer / mid / leaf"], wfs) == []
+
+
+def test_reusable_call_cycles_terminate():
+    wfs = {"a.yml": "on: {merge_group: {types: [checks_requested]}}\n"
+                    "jobs: {loop: {uses: ./.github/workflows/a.yml}}"}
+    assert mq.coverage_gaps(["nope"], wfs) == [("nope", None)]
+
+
+def test_plain_job_semantics_are_unchanged_with_a_resolver():
+    wfs = {"ci.yml": "on: {merge_group: {types: [checks_requested]}}\njobs: {pytest: {}}"}
+    assert mq.coverage_gaps(["pytest"], wfs, resolve=lambda u: None) == []
+
+
 # -------------------------------------------------------------- queue reads
 
 
