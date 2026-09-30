@@ -11,7 +11,11 @@ readme = "README.md"
 # 3.9 support 2026-04-29, so upgrade is on the near-term roadmap). All
 # modules in this package use ``from __future__ import annotations``, so
 # PEP 604 union syntax (``str | None``) is deferred and works on 3.9.
-requires-python = ">=3.9"
+requires-python = ">=3.9.1"
+# Floor is 3.9.1, not 3.9.0: uv/PEP 440 treat 3.9.0 as its own resolution fork
+# (`python_full_version <= '3.9'`), and that phantom fork locked cryptography
+# 47.0.0 (dependabot #21/#39/#43/#44, alpha-engine-config-I11249) although
+# cryptography 50.x supports every real 3.9.x. No one runs 3.9.0 (EC2 is 3.9.2x).
 authors = [{ name = "Brian McMahon" }]
 license = { text = "AGPL-3.0-only" }
 dependencies = [
