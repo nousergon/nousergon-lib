@@ -44,7 +44,8 @@ inventory:
     # feedback_judge_recovery_sf_by_artifact_union_not_execution_status.
     non_fatal: true
     description: >-
-      First-pass SF success rate across Saturday + weekday + EOD pipelines
+      First-pass SF success rate across Saturday + weekday + EOD (post-close
+      and post-close reconcile) pipelines
       (operator-toil diagnostic, NOT a gate — recovery-stitched cycles are
       healthy; deliverable rows below are authoritative).
     sources:
@@ -64,6 +65,9 @@ inventory:
             - arn:aws:states:us-east-1:711398986525:stateMachine:ne-weekly-freshness-pipeline
             - arn:aws:states:us-east-1:711398986525:stateMachine:ne-preopen-trading-pipeline
             - arn:aws:states:us-east-1:711398986525:stateMachine:ne-postclose-trading-pipeline
+            # nousergon-data-PR1996 (alpha-engine-config-I11269 follow-up): the
+            # collector-dependent half of the post-close run, its own machine.
+            - arn:aws:states:us-east-1:711398986525:stateMachine:ne-postclose-reconcile-pipeline
         window_days: 7
         assert:
           op: success_rate_pct_gte

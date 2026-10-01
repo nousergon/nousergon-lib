@@ -206,11 +206,12 @@ def test_pipeline_execution_row_uses_full_state_machine_arns():
     src = row["sources"][0]
     assert src["kind"] == "cloudwatch"
     arns = src["dimensions"]["StateMachineArn"]
-    assert len(arns) == 3
+    assert len(arns) == 4
     expected_suffixes = {
         "ne-weekly-freshness-pipeline",
         "ne-preopen-trading-pipeline",
         "ne-postclose-trading-pipeline",
+        "ne-postclose-reconcile-pipeline",
     }
     for arn in arns:
         assert arn.startswith("arn:aws:states:"), (
