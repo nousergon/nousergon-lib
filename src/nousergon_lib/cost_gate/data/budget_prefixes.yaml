@@ -137,7 +137,7 @@ providers:
         iam_prefixes:
         - events
       CodeBuild:
-        approved: false
+        approved: true
         iam_prefixes:
         - codebuild
       EC2 - Other:
