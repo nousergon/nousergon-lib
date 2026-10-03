@@ -42,6 +42,10 @@
           "enum": ["anytime_valid", "point"],
           "description": "Evidence bar for SERVING. `anytime_valid` (the policy default, champion-challenger-policy.md §5.0) promotes only a lead the confidence sequence's lower bound supports. `point` promotes the age-eligible challenger with the largest positive mean paired difference, and is a PER-SLOT DECLARED DELTA recorded under §5.2(B) — never a fleet default (Brian ruling 2026-09-12, alpha-engine-config-I10546). The confidence sequence is computed and emitted on every comparison under both modes; under `point` it simply does not decide."
         },
+        "promote_against": {
+          "enum": ["incumbent", "every_arm"],
+          "description": "WHO a promotable challenger must beat. `incumbent` (the default; ABSENT means a document written before the field existed, decided the same way) promotes the best lead over the incumbent. `every_arm` (Brian ruling 2026-10-03, alpha-engine-config#11849, defined on `promote_evidence: point` only) promotes a challenger only when it leads the incumbent after `promote_min_weeks` paired weeks AND beats every other eligible challenger head to head, each pair on its own longest common window; every such head-to-head is emitted on `decision.rivals`."
+        },
         "min_active_arms": {"type": "integer", "description": "Never retire below this many active arms."},
         "retired_trailing_cycles": {"type": "integer", "description": "Cycles a retired arm keeps being scored for past retirement (§3)."},
         "retire_evidence": {"enum": ["anytime_valid", "point"], "description": "Evidence bar for a pairwise loss in the RETIREMENT ranking."}
@@ -163,6 +167,11 @@
         },
         "reason": {"type": "string", "minLength": 1},
         "comparisons": {"type": "array", "items": {"$ref": "#/$defs/pair"}},
+        "rivals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/pair"},
+          "description": "Under `config.promote_against: every_arm`: every head-to-head between two challengers that pass their serving preconditions, each on that pair's own longest common window, with `winner`/`loser` decided on the slot's promotion statistic and the confidence sequence carried though it does not decide. Emitted every cycle the rule is in force, whatever the outcome — the record that every arm was compared. EMPTY under `incumbent`, which compares no challenger against another; ABSENT means a document written before this field existed, which is why it is optional rather than required."
+        },
         "ineligible": {
           "type": "object",
           "description": "Arms barred from SERVING by a hard precondition (M-slot behavioural veto, input completeness), regardless of ranking.",

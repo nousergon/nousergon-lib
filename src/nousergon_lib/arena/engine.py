@@ -19,6 +19,13 @@ to persist.
   delta (Brian ruling 2026-09-12, `alpha-engine-config-I10546`). Under
   ``point`` the sequence is still computed and emitted; it just does not
   decide.
+- WHO a challenger must beat is per-slot too (``promote_against``). By
+  default it is the incumbent alone. Under ``every_arm`` — Brian's ruling of
+  2026-10-03, `alpha-engine-config#11849`, defined on ``point`` evidence — a
+  challenger takes the pointer only when it leads the incumbent after
+  ``promote_min_weeks`` paired weeks AND beats every other eligible
+  challenger head to head, each pair on its own longest common window. Every
+  one of those head-to-heads is computed and emitted each cycle.
 - The pointer moves **freely, in both directions, with no cooldown and no
   hysteresis** — "if for a time period version 1 beats version 2, but over
   time version 2 regains the edge, then version 1 should be champion while it
@@ -79,7 +86,8 @@ is ``unservable`` and it fails loud; it is never an empty pass (§7.2).
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import combinations
 from typing import Any
 
 from .arms import ArmRegister
@@ -88,6 +96,7 @@ from .ladder import ScoreLadder, build_ladder
 from .ranking import (
     EVIDENCE_ANYTIME_VALID,
     EVIDENCE_POINT,
+    PairVerdict,
     PairwiseRanking,
     rank_pairwise,
 )
@@ -108,6 +117,8 @@ __all__ = [
     "evaluate_retirements",
     "run_cycle",
     "BENCHMARK_POPULATION",
+    "PROMOTE_AGAINST_INCUMBENT",
+    "PROMOTE_AGAINST_EVERY_ARM",
     "SELECTION_SLOT_KINDS",
     "ARENA_CYCLE_SCHEMA_VERSION",
 ]
@@ -125,6 +136,17 @@ STATISTIC_MEAN_DIFF = "mean_diff"
 #: the pair's common window. For a slot whose arms carry different widths on
 #: purpose — see ``ArenaConfig.promote_statistic``.
 STATISTIC_INFORMATION_RATIO = "information_ratio"
+
+#: A challenger is promotable when it leads the INCUMBENT. Every slot's
+#: behaviour before ``ArenaConfig.promote_against`` existed, and still the
+#: default.
+PROMOTE_AGAINST_INCUMBENT = "incumbent"
+
+#: A challenger is promotable only when it leads the incumbent AND beats every
+#: other eligible challenger head to head, each pair on its own longest common
+#: window — Brian's ruling 2026-10-03 (`alpha-engine-config#11849`). See
+#: ``ArenaConfig.promote_against``.
+PROMOTE_AGAINST_EVERY_ARM = "every_arm"
 
 #: Slot kinds whose job is to beat the population they drew from, and which
 #: therefore may never be graded against SPY. Found 2026-08-17: arms were
@@ -253,6 +275,37 @@ class ArenaConfig:
     #: prices the concentration (IR ~= IC x sqrt(breadth)).
     #: `alpha-engine-config-I11403`, for crucible-research's `research` slot.
     promote_statistic: str = STATISTIC_MEAN_DIFF
+    #: WHO a promotable challenger must beat, orthogonal to the evidence bar
+    #: and the statistic above. ``incumbent`` (the default, and every slot's
+    #: behaviour before this field existed) promotes the challenger with the
+    #: best lead over the incumbent, each lead measured on that challenger's
+    #: own common window with the incumbent.
+    #:
+    #: ``every_arm`` is Brian's ruling of 2026-10-03
+    #: (`alpha-engine-config#11849`), verbatim: "All arms should be compared
+    #: each week, performance tracked, and if after minimum two weeks an arm
+    #: outperforms the champion and all other challengers then it gets
+    #: promoted. Otherwise we compare the common window of weeks for each arm
+    #: in making our comparison." A challenger is promotable only when it
+    #: (1) leads the incumbent on a paired window of at least
+    #: ``promote_min_weeks``, AND (2) beats every OTHER challenger that passes
+    #: its serving preconditions, each head to head on that pair's own longest
+    #: common window. Every such head-to-head is computed every cycle and
+    #: emitted on ``PointerDecision.rivals`` whatever the outcome.
+    #:
+    #: Why it matters under ``point``: ``incumbent`` mode picks the largest
+    #: lead over the incumbent, and leads measured on DIFFERENT windows are not
+    #: comparable — a challenger with a large lead over a short window can take
+    #: the pointer from one that beats it head to head on the window the two
+    #: actually share. Requiring a head-to-head win over every rival removes
+    #: that cross-window comparison from the promotion path, the same way §6.2
+    #: removed it from retirement. The winner, when one exists, is unique: a
+    #: strict win is antisymmetric on a shared window.
+    #:
+    #: Declared only with ``promote_evidence=point``: what "beats" means under
+    #: the anytime-valid sequence across several simultaneous head-to-heads is
+    #: a different multiplicity question, and no slot has been ruled onto it.
+    promote_against: str = PROMOTE_AGAINST_INCUMBENT
     #: Never retire below this many active arms. Two arms are the bare
     #: minimum for a comparison to exist at all; three leaves slack for one
     #: arm to miss a cycle or fail a serving precondition and still leave a
@@ -309,6 +362,26 @@ class ArenaConfig:
                 "promote_statistic must be 'mean_diff' or 'information_ratio'; "
                 f"got {self.promote_statistic!r}"
             )
+        if self.promote_against not in (PROMOTE_AGAINST_INCUMBENT, PROMOTE_AGAINST_EVERY_ARM):
+            raise ArenaConfigError(
+                f"promote_against must be {PROMOTE_AGAINST_INCUMBENT!r} or "
+                f"{PROMOTE_AGAINST_EVERY_ARM!r}; got {self.promote_against!r}"
+            )
+        if (
+            self.promote_against == PROMOTE_AGAINST_EVERY_ARM
+            and self.promote_evidence != EVIDENCE_POINT
+        ):
+            raise ArenaConfigError(
+                f"slot {self.slot!r} declares promote_against="
+                f"{PROMOTE_AGAINST_EVERY_ARM!r} with promote_evidence="
+                f"{self.promote_evidence!r}. The every-arm rule (Brian ruling "
+                "2026-10-03, alpha-engine-config#11849) is defined on the point "
+                "estimate: a challenger must beat the incumbent and every other "
+                "eligible challenger head to head. Requiring the anytime-valid "
+                "sequence to support several simultaneous head-to-heads is a "
+                "different false-promotion question that no slot has been ruled "
+                "onto, so the combination is refused rather than guessed."
+            )
         if (
             self.promote_statistic == STATISTIC_INFORMATION_RATIO
             and self.promote_evidence != EVIDENCE_POINT
@@ -357,6 +430,7 @@ class ArenaConfig:
             "promote_min_weeks": self.promote_min_weeks,
             "promote_evidence": self.promote_evidence,
             "promote_statistic": self.promote_statistic,
+            "promote_against": self.promote_against,
             "min_active_arms": self.min_active_arms,
             "retired_trailing_cycles": self.retired_trailing_cycles,
             "retire_evidence": self.retire_evidence,
@@ -402,6 +476,9 @@ class ArenaConfig:
             # difference, and reconstructing it as anything else would
             # misreport why that pointer moved.
             promote_statistic=str(data.get("promote_statistic", STATISTIC_MEAN_DIFF)),
+            # Same convention: a cycle recorded before `promote_against`
+            # existed was decided against the incumbent alone.
+            promote_against=str(data.get("promote_against", PROMOTE_AGAINST_INCUMBENT)),
             min_active_arms=int(data["min_active_arms"]),
             retired_trailing_cycles=int(data["retired_trailing_cycles"]),
             retire_evidence=str(data["retire_evidence"]),
@@ -499,6 +576,14 @@ class PointerDecision:
     reason: str
     comparisons: tuple[Comparison, ...]
     ineligible: Mapping[str, tuple[ServingPrecondition, ...]]
+    #: Under ``promote_against="every_arm"``: every head-to-head between two
+    #: eligible challengers, each on that pair's own longest common window,
+    #: with the confidence-sequence bound computed and carried. Emitted on
+    #: every cycle the mode is in force, whatever the outcome, so "all arms
+    #: compared each week, performance tracked" (Brian, 2026-10-03) is a
+    #: reading of the artifact rather than a claim. Empty under ``incumbent``
+    #: mode, which compares no challenger against another.
+    rivals: tuple[PairVerdict, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -510,6 +595,7 @@ class PointerDecision:
             "status": self.status,
             "reason": self.reason,
             "comparisons": [c.to_dict() for c in self.comparisons],
+            "rivals": [v.to_dict() for v in self.rivals],
             "ineligible": {
                 arm: [p.to_dict() for p in checks]
                 for arm, checks in sorted(self.ineligible.items())
@@ -528,6 +614,9 @@ class PointerDecision:
             status=str(data["status"]),
             reason=str(data.get("reason") or ""),
             comparisons=tuple(Comparison.from_dict(c) for c in data.get("comparisons") or ()),
+            # `.get`: a decision recorded before `rivals` existed compared no
+            # challenger against another, which is exactly the empty tuple.
+            rivals=tuple(PairVerdict.from_dict(v) for v in data.get("rivals") or ()),
             ineligible={
                 str(arm): tuple(ServingPrecondition.from_dict(p) for p in checks)
                 for arm, checks in (data.get("ineligible") or {}).items()
@@ -815,7 +904,9 @@ def _fallback_rank_key(config: ArenaConfig, comparison: Comparison) -> float:
 
 
 def _promotable(
-    config: ArenaConfig, comparisons: Sequence[Comparison]
+    config: ArenaConfig,
+    comparisons: Sequence[Comparison],
+    rivals: Sequence[PairVerdict] = (),
 ) -> list[tuple[float, Comparison]]:
     """``(rank key, comparison)`` for every challenger allowed to take the pointer.
 
@@ -825,6 +916,10 @@ def _promotable(
     under ``point`` whatever ``config.promote_statistic`` names, resolved
     through :func:`promotion_statistic` so that ranking and eligibility can
     never be computed from two different statistics.
+
+    Under ``promote_against="every_arm"`` a third bar applies: the challenger
+    must also beat every other eligible challenger head to head
+    (:func:`_rival_blockers` is empty). At most one challenger can clear it.
     """
     eligible = [
         c
@@ -842,11 +937,171 @@ def _promotable(
             value = promotion_statistic(config, c.window)
             if value is not None and value > 0:
                 ranked.append((value, c))
+        if config.promote_against == PROMOTE_AGAINST_EVERY_ARM:
+            ranked = [
+                (value, c)
+                for value, c in ranked
+                if not _rival_blockers(config, c.challenger, rivals)
+            ]
         return ranked
     return [(c.bound.lower, c) for c in eligible if c.bound is not None and c.bound.supported]
 
 
-def _hold_reason(config: ArenaConfig, comparisons: Sequence[Comparison]) -> str:
+def _head_to_head(
+    config: ArenaConfig,
+    challengers: Sequence[str],
+    series_by_arm: Mapping[str, ArmSeries],
+) -> tuple[PairVerdict, ...]:
+    """Every pair of ``challengers``, each on that pair's own longest common window.
+
+    The ``promote_against="every_arm"`` record (Brian ruling 2026-10-03,
+    `alpha-engine-config#11849`): "All arms should be compared each week,
+    performance tracked ... Otherwise we compare the common window of weeks
+    for each arm in making our comparison." Each verdict rests on the dates
+    BOTH arms produced, so a young arm is judged only against the slice of an
+    older arm's history it overlaps, and no pool-wide window ever truncates an
+    established arm's record (the §6.2 rule, applied here to promotion).
+
+    The winner is decided on the same statistic the pointer ranks on
+    (:func:`promotion_statistic`). The confidence-sequence bound is computed
+    and carried on every measurable pair even though it does not decide, so
+    the evidence the sequence would have required stays on the record.
+    """
+    verdicts: list[PairVerdict] = []
+    for arm_a, arm_b in combinations(sorted(challengers), 2):
+        window = pair_on_common_window(
+            series_by_arm[arm_a], series_by_arm[arm_b], min_dates=config.min_paired_dates
+        )
+        if not window.measurable:
+            verdicts.append(
+                PairVerdict(
+                    arm_a=arm_a,
+                    arm_b=arm_b,
+                    window=window,
+                    bound=None,
+                    winner=None,
+                    loser=None,
+                    reason=window.unmeasurable_reason or "unmeasurable",
+                )
+            )
+            continue
+        bound = confidence_sequence(
+            window.diffs,
+            alpha=config.alpha,
+            clip=config.diff_clip,
+            variance_mode=config.variance_mode,
+            opt_n=config.opt_n,
+        )
+        value = promotion_statistic(config, window)
+        span = f"over {window.n_dates} paired date(s) ({window.weeks} week(s))"
+        if value is None:
+            winner = loser = None
+            reason = (
+                f"{config.promote_statistic} is not estimable on this window "
+                f"({window.n_dates} paired date(s)); no head-to-head verdict"
+            )
+        elif value > 0:
+            winner, loser = arm_a, arm_b
+            reason = f"{arm_a} beats {arm_b} by {value:.6g} {config.promote_statistic} {span}"
+        elif value < 0:
+            winner, loser = arm_b, arm_a
+            reason = f"{arm_b} beats {arm_a} by {-value:.6g} {config.promote_statistic} {span}"
+        else:
+            winner = loser = None
+            reason = f"tied on {config.promote_statistic} {span}; neither outperforms the other"
+        verdicts.append(
+            PairVerdict(
+                arm_a=arm_a,
+                arm_b=arm_b,
+                window=window,
+                bound=bound,
+                winner=winner,
+                loser=loser,
+                reason=reason,
+            )
+        )
+    return tuple(verdicts)
+
+
+def _rival_margin(config: ArenaConfig, verdict: PairVerdict, arm: str) -> float | None:
+    """``arm``'s margin over the other arm of ``verdict``, signed from ``arm``'s side.
+
+    ``None`` when the pair has no verdict to give: no usable common window, or
+    a deciding statistic that is not estimable on it.
+    """
+    if not verdict.window.measurable:
+        return None
+    value = promotion_statistic(config, verdict.window)
+    if value is None:
+        return None
+    return value if verdict.arm_a == arm else -value
+
+
+def _rival_blockers(
+    config: ArenaConfig, arm: str, rivals: Sequence[PairVerdict]
+) -> list[tuple[str, PairVerdict]]:
+    """The rivals ``arm`` does NOT outperform head to head, with the verdict.
+
+    "Outperforms" is strict: a tie blocks, because an arm that merely matches
+    a rival has not outperformed it. A pair with no verdict at all — no shared
+    window, or a statistic not estimable on it — does not block: there is no
+    comparison for the arm to have lost, and treating an absent comparison as
+    a loss would let an arm that never overlapped another hold the pointer
+    hostage forever. Such a pair is still on the record in ``rivals``.
+    """
+    blockers: list[tuple[str, PairVerdict]] = []
+    for verdict in rivals:
+        if arm not in (verdict.arm_a, verdict.arm_b):
+            continue
+        margin = _rival_margin(config, verdict, arm)
+        if margin is not None and margin <= 0:
+            other = verdict.arm_b if verdict.arm_a == arm else verdict.arm_a
+            blockers.append((other, verdict))
+    return blockers
+
+
+def _describe_blockers(blockers: Sequence[tuple[str, PairVerdict]]) -> str:
+    return ", ".join(
+        f"{other} ({verdict.window.n_dates} paired date(s), {verdict.window.weeks} week(s))"
+        for other, verdict in blockers
+    )
+
+
+def _with_rival_reason(
+    config: ArenaConfig, comparison: Comparison, rivals: Sequence[PairVerdict]
+) -> Comparison:
+    """Append the head-to-head outcome to a comparison that leads the incumbent.
+
+    Only a measured, age-eligible lead is annotated: those are the comparisons
+    the rival bar decides between, and a reader must be able to see WHICH
+    rival held a lead back, not merely that one did.
+    """
+    if (
+        comparison.status != "measured"
+        or not comparison.window.measurable
+        or not _age_eligible(config, comparison.window)
+        or not _leads(config, comparison.window)
+    ):
+        return comparison
+    blockers = _rival_blockers(config, comparison.challenger, rivals)
+    if blockers:
+        suffix = (
+            "; does not outperform every other eligible challenger head to head — "
+            f"not ahead of {_describe_blockers(blockers)} (promote_against=every_arm)"
+        )
+    else:
+        suffix = (
+            "; outperforms every other eligible challenger head to head, each on "
+            "that pair's own common window (promote_against=every_arm)"
+        )
+    return replace(comparison, reason=comparison.reason + suffix)
+
+
+def _hold_reason(
+    config: ArenaConfig,
+    comparisons: Sequence[Comparison],
+    rivals: Sequence[PairVerdict] = (),
+) -> str:
     """Why the incumbent held: which bar nothing cleared, and what was below it.
 
     A hold caused entirely by the age bar reads differently from a hold on
@@ -856,12 +1111,32 @@ def _hold_reason(config: ArenaConfig, comparisons: Sequence[Comparison]) -> str:
     """
     measured = [c for c in comparisons if c.status == "measured" and c.window.measurable]
     too_young = [c for c in measured if not _age_eligible(config, c.window)]
-    mode = (
-        "no age-eligible challenger leads the incumbent on point estimate of "
-        f"{config.promote_statistic} (promote_evidence=point)"
-        if config.promote_evidence == EVIDENCE_POINT
-        else "no age-eligible challenger's lead is supported by the anytime-valid sequence"
-    )
+    if config.promote_against == PROMOTE_AGAINST_EVERY_ARM:
+        mode = (
+            "no age-eligible challenger both leads the incumbent and outperforms "
+            "every other eligible challenger head to head on point estimate of "
+            f"{config.promote_statistic} (promote_evidence=point, "
+            "promote_against=every_arm)"
+        )
+        blocked = [
+            (c.challenger, _rival_blockers(config, c.challenger, rivals))
+            for c in measured
+            if _age_eligible(config, c.window) and _leads(config, c.window)
+        ]
+        detail = "; ".join(
+            f"{arm} leads the incumbent but is not ahead of {_describe_blockers(blockers)}"
+            for arm, blockers in sorted(blocked)
+            if blockers
+        )
+        if detail:
+            mode = f"{mode}. {detail}"
+    elif config.promote_evidence == EVIDENCE_POINT:
+        mode = (
+            "no age-eligible challenger leads the incumbent on point estimate of "
+            f"{config.promote_statistic} (promote_evidence=point)"
+        )
+    else:
+        mode = "no age-eligible challenger's lead is supported by the anytime-valid sequence"
     if too_young:
         detail = "; ".join(
             f"{c.challenger}: {c.window.weeks} paired week(s)" for c in sorted(too_young, key=lambda c: c.challenger)
@@ -897,6 +1172,15 @@ def decide_pointer(
       positive mean paired difference (``point``, a per-slot declared delta —
       Brian ruling 2026-09-12, `alpha-engine-config-I10546`). The bound is
       computed and emitted either way.
+
+    Under ``config.promote_against="every_arm"`` (Brian ruling 2026-10-03,
+    `alpha-engine-config#11849`) a third bar applies: the challenger must also
+    beat every OTHER challenger that passes its serving preconditions, head to
+    head on each pair's own longest common window. Every such head-to-head is
+    computed and returned on ``rivals`` whatever the outcome. Arms failing a
+    serving precondition — the behavioural veto, input completeness, a
+    control's exclusion — are neither candidates nor rivals: an arm that may
+    not serve cannot hold the pointer, and so cannot keep another arm off it.
     """
     checks = {arm: tuple(preconditions.get(arm, ())) for arm in series_by_arm} if preconditions else dict.fromkeys(series_by_arm, ())
     ineligible = {arm: c for arm, c in checks.items() if not _eligible(c)}
@@ -989,6 +1273,17 @@ def decide_pointer(
             )
         )
 
+    # Every eligible challenger against every other, each pair on its own
+    # longest common window — only under the every-arm rule, which is the
+    # only rule that reads them. Computed before `_promotable` so the rival
+    # bar and the record come from ONE set of verdicts.
+    rivals: tuple[PairVerdict, ...] = ()
+    if config.promote_against == PROMOTE_AGAINST_EVERY_ARM:
+        rivals = _head_to_head(
+            config, [arm for arm in eligible_arms if arm != incumbent], series_by_arm
+        )
+        comparisons = [_with_rival_reason(config, c, rivals) for c in comparisons]
+
     # (rank key, comparison) pairs for the challengers this cycle is allowed
     # to promote. Building the tuple here rather than reaching through
     # `c.bound` at the ranking site keeps the bound's presence a fact of the
@@ -996,7 +1291,7 @@ def decide_pointer(
     # their head. `_promotable` applies BOTH bars — the paired-week age and
     # the configured evidence mode — so there is exactly one place a
     # challenger can become choosable.
-    supported: list[tuple[float, Comparison]] = _promotable(config, comparisons)
+    supported: list[tuple[float, Comparison]] = _promotable(config, comparisons, rivals)
 
     if not incumbent_eligible:
         # The incumbent is not permitted to serve. The pointer MUST move, and
@@ -1042,6 +1337,7 @@ def decide_pointer(
             ),
             comparisons=tuple(comparisons),
             ineligible=ineligible,
+            rivals=rivals,
         )
 
     if not comparisons:
@@ -1076,6 +1372,7 @@ def decide_pointer(
             ),
             comparisons=tuple(comparisons),
             ineligible=ineligible,
+            rivals=rivals,
         )
 
     if not supported:
@@ -1086,9 +1383,10 @@ def decide_pointer(
             champion=incumbent,
             moved=False,
             status="held",
-            reason=_hold_reason(config, comparisons),
+            reason=_hold_reason(config, comparisons, rivals),
             comparisons=tuple(comparisons),
             ineligible=ineligible,
+            rivals=rivals,
         )
 
     # Rank promotable challengers by the statistic the evidence mode decided
@@ -1104,6 +1402,18 @@ def decide_pointer(
         evidence = f"point estimate, mean paired difference {winner_key:.6g} > 0"
     else:
         evidence = f"anytime-valid sequence, lower bound {winner_key:.6g} > 0"
+    # Named in the reason only when it is not the default, so a slot that
+    # never declared it renders byte-identically to before the field existed.
+    against = ""
+    if config.promote_against == PROMOTE_AGAINST_EVERY_ARM:
+        against = f", promote_against={config.promote_against}"
+        own = [v for v in rivals if winner.challenger in (v.arm_a, v.arm_b)]
+        beaten = sum(1 for v in own if v.winner == winner.challenger)
+        evidence = (
+            f"{evidence}, and it outperforms every other eligible challenger it "
+            f"shares a window with head to head ({beaten} of {len(own)}), each on "
+            "that pair's own common window"
+        )
     return PointerDecision(
         slot=config.slot,
         as_of=as_of,
@@ -1117,10 +1427,12 @@ def decide_pointer(
             f"{config.promote_statistic} over {winner.window.n_dates} paired "
             f"date(s) ({winner.window.weeks} week(s)); "
             f"decided on the {evidence} "
-            f"(promote_evidence={config.promote_evidence}, promote_min_weeks={config.promote_min_weeks})"
+            f"(promote_evidence={config.promote_evidence}, promote_min_weeks={config.promote_min_weeks}"
+            f"{against})"
         ),
         comparisons=tuple(comparisons),
         ineligible=ineligible,
+        rivals=rivals,
     )
 
 
