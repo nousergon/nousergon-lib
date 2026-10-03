@@ -60,6 +60,8 @@ from .arms import (
 from .confseq import ConfSeqBound, confidence_sequence
 from .engine import (
     ARENA_CYCLE_SCHEMA_VERSION,
+    PROMOTE_AGAINST_EVERY_ARM,
+    PROMOTE_AGAINST_INCUMBENT,
     STATISTIC_INFORMATION_RATIO,
     STATISTIC_MEAN_DIFF,
     ArenaConfig,
@@ -124,6 +126,8 @@ __all__ = [
     "PairedWindow",
     "PairwiseRanking",
     "PointerDecision",
+    "PROMOTE_AGAINST_EVERY_ARM",
+    "PROMOTE_AGAINST_INCUMBENT",
     "RetirementVerdict",
     "ScoreLadder",
     "STATISTIC_INFORMATION_RATIO",
