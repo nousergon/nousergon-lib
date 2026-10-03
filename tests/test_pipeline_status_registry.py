@@ -231,3 +231,11 @@ def test_postclose_split_moves_the_collector_stages_to_the_reconcile_machine():
     # Every moved stage keeps the registry entry it had before the split.
     for stage in moved:
         assert stage in registry.STATE_TO_ARCHIVE_PAGE
+
+
+def test_director_poll_companion_rolls_up_into_the_director_row():
+    """alpha-engine-config-I11936: the weekly Director runs over SSM on the
+    launcher spot, polled by ``WaitForDirector``; the poll must roll up into
+    the existing ``Director`` row rather than render as its own."""
+    assert registry.WAIT_GROUPING.get("WaitForDirector") == "Director"
+    assert "Director" in registry.STATE_TO_ARCHIVE_PAGE
