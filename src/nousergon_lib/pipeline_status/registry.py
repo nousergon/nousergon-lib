@@ -107,6 +107,10 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # alpha-engine-config-I11312: the observe-mode on-spot preflight pass's
     # poll companion rolls up into its dispatch row.
     "WaitForWeeklyPreflightOnSpot": "WeeklyPreflightOnSpot",
+    # alpha-engine-config-I11936: the Director moved off Lambda onto the
+    # weekly launcher spot over SSM; its poll companion rolls up into the
+    # Director row, which keeps its existing archive page.
+    "WaitForDirector": "Director",
     "WaitForModelZoo": "ModelZooRotation",  # L4544 weekly model-zoo rotation
     # alpha-engine-config-I5758: ThinkTankCoverage moved off a direct
     # lambda:invoke (TimeoutSeconds 900 — the AWS Lambda MAXIMUM, which the
