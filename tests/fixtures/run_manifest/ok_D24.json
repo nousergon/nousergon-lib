@@ -1,0 +1,65 @@
+{
+  "calendar_date": "2026-10-01",
+  "code_sha": "5e1f00c0ffee5e1f00c0ffee5e1f00c0ffee5e1f",
+  "compute": {
+    "escalated_on_demand": false,
+    "instance_type": "c5.large",
+    "interruptions": 0,
+    "region": "us-east-1",
+    "spot": true
+  },
+  "cost_usd": 0.0,
+  "finished": "2026-10-01T22:26:30Z",
+  "guards": [
+    {
+      "baseline": null,
+      "detail": "D24 published 56 rows (read from result['fundamentals'], 34525 bytes) to market_data/fundamentals/latest.json",
+      "guard": "data_empty_fresh",
+      "key": "market_data/fundamentals/latest.json",
+      "mode": "observe",
+      "value": 56.0,
+      "verdict": "ok"
+    }
+  ],
+  "inputs": [],
+  "log_location": "s3://alpha-engine-research/data_collection/logs/post-market-data/2026-10-01/i-0123456789abcdef0.log",
+  "metrics": [
+    {
+      "criticality": "supporting",
+      "derived_letter": "N/A",
+      "last_updated_utc": "2026-10-01T22:26:30Z",
+      "metric_type": "count",
+      "module": "nousergon-data",
+      "n_floor": 0,
+      "name": "data.D24.guard.empty_fresh",
+      "source_path": "weekly_collector.py::_phase_collect[metron_fundamentals_data]",
+      "status": "GREEN",
+      "status_reason": "D24 published 56 rows (read from result['fundamentals'], 34525 bytes) to market_data/fundamentals/latest.json",
+      "trend_decoration": "\u2192",
+      "unit": "rows",
+      "value": 56.0
+    }
+  ],
+  "outputs": [
+    {
+      "bytes": 34525,
+      "etag": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "key": "market_data/fundamentals/latest.json",
+      "rows_out": 56,
+      "schema_version": null,
+      "version_capture": "head_object",
+      "version_id": "fixture.version.id.0000000000001"
+    }
+  ],
+  "reason": "",
+  "rows_in": 0,
+  "rows_out": 56,
+  "rows_rejected": [],
+  "run_id": "01M3WS6S6SAFC863RKA7AV78QW",
+  "schema_version": "data_run_manifest.v1",
+  "started": "2026-10-01T22:26:21Z",
+  "status": "ok",
+  "trading_day": "2026-10-01",
+  "trigger": "scheduled",
+  "unit_id": "D24"
+}

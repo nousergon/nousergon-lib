@@ -1,0 +1,54 @@
+{
+  "calendar_date": "2026-10-03",
+  "code_sha": "5e1f00c0ffee5e1f00c0ffee5e1f00c0ffee5e1f",
+  "compute": {
+    "escalated_on_demand": false,
+    "instance_type": "c5.large",
+    "interruptions": 0,
+    "region": "us-east-1",
+    "spot": true
+  },
+  "cost_usd": 0.0,
+  "finished": "2026-10-03T12:59:49Z",
+  "guards": [
+    {
+      "baseline": null,
+      "detail": "D01 published nothing on this run (same-date auto-skip); there is no new write for the guard to grade",
+      "guard": "data_empty_fresh",
+      "key": "market_data/weekly/2026-10-02/constituents.json",
+      "mode": "observe",
+      "value": null,
+      "verdict": "not_applicable"
+    }
+  ],
+  "inputs": [],
+  "log_location": "s3://alpha-engine-research/data_collection/logs/weekly-phase-one/2026-10-02/i-0123456789abcdef1.log",
+  "metrics": [
+    {
+      "criticality": "supporting",
+      "derived_letter": "N/A",
+      "last_updated_utc": "2026-10-03T12:59:49Z",
+      "metric_type": "count",
+      "module": "nousergon-data",
+      "n_floor": 0,
+      "name": "data.D01.guard.empty_fresh",
+      "source_path": "weekly_collector.py::_phase_collect[constituents]",
+      "status": "N/A-NOT-IMPL",
+      "status_reason": "D01 published nothing on this run (same-date auto-skip); there is no new write for the guard to grade",
+      "trend_decoration": "\u2192",
+      "unit": "rows"
+    }
+  ],
+  "outputs": [],
+  "reason": "no_new_data_declared",
+  "rows_in": 0,
+  "rows_out": 0,
+  "rows_rejected": [],
+  "run_id": "01M40XJVKT1V525TEZQVN3XVAK",
+  "schema_version": "data_run_manifest.v1",
+  "started": "2026-10-03T12:59:49Z",
+  "status": "not_applicable",
+  "trading_day": "2026-10-02",
+  "trigger": "scheduled",
+  "unit_id": "D01"
+}
