@@ -120,8 +120,15 @@ rag-local-ann = [
 # ~600MB BAAI bge-reranker-v2-m3 model on first use. Kept as a
 # separate extra so vector/hybrid-only consumers don't pay the install
 # cost.
+#
+# Floor 5.6.0 + Python >=3.10 marker (alpha-engine-config-I12017, dependabot
+# #48 / GHSA local-model loading bypasses trust_remote_code): every release
+# below 5.6.0 is vulnerable, and 5.2.0+ require Python >=3.10, so no patched
+# release exists for 3.9. On 3.9 the extra installs nothing and
+# CrossEncoderReranker raises its ImportError rather than resolving to the
+# vulnerable 5.1.2. No fleet consumer installs [rerank] (checked 2026-10-06).
 rerank = [
-    "sentence-transformers>=3.0",
+    "sentence-transformers>=5.6.0; python_version >= '3.10'",
 ]
 # Parquet row-count completeness predicate (nousergon_lib.artifact_freshness
 # .check_completeness, config#3086, CompletenessCheck.kind="parquet_row_count").

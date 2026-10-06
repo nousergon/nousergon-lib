@@ -166,7 +166,8 @@ class CrossEncoderReranker:
         except ImportError as exc:
             raise ImportError(
                 "CrossEncoderReranker requires sentence-transformers. "
-                "Install with: pip install 'nousergon-lib[rerank]'"
+                "Install with: pip install 'nousergon-lib[rerank]' "
+                "(Python >=3.10 only; no patched release supports 3.9)"
             ) from exc
         logger.info("Loading cross-encoder model: %s", self.model_name)
         self._model = CrossEncoder(self.model_name)
