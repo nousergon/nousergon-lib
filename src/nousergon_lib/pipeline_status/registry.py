@@ -150,6 +150,9 @@ WAIT_GROUPING: Final[dict[str, str]] = {
     # Top-of-pipeline executor-checkout refresh chokepoint (config#1549) —
     # the whole EOD run executes latest origin/main by construction.
     "WaitForRefreshExecutorDeploy": "RefreshExecutorDeploy",
+    # alpha-engine-config-I12020: the reconcile SF's bounded drain of the v2
+    # trader's boot-time reconcile, in front of StopTradingInstance.
+    "WaitForTraderReconcileDrain": "DrainTraderReconcile",
     "WaitForPostMarketArcticAppend": "PostMarketArcticAppend",  # data #... EOD append split (2026-06-16)
     "WaitForCaptureSnapshot": "CaptureSnapshot",
     "WaitForEOD": "EODReconcile",
@@ -1563,6 +1566,23 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
     "StopTradingInstance": ArtifactReason(
         reason="EC2 stopInstances on the trading instance; no artifact — "
         "operational only."
+    ),
+    # alpha-engine-config-I12020: ne-postclose-reconcile-pipeline keeps the
+    # box up until the v2 trader's boot-time reconcile (a Persistent=true
+    # systemd timer that catches up at the machine's own box start) settles.
+    "DrainTraderReconcile": ArtifactReason(
+        reason="Bounded SSM wait (alpha-engine-config-I12020) in front of "
+        "StopTradingInstance until alpha-engine-trader-reconcile.service is "
+        "neither queued nor running, so the box stop cannot cut off the v2 "
+        "trader's boot-time reconcile. Fails open toward the stop. No "
+        "artifact — operational only; the trader reconcile files its own "
+        "run manifest."
+    ),
+    "PublishTraderReconcileDrainUnsettled": ArtifactReason(
+        reason="Fail-open SNS alert (alpha-engine-config-I12020) fired when "
+        "DrainTraderReconcile did not settle (budget exhausted, non-Success "
+        "status or SSM error) and the box is stopped anyway. No persisted "
+        "artifact (the alert IS the surface)."
     ),
     "RefreshExecutorDeploy": ArtifactReason(
         reason="Top-of-pipeline executor-checkout git refresh chokepoint "
