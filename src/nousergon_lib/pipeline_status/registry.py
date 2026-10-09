@@ -1144,6 +1144,17 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "carries the override shape needed to authorise one start. No "
         "persisted artifact (the alert IS the surface).",
     ),
+    # 2026-10-09 in-session box stop (alpha-engine-config-I12020 follow-up):
+    # ne-postclose-trading-pipeline and ne-postclose-reconcile-pipeline refuse
+    # a start in the pre-session window [08:00, 09:30) ET, after the gate.
+    "NotifyPreSessionBlocked": ArtifactReason(
+        reason="Refusal SNS publish — a box-stopping trading pipeline was "
+        "started in the pre-session window [08:00, 09:30) ET, when the preopen "
+        "pipeline has the trading box up for the session. Precedes the "
+        "MarketHoursBlocked Fail terminal, so the run does not read green to "
+        "a status-keyed watcher (sf-pipeline-policy §2.3). No persisted "
+        "artifact (the alert IS the surface).",
+    ),
     "NotifyMarketHoursOverrideMalformed": ArtifactReason(
         reason="Refusal SNS publish — a market_hours_override was offered and "
         "is not usable (missing/blank field, unparseable or back-dated "
@@ -1577,6 +1588,15 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "trader's boot-time reconcile. Fails open toward the stop. No "
         "artifact — operational only; the trader reconcile files its own "
         "run manifest."
+    ),
+    # 2026-10-09 box ownership: ne-postclose-reconcile-pipeline stops the
+    # trading box only if it started it.
+    "NotifyStopSkippedNotBoxOwner": ArtifactReason(
+        reason="Informational SNS publish — the reconcile pipeline finished "
+        "and did NOT drain or stop the trading box, because the box was "
+        "already running when this execution started it (another actor owns "
+        "it). The 22:00 PT alpha-engine-stop-trading schedule bounds the "
+        "uptime. No persisted artifact (the alert IS the surface)."
     ),
     "PublishTraderReconcileDrainUnsettled": ArtifactReason(
         reason="Fail-open SNS alert (alpha-engine-config-I12020) fired when "
