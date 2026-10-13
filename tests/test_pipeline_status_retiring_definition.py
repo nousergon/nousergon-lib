@@ -221,3 +221,104 @@ def test_the_cutover_stages_keep_their_registry_entries_for_history(pipeline):
     from every historical execution the dashboard renders."""
     for stage in _RETIRED_BY_THE_CUTOVER[pipeline]:
         assert stage in STATE_TO_ARCHIVE_PAGE, f"{pipeline}:{stage}"
+
+
+# ── The v1 weekly data copies, retiring (alpha-engine-config-I12271) ──
+
+WEEKLY = "ne-weekly-freshness-pipeline"
+
+#: The Saturday cadence has skipped these since nousergon-data-PR2025
+#: (alpha-engine-config-I11832): v2 ``ne-data-collection-weekly`` is the one
+#: writer of D15/D16/D46. They are still in ``step_function.json``.
+_V1_DATA_COPIES = ("RAGIngestion", "DataPhase2")
+
+
+def _weekly_cadence_walk() -> list[str]:
+    """The walk of a perfect scheduled Saturday: every spine stage except the
+    two the cadence skips, plus the parity witness (the trigger also carries
+    ``skip_parity``)."""
+    spine = PIPELINE_STAGE_ORDER[WEEKLY]
+    walk = [s for s in spine if s not in _V1_DATA_COPIES and s not in ("ParityParallel", "PitParityCompare")]
+    return [*walk, "MarkParityVerdictUnknownByCadence"]
+
+
+def _weekly_run(entered):
+    return classify_work(state_machine_name=WEEKLY, status=RunStatus.SUCCEEDED, entered_states=entered)
+
+
+def test_the_v1_weekly_data_copies_are_retiring_and_still_declared():
+    """Retiring, not removed: the states are still in nousergon-data's
+    definition, so they stay in the spine (its stale-retiring contract test
+    is the trigger for the release that drops them) and keep their registry
+    entries."""
+    spine = PIPELINE_STAGE_ORDER[WEEKLY]
+    retiring = retiring_definition_stages_for(WEEKLY)
+    for stage in _V1_DATA_COPIES:
+        assert stage in spine, stage
+        assert stage in retiring, stage
+        assert "I12271" in RETIRING_DEFINITION_STAGES[WEEKLY][stage]
+        assert stage in STATE_TO_ARCHIVE_PAGE, stage
+    # Nothing else in the weekly spine is excused this way.
+    assert retiring == frozenset(_V1_DATA_COPIES)
+
+
+def test_a_definition_that_still_has_the_v1_copies_is_not_stale_or_undefined():
+    """nousergon-data main today: both states are still defined."""
+    names = set(PIPELINE_STAGE_ORDER[WEEKLY]) | {"MarkParityVerdictUnknownByCadence"}
+    assert undefined_spine_stages(WEEKLY, names) == ()
+    assert stale_retiring_stages(WEEKLY, names) == ()
+
+
+def test_a_definition_that_dropped_the_v1_copies_sees_the_markers_as_stale():
+    """I11832's follow-up removes the states; the owner's contract test must
+    then demand the release that drops them from the spine."""
+    names = set(PIPELINE_STAGE_ORDER[WEEKLY]) - set(_V1_DATA_COPIES)
+    assert undefined_spine_stages(WEEKLY, names) == ()
+    assert set(stale_retiring_stages(WEEKLY, names)) == set(_V1_DATA_COPIES)
+
+
+def test_a_perfect_saturday_run_skipping_the_v1_copies_is_complete():
+    """The 2026-10-02 cycle graded not_clean missing exactly these two."""
+    outcome = _weekly_run(_weekly_cadence_walk())
+    assert not set(_V1_DATA_COPIES) & set(outcome.stages_missing)
+    # Parity is NOT excused per execution (that is the cycle fold's job).
+    assert set(outcome.stages_missing) == {"ParityParallel", "PitParityCompare"}
+
+
+def test_a_perfect_saturday_cycle_skipping_the_v1_copies_is_complete_with_only_parity_declared():
+    walk = _weekly_cadence_walk()
+    shape = build_cycle_shape(
+        pipeline=WEEKLY,
+        run_date="2026-10-16",
+        outcomes=[(_weekly_run(walk), "weekly", walk)],
+    )
+    assert shape.verdict is CycleVerdict.COMPLETED
+    assert shape.stages_missing == ()
+    assert set(shape.stages_declared_skipped) == {"ParityParallel", "PitParityCompare"}
+
+
+def test_a_full_scope_saturday_run_skipping_only_the_v1_copies_is_a_full_run():
+    """An operator run with skip_parity false: full scope, the v1 copies apart."""
+    walk = [s for s in PIPELINE_STAGE_ORDER[WEEKLY] if s not in _V1_DATA_COPIES]
+    outcome = _weekly_run(walk)
+    assert outcome.verdict is WorkVerdict.COMPLETED
+    assert outcome.reason == "full_run"
+
+
+def test_the_retiring_markers_do_not_excuse_any_other_weekly_stage():
+    walk = [s for s in _weekly_cadence_walk() if s != "Scanner"]
+    shape = build_cycle_shape(
+        pipeline=WEEKLY,
+        run_date="2026-10-16",
+        outcomes=[(_weekly_run(walk), "weekly", walk)],
+    )
+    assert shape.verdict is not CycleVerdict.COMPLETED
+    assert shape.stages_missing == ("Scanner",)
+
+
+def test_a_run_that_still_enters_the_v1_copies_counts_them_as_entered():
+    """The Friday shell run and run_weekly_offcycle.sh still run both stages."""
+    walk = list(PIPELINE_STAGE_ORDER[WEEKLY])
+    outcome = _weekly_run(walk)
+    assert outcome.verdict is WorkVerdict.COMPLETED
+    assert set(_V1_DATA_COPIES) <= set(outcome.stages_entered)
