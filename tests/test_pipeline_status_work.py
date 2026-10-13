@@ -123,15 +123,21 @@ def test_real_failure_is_incomplete_and_names_the_stages_it_reached():
     # 9/16: the spine is graded as declared NOW. alpha-engine-config-I11269
     # (the decoupled data cutover) retired MorningEnrich/DataPhase1 from the
     # weekly spine and landed WaitForCollectionManifests in their place. This
-    # 2026-08-15 execution entered both retired stages (they no longer count,
-    # in either direction) and could not have entered the new wait (it is
-    # missing, as it would be for any pre-cutover run).
+    # 2026-08-15 execution entered both retired stages (they no longer count
+    # as spine stages, in either direction).
     assert o.stage_coverage == "9/16"
     assert "EvalRollingMean" in o.stages_entered
     assert "ParityParallel" in o.stages_missing
-    assert "WaitForCollectionManifests" in o.stages_missing
     assert "MorningEnrich" not in o.stages_entered
     assert "MorningEnrich" not in o.stages_missing
+    # alpha-engine-config-I12271: entering the predecessors is walk evidence
+    # that this run's definition had no WaitForCollectionManifests, so the
+    # successor is EXCUSED (registry.SUPERSEDED_STAGES) — neither missing nor
+    # credited as entered. The failure is still a failure: it is INCOMPLETE
+    # on the stages after the one it died in, which is what this test pins.
+    assert {"MorningEnrich", "DataPhase1"} <= set(load(FAILED)["entered_states"])
+    assert "WaitForCollectionManifests" not in o.stages_missing
+    assert "WaitForCollectionManifests" not in o.stages_entered
 
 
 def test_a_full_run_is_the_only_completed_verdict():

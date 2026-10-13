@@ -2008,6 +2008,46 @@ def pending_definition_stages_for(state_machine: str) -> frozenset[str]:
     return frozenset(PENDING_DEFINITION_STAGES.get(_pipeline_name(state_machine), {}))
 
 
+#: Spine stages whose slot an execution of a PRE-CHANGE definition served
+#: under a predecessor's name: ``{pipeline: {successor: (predecessor, ...)}}``
+#: (alpha-engine-config-I12271).
+#:
+#: Every grader judges an execution against TODAY's spine. When a change
+#: REPLACES stages, an execution that ran the old definition could never have
+#: entered the successor, so it read as short a stage that did not exist yet
+#: — the 28-day substrate window graded every pre-cutover preopen cycle as
+#: missing ``WaitForCollectionManifests`` (measured on the evaluator's fold:
+#: preopen 2/19 on the 2026-10-02 card's window).
+#:
+#: Entering ANY predecessor is EVIDENCE in the walk that the execution ran a
+#: definition without the successor; the successor is then not missing for
+#: that walk. Absence is never the trigger: a walk that entered neither a
+#: predecessor nor the successor is still short the successor. The excused
+#: successor is NOT reported as entered, so ``stage_coverage`` is unchanged.
+#:
+#: Lifetime: an entry is dead once no pre-change execution can sit in any
+#: consumer's trailing window. The I11269 cutover (nousergon-data-PR1930,
+#: merged 2026-09-28) leaves the evaluator's 28-day window around 2026-10-31;
+#: delete these two entries then (Re-exam: 2026-11-02).
+SUPERSEDED_STAGES: Final[dict[str, dict[str, tuple[str, ...]]]] = {
+    "ne-weekly-freshness-pipeline": {
+        "WaitForCollectionManifests": ("MorningEnrich", "DataPhase1"),
+    },
+    "ne-preopen-trading-pipeline": {
+        "WaitForCollectionManifests": ("LaunchMorningEnrichSpot", "LaunchMorningArcticAppendSpot"),
+    },
+    "ne-postclose-trading-pipeline": {},
+    "ne-postclose-reconcile-pipeline": {},
+}
+
+
+def superseded_stages_served(state_machine: str, states_entered: Iterable[str]) -> frozenset[str]:
+    """Successor stages whose predecessor this walk entered (see SUPERSEDED_STAGES)."""
+    entered = set(states_entered)
+    table = SUPERSEDED_STAGES.get(_pipeline_name(state_machine), {})
+    return frozenset(succ for succ, preds in table.items() if entered.intersection(preds))
+
+
 def retiring_definition_stages_for(state_machine: str) -> frozenset[str]:
     """Spine stages declared retiring, for an ARN or bare name.
 

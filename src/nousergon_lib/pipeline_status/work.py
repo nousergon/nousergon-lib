@@ -86,6 +86,7 @@ from .registry import (
     retiring_definition_stages_for,
     skip_terminals_for,
     stage_order_for,
+    superseded_stages_served,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -270,8 +271,13 @@ def classify_work(
     # entering it is not a finding either (registry.RETIRING_DEFINITION_STAGES,
     # alpha-engine-config-I11267).
     retiring = retiring_definition_stages_for(state_machine_name)
+    # A successor whose predecessor this walk entered was served under the old
+    # name by a pre-change definition (registry.SUPERSEDED_STAGES,
+    # alpha-engine-config-I12271). Evidence from the walk, never absence.
+    served = superseded_stages_served(state_machine_name, entered)
     missing = tuple(
-        s for s in spine if s not in entered and s not in pending and s not in retiring
+        s for s in spine
+        if s not in entered and s not in pending and s not in retiring and s not in served
     )
 
     common = {

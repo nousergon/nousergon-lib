@@ -121,6 +121,7 @@ from .registry import (
     pending_definition_stages_for,
     retiring_definition_stages_for,
     stage_order_for,
+    superseded_stages_served,
 )
 from .roles import CADENCE_ROLES, RECOVERY_ROLES
 from .work import WorkOutcome, WorkVerdict, classify_work, entered_states_from_history
@@ -484,6 +485,10 @@ def build_cycle_shape(
     # entered — the declaration does not erase observed work.
     declared = declared_skip_stages_for(pipeline, all_states)
     declared_skipped = tuple(s for s in spine if s in declared and s not in union)
+    # A successor whose predecessor the cycle's walk entered was served under
+    # the old name by a pre-change definition (registry.SUPERSEDED_STAGES,
+    # alpha-engine-config-I12271). Evidence from the walk, never absence.
+    served = superseded_stages_served(pipeline, all_states)
     missing = tuple(
         s
         for s in spine
@@ -491,6 +496,7 @@ def build_cycle_shape(
         and s not in pending
         and s not in retiring
         and s not in declared_skipped
+        and s not in served
     )
 
     common: dict[str, Any] = {
