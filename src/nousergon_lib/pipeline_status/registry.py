@@ -1690,6 +1690,9 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
         # by the bounded manifest-readiness wait. Their STATE_TO_ARCHIVE_PAGE /
         # WAIT_GROUPING entries are kept so pre-cutover executions still render.
         "WaitForCollectionManifests",
+        # RAGIngestion and DataPhase2 are RETIRING (alpha-engine-config-I12271):
+        # the Saturday cadence skips them so v2 is the one writer of
+        # D15/D16/D46. See RETIRING_DEFINITION_STAGES.
         "RAGIngestion",
         "Scanner",
         "SignalsEnvelope",
@@ -1919,7 +1922,24 @@ RETIRING_DEFINITION_STAGES: Final[dict[str, dict[str, str]]] = {
     # PENDING_DEFINITION_STAGES. The seven v1 data stages marked here by
     # alpha-engine-config-I11267 left the spine with this map when the cutover
     # PR removed their states (alpha-engine-config-I11269).
-    "ne-weekly-freshness-pipeline": {},
+    #
+    # alpha-engine-config-I12271: the v1 copies of the two remaining weekly
+    # data stages. Since nousergon-data-PR2025 (2026-10-02,
+    # alpha-engine-config-I11832) the Saturday trigger Input carries
+    # skip_data_phase2 + skip_rag_ingestion, so v2 ne-data-collection-weekly
+    # (alternative-phase-two, rag-weekly-ingestion) is the ONE writer of
+    # D15/D16/D46, and no scheduled execution enters either state again. The
+    # states are still in step_function.json — removing them is I11832's
+    # open follow-up — which is exactly the window this map exists for. Under
+    # the I11987 option A ruling an input flag excuses nothing, so without
+    # these markers every scheduled Saturday graded not_clean, missing
+    # exactly these two. When nousergon-data drops the states, its
+    # stale-retiring contract test forces the release that removes them from
+    # the spine and from this map (the nousergon-lib-PR449 shape).
+    "ne-weekly-freshness-pipeline": {
+        "RAGIngestion": "alpha-engine-config-I12271 (v2 rag-weekly-ingestion owns D16/D46, I11832)",
+        "DataPhase2": "alpha-engine-config-I12271 (v2 alternative-phase-two owns D15, I11832)",
+    },
     "ne-preopen-trading-pipeline": {},
     "ne-postclose-trading-pipeline": {},
     "ne-postclose-reconcile-pipeline": {},
