@@ -104,6 +104,10 @@ providers:
         approved: true
         iam_prefixes:
         - scheduler
+      Amazon Kinesis Firehose:
+        approved: true
+        iam_prefixes:
+        - firehose
       Amazon Polly:
         approved: true
         iam_prefixes:
