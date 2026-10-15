@@ -26,11 +26,13 @@ resource_types:
   AWS::CloudWatch::Alarm: cloudwatch
   AWS::DynamoDB::Table: dynamodb
   AWS::EC2::LaunchTemplate: ec2
+  AWS::Events::Archive: events
   AWS::Events::Rule: events
   AWS::FIS::ExperimentTemplate: fis
   AWS::IAM::InstanceProfile: iam
   AWS::IAM::Role: iam
   AWS::IAM::RolePolicy: iam
+  AWS::KinesisFirehose::DeliveryStream: firehose
   AWS::Lambda::Function: lambda
   AWS::Lambda::Permission: lambda
   AWS::Logs::Delivery: logs
