@@ -22,10 +22,11 @@ generation regardless of method.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,98 @@ class RetrievalResult:
     combined_score: float | None = None  # blended score in hybrid mode; None for non-hybrid
     rerank_score: float | None = None    # cross-encoder score; None if rerank wasn't run
     rerank_method: str | None = None     # "cross_encoder" / None — disambiguates which reranker stamped this
+    document_id: str | None = None       # rag.documents.id of the parent document (alpha-engine-config-I12312)
+    url: str | None = None               # rag.documents.url — where a human can read the source
+
+    def as_source(
+        self,
+        cid: str,
+        *,
+        rank: int | None = None,
+        text: str | None = None,
+        query: str | None = None,
+        retrieved_at: str | None = None,
+    ) -> dict[str, Any]:
+        """This chunk as a citable prompt source, for the ``llm_trace.v1`` record.
+
+        Returns a plain dict in the shape ``krepis.llm_trace.SourceBlock.
+        from_mapping`` accepts (keys ``cid``, ``kind``, ``source_id``,
+        ``text``, ``document_id``, ``uri``, ``version``, ``retrieval``,
+        ``meta``), so a caller can pass it straight to an LLM call's
+        ``sources=`` or to ``krepis.llm_trace.render_sources`` without this
+        module importing anything from krepis (alpha-engine-config-I12312,
+        audit §6.3 PR 2a).
+
+        The point is identity: the chunk id, the parent document id and the
+        URL survive into the trace instead of being reduced to a
+        ``[doc_type | filed_date]`` header before rendering, so an eval can
+        join a citation back to ``rag.chunks`` / ``rag.documents``.
+
+        Args:
+            cid: The citation id the model sees and cites (``c1``). Unique
+                per call; krepis validates its shape.
+            rank: 1-based position of this result in the list the caller
+                injected. Recorded under ``retrieval.rank``.
+            text: The exact text that will be injected, when the caller
+                injects less than :attr:`content` (a truncated excerpt, say).
+                Its sha256 is what the trace records, so pass what the model
+                reads. Defaults to :attr:`content`.
+            query: The retrieval query. Only its sha256 is recorded.
+            retrieved_at: ISO-8601 time of the retrieval, if the caller
+                tracked it.
+
+        Raises:
+            ValueError: :attr:`chunk_id` is ``None``. A source with no
+                stable id is exactly the uncitable shape this exists to end.
+        """
+        if not self.chunk_id:
+            raise ValueError(
+                "RetrievalResult.as_source: chunk_id is None — a source "
+                "needs a stable id to be cited"
+            )
+        retrieval: dict[str, Any] = {
+            "method": self.retrieval_method,
+            "rank": rank,
+            "score": self.similarity,
+            "vector_score": self.vector_score,
+            "keyword_score": self.keyword_score,
+            "combined_score": self.combined_score,
+            "rerank_score": self.rerank_score,
+            "rerank_method": self.rerank_method,
+            "query_sha256": (
+                hashlib.sha256(query.encode("utf-8")).hexdigest()
+                if query is not None else None
+            ),
+            "retrieved_at": retrieved_at,
+        }
+        filed = (
+            self.filed_date.isoformat()
+            if isinstance(self.filed_date, date) else (
+                str(self.filed_date) if self.filed_date is not None else None
+            )
+        )
+        return {
+            "cid": cid,
+            "kind": "rag_chunk",
+            "source_id": f"rag.chunks/{self.chunk_id}",
+            "text": self.content if text is None else text,
+            "document_id": (
+                f"rag.documents/{self.document_id}" if self.document_id else None
+            ),
+            "uri": self.url or None,
+            "version": f"filed:{filed}" if filed else None,
+            "retrieval": {k: v for k, v in retrieval.items() if v is not None},
+            "meta": {
+                k: v
+                for k, v in {
+                    "ticker": self.ticker,
+                    "doc_type": self.doc_type,
+                    "filed_date": filed,
+                    "section_label": self.section_label,
+                }.items()
+                if v is not None
+            },
+        }
 
 
 def retrieve(
@@ -146,6 +239,11 @@ def retrieve(
     return results
 
 
+def _opt_str(value: Any) -> str | None:
+    """``str(value)`` for a UUID column, ``None`` kept as ``None``."""
+    return None if value is None else str(value)
+
+
 # ── Vector path ─────────────────────────────────────────────────────────────
 
 
@@ -175,7 +273,8 @@ def _vector_search(
     # ruff limitation).
     sql = f"""
         SELECT c.id, c.content, d.ticker, d.doc_type, d.filed_date, c.section_label,
-               1 - (c.embedding <=> %s::vector) AS similarity
+               1 - (c.embedding <=> %s::vector) AS similarity,
+               d.id, d.url
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
         {where}
@@ -198,6 +297,8 @@ def _vector_search(
             similarity=round(float(row[6]), 4),
             retrieval_method="vector",
             vector_score=round(float(row[6]), 4),
+            document_id=_opt_str(row[7]),
+            url=row[8],
         )
         for row in rows
     ]
@@ -254,7 +355,8 @@ def _keyword_search(
     # rank_params/fts_params/order_params to cur.execute below.
     sql = f"""
         SELECT c.id, c.content, d.ticker, d.doc_type, d.filed_date, c.section_label,
-               ts_rank_cd(c.content_tsv, {or_tsquery}) AS rank
+               ts_rank_cd(c.content_tsv, {or_tsquery}) AS rank,
+               d.id, d.url
         FROM rag.chunks c
         JOIN rag.documents d ON c.document_id = d.id
         {where}
@@ -277,6 +379,8 @@ def _keyword_search(
             similarity=round(float(row[6]), 4),
             retrieval_method="keyword",
             keyword_score=round(float(row[6]), 4),
+            document_id=_opt_str(row[7]),
+            url=row[8],
         )
         for row in rows
     ]
@@ -350,6 +454,8 @@ def _blend(
                 vector_score=v_scores.get(cid),
                 keyword_score=k_scores.get(cid),
                 combined_score=round(combined, 4),
+                document_id=base.document_id,
+                url=base.url,
             )
         )
 
