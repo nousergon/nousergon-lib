@@ -24,7 +24,24 @@ name: Gitleaks scan (reusable)
 # against the repo's current history and committed, so pre-existing/accepted
 # findings don't redline CI on rollout (mirrors the pre-clear-before-flip
 # playbook used for the fleet's pip-audit standardization, config-I2530).
-# Regenerate the same way after triaging and accepting a real finding.
+# To accept a triaged false positive later, APPEND its one record from a
+# redacted report. Never regenerate the whole file, because that accepts every
+# finding present at that moment unread.
+#
+# Baseline matching survives a squash merge (alpha-engine-config-I12293).
+# gitleaks matches a baseline record on the COMMIT as well (Commit, Date,
+# Author, Message and line). A record accepted at a branch commit therefore
+# stopped matching once the PR was squash-merged: the squash commit re-adds
+# the same line under a new SHA, often at a different line number, and main
+# went red. One case was nousergon-data fa1edc12 on 2026-10-13. The detect
+# step now carries a record forward by an identity that no rewrite of history
+# changes: rule, file, the secret's start and end column, and its Shannon
+# entropy. A redacted report keeps all of these. It works in two passes: an
+# unfiltered redacted scan, then the real scan against the committed baseline
+# plus every current finding that has the same identity as a committed record.
+# Each carried-forward finding is listed in the step summary. A finding with
+# no committed twin still fails the job. That includes a different secret in
+# the same place, which shows as a different width or entropy.
 #
 # Consumers: a thin caller workflow (see this repo's own
 # .github/workflows/gitleaks.yml for the in-repo example; other repos use
@@ -81,7 +98,68 @@ jobs:
           set -euo pipefail
           BASELINE_ARGS=""
           if [ -f .gitleaks-baseline.json ]; then
-            BASELINE_ARGS="--baseline-path .gitleaks-baseline.json"
+            # Pass 1: unfiltered, redacted, never fails on findings. Its report
+            # stays in RUNNER_TEMP and is never uploaded.
+            gitleaks detect --source . --redact --exit-code 0 \
+              --report-format json --report-path "$RUNNER_TEMP/gitleaks-unfiltered.json"
+            # Effective baseline = committed records + current findings that
+            # share a committed record's commit-independent identity. See the
+            # header. Any error here fails the job closed.
+            # BEGIN baseline-carry
+            python3 - .gitleaks-baseline.json "$RUNNER_TEMP/gitleaks-unfiltered.json" \
+              "$RUNNER_TEMP/gitleaks-effective-baseline.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          baseline_path, report_path, out_path = sys.argv[1:4]
+          KEYS = ("RuleID", "File", "StartColumn", "EndColumn", "Entropy")
+
+
+          def identity(f):
+              if not all(k in f for k in KEYS):
+                  return None
+              return tuple(f[k] for k in KEYS)
+
+
+          with open(baseline_path) as fh:
+              baseline = json.load(fh)
+          with open(report_path) as fh:
+              findings = json.load(fh) or []
+          if not isinstance(baseline, list) or not isinstance(findings, list):
+              sys.exit("gitleaks baseline and report must both be JSON lists of findings")
+
+          accepted = {}
+          for b in baseline:
+              key = identity(b)
+              if key is not None:
+                  accepted.setdefault(key, []).append(b.get("Commit", "")[:12])
+          already = {(identity(b), b.get("Commit"), b.get("StartLine")) for b in baseline}
+
+          carried = [
+              f for f in findings
+              if identity(f) in accepted
+              and (identity(f), f.get("Commit"), f.get("StartLine")) not in already
+          ]
+          with open(out_path, "w") as fh:
+              json.dump(baseline + carried, fh)
+
+          lines = [f"- baseline: {len(baseline)} committed record(s); "
+                   f"{len(carried)} carried forward by identity"]
+          for f in carried:
+              lines.append(
+                  f"  - `{f['File']}` `{f['RuleID']}` at `{f.get('Commit', '')[:12]}` "
+                  f"line {f.get('StartLine')} (accepted at "
+                  f"{', '.join('`' + c + '`' for c in accepted[identity(f)])})"
+              )
+          print("\n".join(lines))
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a") as fh:
+                  fh.write("### gitleaks baseline\n\n" + "\n".join(lines) + "\n\n")
+          PY
+            # END baseline-carry
+            BASELINE_ARGS="--baseline-path $RUNNER_TEMP/gitleaks-effective-baseline.json"
           fi
           # shellcheck disable=SC2086
           gitleaks detect --source . $BASELINE_ARGS \
