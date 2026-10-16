@@ -148,6 +148,13 @@ class DecisionArtifact(BaseModel):
     # absence. See ROADMAP L4567 (reproducible-replay arc).
     code_sha: str | None = None
     data_snapshot_id: str | None = None
+    # The join to the ``llm_trace.v1`` record of the call that produced this
+    # decision (optional, additive; alpha-engine-config-I12312). ``trace_id``
+    # is the W3C trace id (32 hex), shared by every call in a run;
+    # ``span_id`` (16 hex) names the one call. ``None`` for deterministic
+    # decisions and for producers not yet tracing.
+    trace_id: str | None = None
+    span_id: str | None = None
 
     @model_validator(mode="after")
     def _llm_fields_paired(self) -> DecisionArtifact:
@@ -312,6 +319,8 @@ def capture_decision(
     input_data_summary: str | None = None,
     code_sha: str | None = None,
     data_snapshot_id: str | None = None,
+    trace_id: str | None = None,
+    span_id: str | None = None,
     s3_bucket: str = _DEFAULT_S3_BUCKET,
     s3_prefix: str = _DEFAULT_S3_PREFIX,
     s3_client: Any | None = None,
@@ -359,6 +368,10 @@ def capture_decision(
         Stamp both so a later faithful replay re-runs against the SAME
         code + data by construction. ``None`` when the producer hasn't
         wired them yet; consumers must tolerate absence.
+    trace_id, span_id
+        Optional join to the ``llm_trace.v1`` record of the LLM call that
+        produced this decision — copy ``LLMResult.trace_id`` /
+        ``LLMResult.span_id``. ``None`` when the call was not traced.
     s3_bucket, s3_prefix
         S3 location overrides. Defaults to
         ``s3://alpha-engine-research/decision_artifacts/`` per the
@@ -404,6 +417,8 @@ def capture_decision(
         agent_output=agent_output,
         code_sha=code_sha,
         data_snapshot_id=data_snapshot_id,
+        trace_id=trace_id,
+        span_id=span_id,
     )
 
     # 3. Compute S3 key + serialize.

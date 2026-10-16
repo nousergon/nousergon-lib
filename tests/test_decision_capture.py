@@ -779,3 +779,33 @@ class TestReproducibilityProvenance:
         art = DecisionArtifact.model_validate(json.loads(obj["Body"].read()))
         assert art.code_sha == "deadbee"
         assert art.data_snapshot_id == "arctic:universe@v812"
+
+
+class TestTraceJoin:
+    """trace_id + span_id — the join from a DecisionArtifact to the
+    ``llm_trace.v1`` record of the call that produced it. Optional,
+    additive, back-compat (alpha-engine-config-I12312)."""
+
+    def test_default_none(self):
+        art = DecisionArtifact(**_minimal_artifact_kwargs())
+        assert art.trace_id is None
+        assert art.span_id is None
+
+    def test_legacy_artifact_without_trace_validates(self):
+        body = _minimal_artifact_kwargs()
+        body["model_metadata"] = {"model_name": "claude-haiku-4-5"}
+        body["full_prompt_context"] = {"system_prompt": "sys", "user_prompt": "user"}
+        art = DecisionArtifact.model_validate(body)
+        assert art.trace_id is None and art.span_id is None
+
+    def test_capture_stamps_trace_ids_to_s3(self, mocked_s3):
+        kwargs = _minimal_capture_kwargs(
+            mocked_s3,
+            trace_id="4bf92f3577b34da6a3ce929d0e0e4736",
+            span_id="00f067aa0ba902b7",
+        )
+        s3_key = capture_decision(**kwargs)
+        obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=s3_key)
+        art = DecisionArtifact.model_validate(json.loads(obj["Body"].read()))
+        assert art.trace_id == "4bf92f3577b34da6a3ce929d0e0e4736"
+        assert art.span_id == "00f067aa0ba902b7"
