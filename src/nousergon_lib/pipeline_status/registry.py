@@ -892,6 +892,21 @@ STATE_TO_ARCHIVE_PAGE: Final[dict[str, ArchivePageRef | ArtifactReason]] = {
         "§2.7). Writing an artifact here would be the defect: an object whose "
         "presence implies the surface was observed.",
     ),
+    # alpha-engine-config-I11111: the same sweep, invoked on the DEGRADED
+    # path. WeeklyCoverageSweep's only inbound edge was the clean completion
+    # marker, so a cycle that terminated DegradedRun was never swept and wrote
+    # no _sweep artifact (none for 2026-09-18 or 2026-10-09; the
+    # stage-coverage-sweep-dead alarm fired 2026-10-13). Fail-soft: its Next
+    # and Catch both land on the DegradedRun release gate.
+    "WeeklyCoverageSweepDegraded": ArtifactReason(
+        reason="Stage-coverage sweep of a DEGRADED cycle "
+        "(alpha-engine-config-I11111) — the same Lambda and payload as "
+        "WeeklyCoverageSweep, run after WriteCompletionMarkerDegraded and "
+        "before DegradedRun. Writes _stage_coverage/_sweep/{pipeline}/{date}.json "
+        "and augments the DEGRADED completion marker with cycle_verdict "
+        "(status is never rewritten). Not an archive page of its own: it is "
+        "the verdict the completion marker and the Report Card carry.",
+    ),
     # alpha-engine-config-I10170: the fourth outcome. The sweep RAN and
     # withheld a claim its own cycle could not support.
     "WeeklyCoverageSweepDeferred": ArtifactReason(
