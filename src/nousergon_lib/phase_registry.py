@@ -295,12 +295,17 @@ class PhaseRegistry:
         s3_client=None,
         phase_logger_name: str = DEFAULT_PHASE_LOGGER,
         run_token: str | None = None,
+        require_attributed_markers: bool = False,
     ):
         self.date = date
         # The SF execution name. The spot launchers export it as RUN_TOKEN
         # (krepis.ssm_log_capture --correlation-id). It is only read to tell
         # a rehearsal from a real run; see `_marker_key`.
         self.run_token = run_token if run_token is not None else os.environ.get("RUN_TOKEN", "")
+        # Opt-in fail-closed provenance check (alpha-engine-config-I12351 C30).
+        # When set, a run that HAS a token never auto-skips on a marker that
+        # does not carry one; see `_marker_provenance_refusal`.
+        self.require_attributed_markers = bool(require_attributed_markers)
         self.bucket = bucket
         self.marker_prefix = marker_prefix
         self._explicit_skip = set(skip_phases or [])
@@ -411,6 +416,38 @@ class PhaseRegistry:
                 raise
         return None
 
+    def _marker_provenance_refusal(self, marker: dict) -> str | None:
+        """Why ``marker`` may not earn this run an auto-skip, or None.
+
+        alpha-engine-config-I12351 (C30). A marker's key says which run it is
+        FOR; its ``run_token`` says which run WROTE it. The namespace in
+        `_marker_key` only works when the writer knew its own token. On
+        2026-10-16 ``rehearsal-2026-10-16-2``'s DataPhase2 box had an empty
+        ``RUN_TOKEN``, so it wrote ``data/2026-10-16/.phases/alternative.json``
+        at the SHARED key with ``status: ok, run_token: null`` - and the next
+        production run for that date would have skipped the phase on it.
+
+        * ``marker_from_rehearsal`` (always on): the marker names a rehearsal
+          execution other than this run. A rehearsal's markers live under its
+          own namespace, so one at a key this run reads is a leak, never
+          evidence. Not skipping costs one recompute; skipping ships a
+          rehearsal's output as production's.
+        * ``marker_unattributed`` (``require_attributed_markers=True`` only):
+          this run has a token and the marker has none, so nothing shows it
+          was not written by a rehearsal that lost its token. Opt-in, because
+          markers written by token-less launchers (ad-hoc runs, consumers that
+          never forwarded ``RUN_TOKEN``) are still resumed by default - a
+          consumer turns it on once every writer of its keys carries a token.
+
+        Either refusal re-runs the phase. It never skips one.
+        """
+        token = marker.get("run_token") or ""
+        if token.startswith(REHEARSAL_EXECUTION_PREFIX) and token != self.run_token:
+            return "marker_from_rehearsal"
+        if self.require_attributed_markers and self.run_token and not token:
+            return "marker_unattributed"
+        return None
+
     def _marker_artifact_missing(self, phase_name: str, marker: dict) -> str | None:
         """Validate a phase's marker against its declared artifacts (cached)."""
         if phase_name not in self._artifact_checks:
@@ -433,7 +470,9 @@ class PhaseRegistry:
 
         Reason strings are grep-able: ``only_phases_filter`` | ``explicit_skip``
         | ``auto_skip_marker_ok`` | ``force_rerun`` | ``force_phase_rerun`` |
-        ``default_run`` | ``not_auto_skippable`` | ``marker_artifact_missing``.
+        ``default_run`` | ``not_auto_skippable`` | ``marker_artifact_missing`` |
+        ``marker_from_rehearsal`` | ``marker_unattributed`` (the last two:
+        `_marker_provenance_refusal`).
         """
         if self._only is not None and phase_name not in self._only:
             return False, "only_phases_filter"
@@ -447,6 +486,16 @@ class PhaseRegistry:
             return True, "not_auto_skippable"
         marker = self._read_marker(phase_name)
         if marker is not None and marker.get("status") == "ok":
+            refusal = self._marker_provenance_refusal(marker)
+            if refusal is not None:
+                logger.warning(
+                    "phase_registry: phase %s (date %s) has a status=ok marker "
+                    "written by run_token=%r, and this run is %r — %s, "
+                    "re-running the phase (alpha-engine-config-I12351).",
+                    phase_name, self.date, marker.get("run_token"),
+                    self.run_token, refusal,
+                )
+                return True, refusal
             missing = self._marker_artifact_missing(phase_name, marker)
             if missing is not None:
                 logger.warning(

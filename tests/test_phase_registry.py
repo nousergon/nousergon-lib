@@ -327,3 +327,61 @@ def test_the_marker_records_the_run_token(s3):
         pass
     body = json.loads(s3.put_calls[-1]["Body"])
     assert body["run_token"] == "rehearsal-2026-04-23-1"
+
+
+# ── Marker provenance (alpha-engine-config-I12351 C30) ──────────────────────
+
+
+def _ok(run_token=None):
+    return {"status": "ok", "phase": "alternative", "run_token": run_token, "artifact_keys": []}
+
+
+def test_a_real_run_never_skips_on_a_rehearsal_marker_at_the_shared_key(s3):
+    """A rehearsal marker that reached the shared key is a leak, not evidence."""
+    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok("rehearsal-2026-10-16-2"))
+    weekly = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="eb30d967-weekly")
+    assert weekly.should_run("alternative", supports_auto_skip=True) == (True, "marker_from_rehearsal")
+    adhoc = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="")
+    assert adhoc.should_run("alternative", supports_auto_skip=True) == (True, "marker_from_rehearsal")
+
+
+def test_unattributed_markers_are_refused_only_when_the_consumer_opts_in(s3):
+    """The 2026-10-16 leak: status=ok, run_token null, at the shared key."""
+    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok(None))
+    default = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="eb30d967-weekly")
+    assert default.should_run("alternative", supports_auto_skip=True) == (False, "auto_skip_marker_ok")
+    strict = _reg(
+        s3, marker_prefix="data", date="2026-10-16", run_token="eb30d967-weekly",
+        require_attributed_markers=True,
+    )
+    assert strict.should_run("alternative", supports_auto_skip=True) == (True, "marker_unattributed")
+
+
+def test_strict_mode_still_resumes_an_attributed_production_marker(s3):
+    """A rerun under a new execution name resumes the first attempt's work."""
+    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok("eb30d967-weekly"))
+    rerun = _reg(
+        s3, marker_prefix="data", date="2026-10-16", run_token="weekly-rerun-2026-10-16-1",
+        require_attributed_markers=True,
+    )
+    assert rerun.should_run("alternative", supports_auto_skip=True) == (False, "auto_skip_marker_ok")
+
+
+def test_strict_mode_without_a_token_of_its_own_keeps_the_old_behaviour(s3):
+    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok(None))
+    adhoc = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="", require_attributed_markers=True)
+    assert adhoc.should_run("alternative", supports_auto_skip=True) == (False, "auto_skip_marker_ok")
+
+
+def test_a_rehearsal_still_resumes_its_own_namespaced_marker_in_strict_mode(s3):
+    token = "rehearsal-2026-10-16-3"
+    with _reg(s3, run_token=token, require_attributed_markers=True).phase("simulate", supports_auto_skip=True):
+        pass
+    again = _reg(s3, run_token=token, require_attributed_markers=True)
+    assert again.should_run("simulate", supports_auto_skip=True) == (False, "auto_skip_marker_ok")
+
+
+def test_a_provenance_refusal_never_turns_into_a_skip_under_force_or_only(s3):
+    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok("rehearsal-2026-10-16-2"))
+    forced = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="w", force=True)
+    assert forced.should_run("alternative", supports_auto_skip=True) == (True, "force_rerun")
