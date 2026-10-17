@@ -4,18 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.176"
+version = "0.124.177"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
-# EC2 still runs Python 3.9 on the always-on micro instance (boto3 drops
-# 3.9 support 2026-04-29, so upgrade is on the near-term roadmap). All
-# modules in this package use ``from __future__ import annotations``, so
-# PEP 604 union syntax (``str | None``) is deferred and works on 3.9.
-requires-python = ">=3.9.1"
-# Floor is 3.9.1, not 3.9.0: uv/PEP 440 treat 3.9.0 as its own resolution fork
-# (`python_full_version <= '3.9'`), and that phantom fork locked cryptography
-# 47.0.0 (dependabot #21/#39/#43/#44, alpha-engine-config-I11249) although
-# cryptography 50.x supports every real 3.9.x. No one runs 3.9.0 (EC2 is 3.9.2x).
+# Floor is 3.10 (alpha-engine-config-I11251/I11253/I11254/I11255/I11256).
+# Every patched release of requests (2.33.0), python-dotenv (1.2.2),
+# pytest (9.0.3), pyarrow (23.0.1) and msgpack (1.2.1) requires Python >=3.10,
+# so a 3.9 floor kept a `python_full_version < '3.10'` fork in uv.lock that
+# could only lock the vulnerable versions. Dependabot's uv security updater
+# resolves every fork at once, so each update job failed
+# `dependency_file_not_resolvable` (red since 2026-10-06) and the alerts
+# could never close. The 3.9 consumer this floor existed for (the always-on
+# micro's AL2023 python3.9 venv) was rebuilt on python3.12 by
+# alpha-engine-config#6063 (nousergon-data install-daily-news.sh).
+requires-python = ">=3.10"
 authors = [{ name = "Brian McMahon" }]
 license = { text = "AGPL-3.0-only" }
 dependencies = [
@@ -187,10 +189,10 @@ omit = ["src/nousergon_lib/egress/proxy.py"]
 fail_under = 92
 
 [tool.pyright]
-# CI gate (config#2534): basic mode pinned to the 3.9 floor — the oldest
+# CI gate (config#2534): basic mode pinned to the 3.10 floor — the oldest
 # supported version is where PEP604-class regressions actually bite (see
-# test.yml's origin note), so a single pinned run at 3.9 catches the same
-# class of defect a full 3.9-3.13 pyright matrix would, without 5x the CI
+# test.yml's origin note), so a single pinned run at the floor catches the same
+# class of defect a full 3.10-3.13 pyright matrix would, without 5x the CI
 # minutes. Strict mode is a deliberate follow-up ratchet, not this pass.
 include = ["src/nousergon_lib"]
 # tests/ excluded: this gate protects the *importable contract* ~10 repos
@@ -198,7 +200,7 @@ include = ["src/nousergon_lib"]
 # loosely-typed fixtures/moto mocks/parametrize) is a separate, much larger
 # ratchet with its own cost/benefit call — out of scope for this issue.
 exclude = ["**/__pycache__"]
-pythonVersion = "3.9"
+pythonVersion = "3.10"
 typeCheckingMode = "basic"
 # Resolve optional-extra imports (pandas/numpy/psycopg2/jsonschema/etc) the
 # same way CI's pytest job does: installed into the active environment, not
@@ -211,12 +213,12 @@ typeCheckingMode = "basic"
 
 [tool.ruff]
 line-length = 120
-# py39, not the repo's newer CI matrix ceiling: `requires-python = ">=3.9"`
-# above is the actual floor (EC2 always-on micro instance still runs 3.9;
-# see that field's comment), and ruff's target-version controls which
-# syntax UP-rules are allowed to assume is available. Targeting a newer
-# version here would let UP-fixes rewrite code into syntax that breaks on
-# the floor this package still has to run on.
+# py39, deliberately one BELOW `requires-python = ">=3.10"`: ruff's
+# target-version controls which syntax UP-rules may assume, and raising it
+# turns on rewrites (PEP 604 unions etc.) across the tree. Raising the floor
+# (alpha-engine-config-I11254) is a dependency-resolution change, kept apart
+# from a repo-wide syntax rewrite; py39-safe syntax is valid on every
+# supported version. Raise this as its own change.
 target-version = "py39"
 
 [tool.ruff.lint]
