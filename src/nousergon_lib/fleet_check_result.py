@@ -77,6 +77,8 @@ import os
 # only; the lib's CI matrix starts at 3.9, which is where it broke on the lift.
 from datetime import datetime, timezone
 
+from nousergon_lib import rehearsal
+
 logger = logging.getLogger(__name__)
 
 RESEARCH_BUCKET = "alpha-engine-research"
@@ -190,7 +192,13 @@ def emit(envelope: dict, *, dry_run: bool = False) -> str | None:
     where it is harmless and lands in production exactly where it is not.
     Stubbing the two known tests fixes two tests; this fixes the class.
     """
-    key = key_for(envelope["check_id"])
+    # alpha-engine-config-I12351: a rehearsal's row goes to its own namespace
+    # (`ops/.rehearsal/<token>/checks/<id>/latest.json`), outside the
+    # `ops/checks/` listing the console and the freshness monitor enumerate.
+    # `rehearsal-2026-10-16-2` overwrote ops/checks/ae-research-self-test.
+    key = rehearsal.namespaced_key(
+        key_for(envelope["check_id"]), rehearsal.rehearsal_token()
+    )
     uri = f"s3://{RESEARCH_BUCKET}/{key}"
     if dry_run:
         logger.info("[dry-run] would publish %s (%s)", uri, envelope["status"])

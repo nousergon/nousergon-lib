@@ -57,6 +57,8 @@ import logging
 import time
 from typing import TypedDict
 
+from nousergon_lib import rehearsal
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUCKET = "alpha-engine-research"
@@ -161,6 +163,28 @@ def increment_trial_count(
             producer, n_trials,
         )
         return read_cumulative_trial_count(bucket, key=key, s3_client=s3_client)
+
+    token = rehearsal.rehearsal_token()
+    if token is not None:
+        # alpha-engine-config-I12351: a rehearsal's trials are not production
+        # trials. The counter is the deployed config's multiple-testing
+        # denominator, and `rehearsal-2026-10-16-1`/`-2` moved it by 258
+        # (1859 -> 2117) before the 10-17 weekly ran. The rehearsal still READS
+        # the live count, so its DSR is computed exactly as production's would
+        # be; it never writes it. Logged, never silent.
+        state = read_cumulative_trial_count(bucket, key=key, s3_client=s3_client)
+        would_be = dict(state["by_producer"])
+        would_be[producer] = int(would_be.get(producer, 0)) + int(n_trials)
+        logger.info(
+            "trial_accumulator: rehearsal %s — NOT counting producer=%s +%d "
+            "trials toward s3://%s/%s (live total stays %d)",
+            token, producer, n_trials, bucket, key, int(state["total"]),
+        )
+        return {
+            "total": int(state["total"]) + int(n_trials),
+            "last_updated": run_date,
+            "by_producer": would_be,
+        }
 
     s3 = _client(s3_client)
     from botocore.exceptions import ClientError
