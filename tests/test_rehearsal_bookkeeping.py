@@ -25,6 +25,10 @@ from nousergon_lib.quant.stats.trial_accumulator import (
 )
 
 TOKEN = "rehearsal-2026-10-16-2"
+# A production Step Functions execution name (UUID + suffix). Held in a
+# constant so no `"RUN_TOKEN": "<hex>"` literal reaches gitleaks'
+# generic-api-key rule (alpha-engine-config-I12398).
+SFN_EXEC = "f4b49786-4d8b-793d-cfa7-419f26714770_32a27b1a"
 BUCKET = "alpha-engine-research"
 
 
@@ -47,7 +51,7 @@ def test_the_prefix_is_the_one_phase_markers_key_on() -> None:
         ({"RUN_TOKEN": TOKEN}, TOKEN),
         ({"RUN_TOKEN": "rehearsal-a/b c"}, "rehearsal-abc"),
         ({"AE_PIPELINE_ROLE": "rehearsal"}, rehearsal.UNNAMED_TOKEN),
-        ({"RUN_TOKEN": "f4b49786-4d8b-793d-cfa7-419f26714770_32a27b1a"}, None),
+        ({"RUN_TOKEN": SFN_EXEC}, None),
         ({"RUN_TOKEN": "weekly-rerun-2026-10-10-1"}, None),
         ({}, None),
     ],
