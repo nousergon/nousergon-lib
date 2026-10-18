@@ -51,6 +51,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Literal
 
+from nousergon_lib import rehearsal
+
 logger = logging.getLogger(__name__)
 
 #: Grace window subtracted from the verification cutoff (``now -
@@ -439,7 +441,11 @@ def write_health(
         warnings=warnings,
         error=error,
     )
-    key = health_key(module_name)
+    # alpha-engine-config-I12351: a rehearsal's heartbeat goes to its own
+    # namespace. `health/<module>.json` is the live surface the freshness
+    # monitor and the console read; `rehearsal-2026-10-16-2` overwrote
+    # health/backtester.json and health/evaluator.json with its own runs.
+    key = rehearsal.namespaced_key(health_key(module_name), rehearsal.rehearsal_token())
     try:
         if s3_client is None:
             import boto3
