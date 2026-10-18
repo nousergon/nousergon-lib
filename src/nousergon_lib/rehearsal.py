@@ -40,7 +40,7 @@ REHEARSAL_EXECUTION_PREFIX = "rehearsal-"
 RUN_TOKEN_ENV = "RUN_TOKEN"  # noqa: S105 — an env var NAME, not a secret
 PIPELINE_ROLE_ENV = "AE_PIPELINE_ROLE"
 #: Token used when ``AE_PIPELINE_ROLE=rehearsal`` is set without an execution name.
-UNNAMED_TOKEN = "rehearsal-unnamed"
+UNNAMED_TOKEN = "rehearsal-unnamed"  # noqa: S105 — a path segment, not a secret
 NAMESPACE_SEGMENT = ".rehearsal"
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
