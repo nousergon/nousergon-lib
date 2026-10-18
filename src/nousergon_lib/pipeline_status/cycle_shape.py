@@ -44,6 +44,34 @@ and folding one into the union would let a Tuesday debugging run mark the
 week's belief refresh complete — the separation ``roles.py`` calls a binding
 invariant.
 
+## Rehearsals are never part of a production cycle (``alpha-engine-config-I12382``)
+
+A weekly-SF **rehearsal** (``rehearsal-<date>-<n>``, started by nous-ergon-ops
+``weekly-sf-rehearsal.yml``) runs the real graph with ``pipeline_role:
+watch-rerun`` — a RECOVERY role — so the role filter alone admits it. Its
+cycle key also comes from its NAME, not the ``calendar_date`` its input
+carries. Measured 2026-10-17 on lib v0.124.172:
+``read_cycle_shape(ne-weekly-freshness-pipeline, "2026-10-16",
+calendar_date="2026-10-17")`` read ``incomplete (partial_cycle), 8/16 across 3
+executions``, and all 8 entered stages came from ``rehearsal-2026-10-16-1`` and
+``rehearsal-2026-10-16-2``. A Saturday run that skipped one of those stages
+could have read COMPLETED on the strength of a rehearsal.
+
+So an execution is a rehearsal when its name starts with
+:data:`REHEARSAL_EXECUTION_PREFIX` **or** its input carries a truthy
+``rehearsal`` field or ``run_mode: rehearsal`` (:func:`is_rehearsal_execution`
+— the input half matches crucible-evaluator's substrate tile, which already
+drops any execution whose input carries ``rehearsal``). A rehearsal is dropped
+from the union whatever its role, and its name is recorded in
+:attr:`CycleShape.rehearsals_excluded` so the drop is visible rather than
+silent.
+
+**One exception: the observer.** When the sweep runs INSIDE a rehearsal
+(``observer_execution_arn`` names it), that execution stays a contributor, so
+its own ``is_observer`` row — which the weekly SF's ``CheckExecutionDidWork``
+reads as ``observer_did_work`` — still exists. Other rehearsals are excluded
+from that read too.
+
 ## Cadence-declared skips (``alpha-engine-config-I11170``)
 
 Completeness is graded against the plan DECLARED for the run, not against a
@@ -135,6 +163,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "CONTRIBUTING_ROLES",
+    "REHEARSAL_EXECUTION_PREFIX",
+    "is_rehearsal_execution",
     "cycle_key_for",
     "CycleExecution",
     "CycleShape",
@@ -148,6 +178,55 @@ __all__ = [
 #: Exercise and ad-hoc roles are deliberately excluded — see the module
 #: docstring and ``roles.py``'s own invariant.
 CONTRIBUTING_ROLES = CADENCE_ROLES | RECOVERY_ROLES
+
+#: SF execution names that start with this are rehearsals of the weekly run
+#: (nous-ergon-ops ``weekly-sf-rehearsal.yml`` names every one
+#: ``rehearsal-<ET date>-<n>``). The same literal as
+#: ``nousergon_lib.phase_registry.REHEARSAL_EXECUTION_PREFIX``, restated rather
+#: than imported because ``phase_registry`` pulls boto3 and PyYAML in at import
+#: time; a test asserts the two are equal (``alpha-engine-config-I12382``).
+REHEARSAL_EXECUTION_PREFIX = "rehearsal-"
+
+#: ``run_mode`` value that marks an execution as a rehearsal.
+_REHEARSAL_RUN_MODE = "rehearsal"
+
+
+def _is_rehearsal_name(name: str | None) -> bool:
+    return bool(name) and str(name).startswith(REHEARSAL_EXECUTION_PREFIX)
+
+
+def is_rehearsal_execution(describe_resp: Mapping[str, Any]) -> bool:
+    """Is this DescribeExecution response a rehearsal? — ``alpha-engine-config-I12382``.
+
+    True when ANY of:
+
+    - the execution name (else the ARN's last segment) starts with
+      :data:`REHEARSAL_EXECUTION_PREFIX`;
+    - the input JSON carries a truthy ``rehearsal`` field (the rehearsal door
+      stamps ``"rehearsal": "<date>-agent-launched"``; crucible-evaluator's
+      substrate tile drops on the same field);
+    - the input JSON carries ``run_mode: "rehearsal"``.
+
+    A missing or malformed input is not evidence of a rehearsal, so only the
+    name decides then. ``rehearsal: false`` is not a rehearsal.
+    """
+    name = describe_resp.get("name") or str(describe_resp.get("executionArn") or "").rsplit(":", 1)[-1]
+    if _is_rehearsal_name(name):
+        return True
+    raw_input = describe_resp.get("input")
+    if not raw_input or not isinstance(raw_input, str):
+        return False
+    try:
+        parsed = json.loads(raw_input)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("rehearsal"):
+        return True
+    run_mode = parsed.get("run_mode")
+    return isinstance(run_mode, str) and run_mode.strip().lower() == _REHEARSAL_RUN_MODE
+
 
 #: How far back ``read_cycle_shape`` will walk ``ListExecutions`` looking for
 #: a cycle's contributors. The weekly SF fires THU-SAT and reruns are same-day,
@@ -282,6 +361,11 @@ class CycleShape:
     #: named. Empty when the cycle was read from outside any of its own
     #: executions (the CLI, a backfill, an out-of-band re-sweep).
     observer_execution_arn: str = ""
+    #: Names of rehearsal executions that matched this cycle's key and were
+    #: DROPPED from the union (``alpha-engine-config-I12382``), oldest-first.
+    #: Recorded so a reader can see why the contributor count is lower than
+    #: ``ListExecutions`` suggests; never counted toward any verdict.
+    rehearsals_excluded: tuple[str, ...] = ()
 
     @property
     def execution_count(self) -> int:
@@ -361,6 +445,11 @@ class CycleShape:
             tail += f", declared-skipped {', '.join(self.stages_declared_skipped)}"
         if self.stages_missing:
             tail += f", missing {', '.join(self.stages_missing)}"
+        if self.rehearsals_excluded:
+            tail += (
+                f" [{len(self.rehearsals_excluded)} rehearsal execution(s) excluded: "
+                f"{', '.join(self.rehearsals_excluded)}]"
+            )
         if self.walk_exhausted:
             tail += " [ListExecutions walk cap reached — contributor set may be incomplete]"
         return head + tail
@@ -382,6 +471,7 @@ class CycleShape:
             "stage_coverage": self.stage_coverage,
             "walk_exhausted": self.walk_exhausted,
             "observer_execution_arn": self.observer_execution_arn,
+            "rehearsals_excluded": list(self.rehearsals_excluded),
             "is_terminal": self.is_terminal,
             "verdict_trustworthy": self.verdict_trustworthy,
             "explain": self.explain(),
@@ -396,6 +486,7 @@ def build_cycle_shape(
     stage_spine: Sequence[str] | None = None,
     walk_exhausted: bool = False,
     observer_execution_arn: str | None = None,
+    rehearsals_excluded: Sequence[str] = (),
 ) -> CycleShape:
     """Fold one cycle's executions into a single verdict. Pure.
 
@@ -406,6 +497,14 @@ def build_cycle_shape(
     Only :data:`CONTRIBUTING_ROLES` are folded in. A contributor with **no**
     role is included: an untagged manual run is legitimate and common
     (``roles.py``), and excluding it would drop real work from the union.
+
+    A contributor whose execution name starts with
+    :data:`REHEARSAL_EXECUTION_PREFIX` is excluded whatever its role, unless it
+    is the observer (``alpha-engine-config-I12382``; see the module
+    docstring). ``rehearsals_excluded`` carries names the caller already
+    dropped on evidence this pure function cannot see (the input's
+    ``rehearsal`` / ``run_mode`` fields — :func:`read_cycle_shape` does that);
+    both sets land in :attr:`CycleShape.rehearsals_excluded`.
 
     ## The observer (``alpha-engine-config-I10161``)
 
@@ -440,14 +539,22 @@ def build_cycle_shape(
     """
     spine = tuple(stage_spine) if stage_spine is not None else stage_order_for(pipeline)
 
+    observer = (observer_execution_arn or "").strip()
+
+    excluded: list[str] = [n for n in rehearsals_excluded if n]
     contributors: list[tuple[WorkOutcome, str | None, Sequence[str]]] = []
     for outcome, role, states in outcomes:
+        is_observer = bool(observer) and (outcome.execution_arn or "") == observer
+        if _is_rehearsal_name(outcome.execution_name) and not is_observer:
+            # A rehearsal is never the production cycle's deliverable, and its
+            # recovery role must not smuggle it into the union
+            # (alpha-engine-config-I12382).
+            excluded.append(outcome.execution_name or "")
+            continue
         if role and role not in CONTRIBUTING_ROLES:
             # Real work, real writes, but not this cycle's deliverable.
             continue
         contributors.append((outcome, role, states))
-
-    observer = (observer_execution_arn or "").strip()
 
     executions = tuple(
         CycleExecution(
@@ -509,6 +616,7 @@ def build_cycle_shape(
         "stages_declared_skipped": declared_skipped,
         "walk_exhausted": walk_exhausted,
         "observer_execution_arn": observer,
+        "rehearsals_excluded": tuple(dict.fromkeys(excluded)),
     }
 
     if not contributors:
@@ -587,6 +695,10 @@ def read_cycle_shape(
     see its docstring for why the execution a sweep runs inside must not make
     its own cycle ``IN_FLIGHT``.
 
+    Rehearsal executions (:func:`is_rehearsal_execution`) are dropped before
+    their history is read — unless one is the observer — and named in
+    :attr:`CycleShape.rehearsals_excluded` (``alpha-engine-config-I12382``).
+
     Raises :class:`~.read.SFNAccessDenied` / :class:`~.read.SFNThrottled`
     rather than returning an empty cycle: a transport or authorization
     failure rendered as "no executions" is a verdict manufactured from a
@@ -600,6 +712,8 @@ def read_cycle_shape(
     inspected = 0
     next_token: str | None = None
     collected: list[tuple[WorkOutcome, str | None, list[str]]] = []
+    rehearsals: list[str] = []
+    observer = (observer_execution_arn or "").strip()
     exhausted = False
     floor = _walk_floor(keys, lookback_days)
     before_floor = False
@@ -639,6 +753,12 @@ def read_cycle_shape(
                 _raise_for_boto_error(exc, "DescribeExecution")
             if cycle_key_for(desc) not in keys:
                 continue
+            if arn != observer and is_rehearsal_execution(desc):
+                # Not this cycle's work, whatever its role or name-derived key
+                # says (alpha-engine-config-I12382). Skipped before the history
+                # read: no reason to pay for pages that cannot count.
+                rehearsals.append(str(desc.get("name") or arn.rsplit(":", 1)[-1]))
+                continue
 
             start = _parse_ts(desc.get("startDate"))
             stop = _parse_ts(desc.get("stopDate"))
@@ -665,6 +785,15 @@ def read_cycle_shape(
         exhausted = True
 
     collected.reverse()  # oldest-first for the record
+    rehearsals.reverse()
+    if rehearsals:
+        logger.info(
+            "read_cycle_shape: %s %s excluded %d rehearsal execution(s) from the cycle: %s",
+            pipeline,
+            run_date,
+            len(rehearsals),
+            ", ".join(rehearsals),
+        )
     return build_cycle_shape(
         pipeline=pipeline,
         run_date=run_date,
@@ -672,6 +801,7 @@ def read_cycle_shape(
         stage_spine=stage_spine,
         walk_exhausted=exhausted,
         observer_execution_arn=observer_execution_arn,
+        rehearsals_excluded=rehearsals,
     )
 
 
