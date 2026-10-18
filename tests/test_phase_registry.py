@@ -279,25 +279,33 @@ def test_load_hard_caps_custom_key(tmp_path):
 
 # ── Rehearsal marker namespace (alpha-engine-config-I11660) ─────────────────
 
+# Execution names are held in constants, never inlined as `run_token="..."`
+# literals: gitleaks' generic-api-key rule reads a token-named keyword beside
+# a high-entropy value as a credential, and the fleet scan covers full history,
+# so each inlined literal became a baseline entry (alpha-engine-config-I12398).
+REHEARSAL_1 = "rehearsal-2026-04-23-1"
+APRIL_WEEKLY = "f283a70c-weekly"
+WEEKLY = "eb30d967-weekly"
+
 
 def test_a_real_run_ignores_a_rehearsals_ok_marker_for_the_same_date(s3):
-    rehearsal = _reg(s3, run_token="rehearsal-2026-04-23-1")
+    rehearsal = _reg(s3, run_token=REHEARSAL_1)
     with rehearsal.phase("simulate", supports_auto_skip=True) as ctx:
         assert not ctx.skipped
     assert s3.put_calls[-1]["Key"] == (
         "backtest/2026-04-23/.phases/.rehearsal/rehearsal-2026-04-23-1/simulate.json"
     )
 
-    weekly = _reg(s3, run_token="f283a70c-weekly")
+    weekly = _reg(s3, run_token=APRIL_WEEKLY)
     assert weekly.should_run("simulate", supports_auto_skip=True) == (True, "default_run")
 
 
 def test_a_rehearsal_resumes_its_own_markers_but_not_another_rehearsals(s3):
-    first = _reg(s3, run_token="rehearsal-2026-04-23-1")
+    first = _reg(s3, run_token=REHEARSAL_1)
     with first.phase("simulate", supports_auto_skip=True):
         pass
 
-    relaunch = _reg(s3, run_token="rehearsal-2026-04-23-1")
+    relaunch = _reg(s3, run_token=REHEARSAL_1)
     assert relaunch.should_run("simulate", supports_auto_skip=True) == (
         False,
         "auto_skip_marker_ok",
@@ -323,10 +331,10 @@ def test_run_token_defaults_to_the_RUN_TOKEN_environment(s3, monkeypatch):
 
 
 def test_the_marker_records_the_run_token(s3):
-    with _reg(s3, run_token="rehearsal-2026-04-23-1").phase("simulate"):
+    with _reg(s3, run_token=REHEARSAL_1).phase("simulate"):
         pass
     body = json.loads(s3.put_calls[-1]["Body"])
-    assert body["run_token"] == "rehearsal-2026-04-23-1"
+    assert body["run_token"] == REHEARSAL_1
 
 
 # ── Marker provenance (alpha-engine-config-I12351 C30) ──────────────────────
@@ -339,7 +347,7 @@ def _ok(run_token=None):
 def test_a_real_run_never_skips_on_a_rehearsal_marker_at_the_shared_key(s3):
     """A rehearsal marker that reached the shared key is a leak, not evidence."""
     s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok("rehearsal-2026-10-16-2"))
-    weekly = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="eb30d967-weekly")
+    weekly = _reg(s3, marker_prefix="data", date="2026-10-16", run_token=WEEKLY)
     assert weekly.should_run("alternative", supports_auto_skip=True) == (True, "marker_from_rehearsal")
     adhoc = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="")
     assert adhoc.should_run("alternative", supports_auto_skip=True) == (True, "marker_from_rehearsal")
@@ -348,10 +356,10 @@ def test_a_real_run_never_skips_on_a_rehearsal_marker_at_the_shared_key(s3):
 def test_unattributed_markers_are_refused_only_when_the_consumer_opts_in(s3):
     """The 2026-10-16 leak: status=ok, run_token null, at the shared key."""
     s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok(None))
-    default = _reg(s3, marker_prefix="data", date="2026-10-16", run_token="eb30d967-weekly")
+    default = _reg(s3, marker_prefix="data", date="2026-10-16", run_token=WEEKLY)
     assert default.should_run("alternative", supports_auto_skip=True) == (False, "auto_skip_marker_ok")
     strict = _reg(
-        s3, marker_prefix="data", date="2026-10-16", run_token="eb30d967-weekly",
+        s3, marker_prefix="data", date="2026-10-16", run_token=WEEKLY,
         require_attributed_markers=True,
     )
     assert strict.should_run("alternative", supports_auto_skip=True) == (True, "marker_unattributed")
@@ -359,7 +367,7 @@ def test_unattributed_markers_are_refused_only_when_the_consumer_opts_in(s3):
 
 def test_strict_mode_still_resumes_an_attributed_production_marker(s3):
     """A rerun under a new execution name resumes the first attempt's work."""
-    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok("eb30d967-weekly"))
+    s3.seed("test-bucket", "data", "2026-10-16", "alternative", _ok(WEEKLY))
     rerun = _reg(
         s3, marker_prefix="data", date="2026-10-16", run_token="weekly-rerun-2026-10-16-1",
         require_attributed_markers=True,
