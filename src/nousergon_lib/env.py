@@ -365,7 +365,9 @@ def diff_against_packaged(path: str | os.PathLike[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m nousergon_lib.env", description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(
+        prog="python -m nousergon_lib.env", description="Fleet environment registry: validate, compare, resolve."
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check", help="schema-validate a registry file")
     c.add_argument("path")
