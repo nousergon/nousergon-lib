@@ -1,0 +1,92 @@
+# Fleet environment registry (ENV-REGISTRY; plan S-03, alpha-engine-config-I12491).
+#
+# SOURCE OF TRUTH: nous-ergon-ops governance/environments.yaml. nousergon-lib
+# ships a VERBATIM copy as package data (src/nousergon_lib/environments.yaml);
+# ops CI fails when the two differ after parsing
+# (`python -m nousergon_lib.env parity governance/environments.yaml`).
+# Change the governance file first, then copy it to the library in a PR.
+#
+# The copy is PUBLIC (nousergon-lib is a public PyPI package). Put nothing here
+# that fails the publication test: no credentials, no secret values. SSM entries
+# are parameter-name PREFIXES, never values.
+#
+# Read ONLY through `nousergon_lib.env` (ENV-NO-LITERALS): code asks for a role
+# (`env.resolve().bucket("research")`), never for a literal. The environment is
+# one setting, NE_ENV (default `default:` below). Unknown keys anywhere fail
+# the schema; an unknown role or environment raises at resolve time.
+#
+# Prod values only (S-03, no behaviour change). Staging is added by the
+# milestone that provisions it (S-06 account, S-17 stack), not before.
+# Times are America/New_York wall-clock (DST ends 2026-11-01).
+
+schema_version: 1
+default: prod
+
+environments:
+  prod:
+    account: "711398986525"
+    region: us-east-1
+
+    # Role -> bucket name.
+    buckets:
+      research: alpha-engine-research            # data of record: ArcticDB, corpus, market data
+      crucible: alpha-engine-crucible-v2         # crucible v2 store (stack parameter BucketName)
+      cloudtrail_archive: nousergon-fleet-cloudtrail-archive
+
+    # Role -> {bucket role, key prefix}; `env.s3_uri(role)`.
+    stores:
+      crucible: {bucket: crucible, prefix: crucible}     # CRUCIBLE_STORE
+      arcticdb: {bucket: research, prefix: arcticdb}     # CRUCIBLE_ARCTIC_BUCKET's library root
+
+    # Role -> CloudFormation stack name.
+    stacks:
+      crucible: crucible-v2
+      orchestration: alpha-engine-orchestration
+      data_collection: nousergon-data-collection
+      cloudtrail: fleet-cloudtrail
+
+    # Postgres state (plan section 5). null = not provisioned yet (S-10, I12498).
+    state_store:
+      neon_branch: null
+
+    # Role -> SNS topic NAME; `env.topic_arn(role)` builds the ARN.
+    topics:
+      pages: crucible-v2-pages
+      pages_muted: crucible-v2-pages-muted
+      alerts: alpha-engine-alerts
+      alerts_muted: alpha-engine-alerts-muted
+      alarm_backstop: alpha-engine-alarm-backstop
+      watchdog: alpha-engine-watchdog-alerts
+
+    # Role -> fixed EC2 instance. Crucible v2 boxes are spot and ephemeral, so
+    # they are not listed. Matches governance/box-config-deploy-targets.json.
+    instances:
+      dashboard: i-09b539c844515d549
+      trading: i-018eb3307a21329bf
+
+    # Role -> SSM parameter-name prefix (names only, never values).
+    ssm_prefixes:
+      alpha_engine: /alpha-engine/
+      crucible: /crucible-v2/
+      llm: /nous-ergon/
+      krepis: /krepis/
+
+    # Per-weekly-run LLM spend ceiling, USD (crucible.llm.DEFAULT_LLM_CAP_USD).
+    llm_cap_usd: 5.0
+
+    # The declared universe (CRUCIBLE_UNIVERSE_URI). full = every declared name.
+    universe:
+      scope: full
+      bucket: research
+      key: market_data/latest_weekly.json
+
+    # Crucible v2 EventBridge Scheduler cadences (crucible-v2 stack,
+    # ScheduleExpressionTimezone America/New_York).
+    schedules_et:
+      data_daily: {days: MON-FRI, time_et: "21:15"}
+      serve_daily_m: {days: MON-FRI, time_et: "22:15"}
+      serve_daily_u: {days: MON-FRI, time_et: "22:15"}
+      serve_daily_s: {days: MON-FRI, time_et: "22:30"}
+      weekly: {days: SAT, time_et: "07:00"}
+      alerts_sweep: {days: DAILY, time_et: "21:00"}
+      heartbeat: {days: SAT, time_et: "17:00"}
