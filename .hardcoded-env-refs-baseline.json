@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "guard": "hardcoded-env-refs",
+  "tracker": "alpha-engine-config-I12492",
+  "note": "Shrink-only ceiling of hard-coded account/bucket literals per file. Never raise an entry; lower it with `python3 hardcoded_env_refs.py --repo . --update` when a literal is removed.",
+  "totals": {
+    "account_hits": 48,
+    "account_files": 18,
+    "bucket_hits": 108,
+    "bucket_files": 51,
+    "files": 63
+  },
+  "files": {
+    ".github/workflows/alert-class-pr-guard.yml": {
+      "bucket": 1
+    },
+    ".github/workflows/changelog.yml": {
+      "account": 1,
+      "bucket": 1
+    },
+    ".gitleaks-baseline.json": {
+      "bucket": 4
+    },
+    "src/nousergon_lib/agent_schemas.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/arcticdb.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/artifact_freshness.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/config.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/decision_capture.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/dispatch_lease.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/eval_artifacts.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/fleet_check_result.py": {
+      "bucket": 2
+    },
+    "src/nousergon_lib/health.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/pillars.py": {
+      "bucket": 7
+    },
+    "src/nousergon_lib/pipeline_status/completion_marker.py": {
+      "bucket": 2
+    },
+    "src/nousergon_lib/pipeline_status/coverage.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/pipeline_status/cycle_shape.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/pipeline_status/read.py": {
+      "account": 1
+    },
+    "src/nousergon_lib/pipeline_status/registry.py": {
+      "bucket": 3
+    },
+    "src/nousergon_lib/quant/stats/trial_accumulator.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/rag/__init__.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/rag/parquet_mirror.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/rag/rerank.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/run_manifest.py": {
+      "bucket": 2
+    },
+    "src/nousergon_lib/sft.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/sources/__init__.py": {
+      "bucket": 2
+    },
+    "src/nousergon_lib/sources/protocols.py": {
+      "bucket": 1
+    },
+    "src/nousergon_lib/transparency.py": {
+      "account": 1,
+      "bucket": 1
+    },
+    "src/nousergon_lib/transparency_inventory.yaml": {
+      "account": 4,
+      "bucket": 8
+    },
+    "src/nousergon_lib/universe.py": {
+      "bucket": 1
+    },
+    "tests/fixtures/coverage_sweep_260822/verdicts_unified.json": {
+      "account": 3,
+      "bucket": 3
+    },
+    "tests/fixtures/pipeline_status/weekly_failed_2026_08_15.json": {
+      "account": 1
+    },
+    "tests/fixtures/pipeline_status/weekly_gateout_2026_08_20.json": {
+      "account": 1
+    },
+    "tests/fixtures/pipeline_status/weekly_gateout_2026_08_21.json": {
+      "account": 1
+    },
+    "tests/fixtures/pipeline_status/weekly_gateout_2026_08_21_describe.json": {
+      "account": 4
+    },
+    "tests/fixtures/pipeline_status/weekly_gateout_2026_08_21_raw_history.json": {
+      "account": 13
+    },
+    "tests/fixtures/pipeline_status/weekly_vacuous_success_watch_rerun_2026_08_16_4.json": {
+      "account": 1
+    },
+    "tests/fixtures/run_manifest/failed_D02.json": {
+      "bucket": 1
+    },
+    "tests/fixtures/run_manifest/not_applicable_D01.json": {
+      "bucket": 1
+    },
+    "tests/fixtures/run_manifest/ok_D24.json": {
+      "bucket": 1
+    },
+    "tests/fixtures/sf_substatus/weekly_2026-08-15_scheduled.json": {
+      "account": 2,
+      "bucket": 2
+    },
+    "tests/test_arcticdb.py": {
+      "bucket": 2
+    },
+    "tests/test_arcticdb_bitemporal.py": {
+      "bucket": 1
+    },
+    "tests/test_artifact_resolution.py": {
+      "bucket": 1
+    },
+    "tests/test_decision_capture.py": {
+      "bucket": 15
+    },
+    "tests/test_env.py": {
+      "account": 1
+    },
+    "tests/test_llm_endpoint_probe.py": {
+      "bucket": 1
+    },
+    "tests/test_pillars.py": {
+      "bucket": 1
+    },
+    "tests/test_pipeline_status_completion_marker.py": {
+      "account": 1
+    },
+    "tests/test_pipeline_status_coverage.py": {
+      "bucket": 1
+    },
+    "tests/test_pipeline_status_cycle_shape.py": {
+      "account": 1
+    },
+    "tests/test_pipeline_status_read.py": {
+      "account": 7
+    },
+    "tests/test_pipeline_status_sweep_deferral.py": {
+      "account": 1,
+      "bucket": 1
+    },
+    "tests/test_pipeline_status_templates.py": {
+      "account": 4
+    },
+    "tests/test_quant_stats_regime_sortino_units.py": {
+      "bucket": 1
+    },
+    "tests/test_quant_stats_trial_accumulator.py": {
+      "bucket": 1
+    },
+    "tests/test_rag.py": {
+      "bucket": 1
+    },
+    "tests/test_rag_local_ann.py": {
+      "bucket": 1
+    },
+    "tests/test_rag_parquet_mirror.py": {
+      "bucket": 1
+    },
+    "tests/test_rehearsal_bookkeeping.py": {
+      "bucket": 1
+    },
+    "tests/test_run_manifest.py": {
+      "bucket": 5
+    },
+    "tests/test_run_manifest_golden.py": {
+      "bucket": 2
+    },
+    "tests/test_transparency.py": {
+      "bucket": 1
+    },
+    "tests/test_universe.py": {
+      "bucket": 1
+    }
+  }
+}
