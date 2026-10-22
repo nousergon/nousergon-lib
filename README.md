@@ -88,6 +88,16 @@ Wrappers around the ArcticDB Python client. Standardizes the URI format, library
 
 Pure-Python NYSE calendar through 2030. No `pandas-market-calendars` dependency.
 
+### `env` — environment registry resolver (environment is one setting)
+
+The only reader of the fleet environment registry (`environments.yaml`, a packaged copy of the governance file). Resolves the environment from `NE_ENV` (default `prod`) and returns its account, region, buckets, stores, stacks, topics, instances, SSM prefixes, LLM cap, universe and schedule times (ET) by role, so code never names a literal. Unknown environments, roles and registry keys raise. `NE_ENV_REGISTRY` points it at another registry file. CLI: `python -m nousergon_lib.env check|parity|show`.
+
+```python
+from nousergon_lib import env
+e = env.resolve()            # NE_ENV, else the registry default
+e.bucket("research"); e.topic_arn("pages"); e.s3_uri("crucible")
+```
+
 ### `artifact_freshness` — absence-driven S3 artifact monitoring substrate
 
 The lib-side piece of the artifact-freshness-monitor arc closing the silent absence-of-artifact bug class. SF Catch, flow-doctor, and substrate-health-check are all event-driven (failure → alert); this module is the substrate for the absence-driven complement (silence → alert).

@@ -161,7 +161,9 @@ type-check = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"nousergon_lib" = ["transparency_inventory.yaml", "py.typed"]
+# The fleet environment registry, a verbatim copy of nous-ergon-ops
+# governance/environments.yaml (nousergon_lib.env; alpha-engine-config-I12491).
+"nousergon_lib" = ["transparency_inventory.yaml", "environments.yaml", "py.typed"]
 "nousergon_lib.contracts" = ["*.schema.json"]
 "nousergon_lib.gates" = ["schemas/*.json"]
 # The derived, prefix-only cost SSoT the gate grades against. GENERATED in
