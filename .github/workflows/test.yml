@@ -158,3 +158,11 @@ jobs:
           python-version: "3.12"
       - name: Lint dependency extras (no underscores)
         run: python3 scripts/lint_extras.py .
+      # Shrink-only guard against hard-coded account/bucket literals (plan
+      # S-04, alpha-engine-config-I12492; clause ENV-NO-LITERALS). Observe
+      # mode: reports new hits and stale baseline entries against
+      # .hardcoded-env-refs-baseline.json and exits 0. S-16
+      # (alpha-engine-config-I12504) adds `--mode enforce`. A step in this
+      # existing job, not a new workflow: stdlib only, ~1s.
+      - name: Hard-coded environment references (observe)
+        run: python3 scripts/hardcoded_env_refs.py --repo .
