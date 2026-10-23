@@ -91,13 +91,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/publish_coverage_badge.sh
 
-  # Basic-mode pyright, pinned to the declared floor (config#2534; 3.10 since
-  # alpha-engine-config-I11254). One pinned run rather than a full matrix: the
-  # floor is where PEP604-class regressions actually surface (see the origin note above) — a full matrix would 5x
-  # the CI cost here for no extra signal, since 3.10+ is strictly more
-  # permissive for the union-syntax class of bug this workflow exists to
-  # catch. Blocking: nousergon-lib is the shared contract surface ~10 repos
-  # import, so a type regression here propagates fleet-wide.
+  # STRICT basedpyright, pinned to the declared floor (alpha-engine-config-I12607;
+  # was basic-mode pyright, config#2534). One pinned run rather than a full
+  # matrix: the floor is where PEP604-class regressions actually surface (see
+  # the origin note above). Blocking: nousergon-lib is the shared contract
+  # surface ~10 repos import, so a type regression here propagates fleet-wide.
+  #
+  # The job NAME is kept as it was on purpose: it may be a required status
+  # check context, and renaming it would leave a required check that never
+  # reports.
   pyright:
     name: pyright (basic, py3.10)
     runs-on: ubuntu-latest
@@ -111,21 +113,56 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - name: Install package + extras + pyright
+      - name: Install package + extras + basedpyright + ruff
         # Same extras as the pytest job (see its install-step comment for
         # the per-extra rationale) plus [type-check] — the mypy-boto3-stepfunctions
         # stub-only package pipeline_status/read.py's TYPE_CHECKING import
         # needs to resolve SFNClient. [rerank]/[flow_doctor] stay excluded
         # (heavy torch/transformers + flow-doctor glue, deferred at runtime
         # and unresolved-import-ignored in the two call sites that touch
-        # them — see rag/rerank.py).
+        # them — see rag/rerank.py). ruff is pinned to ruff.yml's version.
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,rag,rag-parquet,rag-local-ann,arcticdb,quant,quant-xs,quant-stats,contracts,github-app,type-check]"
-          pip install pyright
+          pip install basedpyright==1.40.2 ruff==0.14.14
 
-      - name: Run pyright
-        run: pyright
+      # Errors recorded in `.basedpyright/baseline.json` are tolerated; any new
+      # one fails. On a PR the baseline may only shrink: a count that grew for
+      # any rule means the baseline was regenerated to absorb new errors.
+      # Missing RETURN annotations are not a pyright rule, so ruff's ANN rules
+      # run over every src file the PR adds or changes: touch a file, annotate it.
+      - name: Type check (basedpyright strict, baseline may only shrink)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          basedpyright
+          if ! git diff --quiet -- .basedpyright/baseline.json; then
+            echo "::warning::type errors were fixed but .basedpyright/baseline.json was not shrunk; run basedpyright locally and commit the smaller baseline."
+            git checkout -- .basedpyright/baseline.json
+          fi
+          if [ -n "${BASE_REF}" ] && git fetch --quiet --depth=1 origin "${BASE_REF}"; then
+            mapfile -t changed < <(git diff --name-only --diff-filter=AMR FETCH_HEAD HEAD -- 'src/*.py')
+            if [ "${#changed[@]}" -gt 0 ]; then
+              ruff check --select ANN --ignore ANN401 "${changed[@]}"
+            fi
+            if git cat-file -e "FETCH_HEAD:.basedpyright/baseline.json" 2>/dev/null; then
+              git show "FETCH_HEAD:.basedpyright/baseline.json" > /tmp/baseline-base.json
+              git show "HEAD:.basedpyright/baseline.json" > /tmp/baseline-head.json 2>/dev/null \
+                || echo '{"files": {}}' > /tmp/baseline-head.json
+              python3 - <<'PY'
+          import collections, json, sys
+          def counts(path):
+              files = json.load(open(path))["files"]
+              return collections.Counter(e["code"] for es in files.values() for e in es)
+          base, head = counts("/tmp/baseline-base.json"), counts("/tmp/baseline-head.json")
+          grown = {c: (base[c], n) for c, n in head.items() if n > base[c]}
+          for code, (b, n) in sorted(grown.items()):
+              print(f"::error::type baseline grew for {code}: {b} -> {n}. Fix the new errors instead of re-baselining.")
+          sys.exit(1 if grown else 0)
+          PY
+            fi
+          fi
 
   # Alert (Telegram) ONLY on genuine post-merge breakage of the default
   # branch. PR-branch reds (mid-fix commits, cross-repo lib-tag merge-order
