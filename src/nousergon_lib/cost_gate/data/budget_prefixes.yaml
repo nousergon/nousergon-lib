@@ -58,6 +58,10 @@ providers:
         approved: true
         iam_prefixes:
         - fis
+      AWS Invoicing:
+        approved: true
+        iam_prefixes:
+        - invoicing
       AWS Key Management Service:
         approved: true
         iam_prefixes:
