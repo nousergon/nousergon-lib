@@ -190,28 +190,37 @@ omit = ["src/nousergon_lib/egress/proxy.py"]
 # opportunistically as coverage grows.
 fail_under = 92
 
-[tool.pyright]
-# CI gate (config#2534): basic mode pinned to the 3.10 floor — the oldest
-# supported version is where PEP604-class regressions actually bite (see
-# test.yml's origin note), so a single pinned run at the floor catches the same
-# class of defect a full 3.10-3.13 pyright matrix would, without 5x the CI
-# minutes. Strict mode is a deliberate follow-up ratchet, not this pass.
+[tool.basedpyright]
+# STRICT typing gate (alpha-engine-config-I12607; replaces config#2534's
+# pyright basic mode). Pinned to the 3.10 floor — the oldest supported
+# version is where PEP604-class regressions actually bite (see test.yml's
+# origin note), so one pinned run catches what a 3.10-3.13 matrix would.
+#
+# `.basedpyright/baseline.json` records the errors that existed when strict
+# mode was switched on. basedpyright ignores exactly those and fails on any
+# NEW error, so every new or changed line is strict from day one. The
+# baseline shrinks as old errors are fixed; CI refuses a PR that grows any
+# rule's count. Never regenerate it (`--writebaseline`) to get a PR green:
+# fix the code, or suppress one line with `# pyright: ignore[<rule>]` and
+# say why.
 include = ["src/nousergon_lib"]
 # tests/ excluded: this gate protects the *importable contract* ~10 repos
-# consume (src/), not the test suite. Typing 1200+ test cases (many using
-# loosely-typed fixtures/moto mocks/parametrize) is a separate, much larger
-# ratchet with its own cost/benefit call — out of scope for this issue.
+# consume (src/), not the test suite. Typing 1200+ test cases is a later
+# ratchet.
 exclude = ["**/__pycache__"]
 pythonVersion = "3.10"
-typeCheckingMode = "basic"
-# Resolve optional-extra imports (pandas/numpy/psycopg2/jsonschema/etc) the
-# same way CI's pytest job does: installed into the active environment, not
-# a separate venv config. The CI job installs
-# ".[dev,rag,arcticdb,quant,quant-xs,quant-stats,contracts,type-check]"
-# (mirrors test.yml's pytest install line + the pyright-only stub extra)
-# before running pyright, so no venvPath/executionEnvironments indirection
-# is needed — pyright resolves imports from the active interpreter's
-# site-packages by default.
+typeCheckingMode = "strict"
+# Strict mode does not flag an explicit `Any`; this does. A needed `Any` (an
+# untyped SDK object, raw JSON) gets a line-level ignore with a reason.
+reportExplicitAny = "error"
+# A bare `# type: ignore` silences every rule on the line; only rule-scoped
+# `# pyright: ignore[rule]` comments are honoured.
+enableTypeIgnoreComments = false
+reportIgnoreCommentWithoutRule = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+# Optional-extra imports (pandas/numpy/psycopg2/jsonschema/etc) resolve from
+# the active interpreter, into which the CI job installs
+# ".[dev,rag,rag-parquet,rag-local-ann,arcticdb,quant,quant-xs,quant-stats,contracts,github-app,type-check]".
 
 [tool.ruff]
 line-length = 120
