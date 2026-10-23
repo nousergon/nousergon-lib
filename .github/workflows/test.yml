@@ -137,6 +137,10 @@ jobs:
         run: |
           set -euo pipefail
           basedpyright
+          if ! git diff --quiet -- .basedpyright/baseline.json; then
+            echo "::warning::type errors were fixed but .basedpyright/baseline.json was not shrunk; run basedpyright locally and commit the smaller baseline."
+            git checkout -- .basedpyright/baseline.json
+          fi
           if [ -n "${BASE_REF}" ] && git fetch --quiet --depth=1 origin "${BASE_REF}"; then
             mapfile -t changed < <(git diff --name-only --diff-filter=AMR FETCH_HEAD HEAD -- 'src/*.py')
             if [ "${#changed[@]}" -gt 0 ]; then
