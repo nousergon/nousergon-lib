@@ -37,6 +37,7 @@ list and optionally publishes SNS.
 from __future__ import annotations
 
 import argparse
+import importlib
 import io
 import json
 import logging
@@ -44,7 +45,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -62,6 +63,37 @@ logger = logging.getLogger(__name__)
 DEFAULT_BUCKET = "alpha-engine-research"
 DEFAULT_NAMESPACE_OUT = "AlphaEngine/Substrate"
 DEFAULT_SNS_TOPIC = "arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts"
+
+
+def _rehearsal_token(env: Mapping[str, str] | None = None) -> str | None:
+    """The rehearsal's execution name, or ``None`` for a production run.
+
+    A weekly-SF rehearsal runs this checker through the same
+    WeeklySubstrateHealthCheck step as production. ``krepis.ssm_log_capture``
+    exports the execution name to it as ``RUN_TOKEN``, and a rehearsal's name
+    starts ``rehearsal-``. Its CloudWatch metrics and SNS page must not land on
+    the production surfaces (alpha-engine-config-I12582: ``rehearsal-2026-10-21-1``
+    put SubstrateChecksFailed=2 into ``AlphaEngine/Substrate`` and tripped
+    ``alpha-engine-substrate-aggregate-failures``).
+
+    ``krepis.rehearsal`` is the fleet's single definition, so a process is never
+    a rehearsal to one layer and live to another. It shipped in krepis 0.59.78,
+    above this package's floor, so an older krepis falls back to the same two
+    inputs it reads.
+    """
+    env = os.environ if env is None else env
+    try:
+        # Imported by name: krepis < 0.59.78 has no such module, so a static
+        # import would resolve or not depending on the krepis installed.
+        rehearsal_token = importlib.import_module("krepis.rehearsal").rehearsal_token
+    except ImportError:
+        name = (env.get("RUN_TOKEN") or "").strip().rsplit(":", 1)[-1]
+        if name.startswith("rehearsal-"):
+            return name
+        if not name and (env.get("AE_PIPELINE_ROLE") or "").strip().lower() == "rehearsal":
+            return "rehearsal-unnamed"
+        return None
+    return rehearsal_token(env=env)
 
 
 @dataclass
@@ -908,14 +940,23 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(format_report(results))
 
-    if not args.no_emit:
+    rehearsal = _rehearsal_token()
+    if rehearsal:
+        # The exit code is unchanged, so the SF still records the failure on
+        # the rehearsal's own execution (SubstrateHealthCheckDegraded).
+        print(
+            f"REHEARSAL ({rehearsal}): AlphaEngine/Substrate metrics and the "
+            "SNS page are not emitted (alpha-engine-config-I12582)"
+        )
+
+    if not args.no_emit and not rehearsal:
         try:
             emit_cloudwatch_metrics(results, cw)
         except Exception as exc:  # pragma: no cover — non-fatal
             log.warning("CloudWatch emission failed: %s", exc)
 
     failures = [r for r in results if r.status == "fail"]
-    if failures and args.alert:
+    if failures and args.alert and not rehearsal:
         try:
             sns = boto3.client("sns", region_name="us-east-1")
             topic = os.environ.get("SNS_TOPIC_ARN", DEFAULT_SNS_TOPIC)
