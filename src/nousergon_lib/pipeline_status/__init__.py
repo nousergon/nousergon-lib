@@ -90,6 +90,7 @@ from .registry import (
     STATE_TO_ARCHIVE_PAGE,
     SUBSTANTIVE_RESOURCES,
     SUPERSEDED_STAGES,
+    VACUITY_SPINE,
     WAIT_GROUPING,
     ArchivePageRef,
     ArtifactReason,
@@ -102,6 +103,7 @@ from .registry import (
     stale_retiring_stages,
     superseded_stages_served,
     undefined_spine_stages,
+    vacuity_spine_for,
 )
 from .roles import (
     ADHOC_ROLES,
@@ -173,6 +175,7 @@ __all__ = [
     "SUBSTANTIVE_RESOURCES",
     "TaskRow",
     "TaskStatus",
+    "VACUITY_SPINE",
     "WAIT_GROUPING",
     "build_reliability_window",
     "cadence_filter",
@@ -195,4 +198,5 @@ __all__ = [
     "stale_pending_stages",
     "stale_retiring_stages",
     "undefined_spine_stages",
+    "vacuity_spine_for",
 ]
