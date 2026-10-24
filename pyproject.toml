@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.185"
+version = "0.124.187"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # Floor is 3.10 (alpha-engine-config-I11251/I11253/I11254/I11255/I11256).
@@ -129,8 +129,17 @@ rag-local-ann = [
 # release exists for 3.9. On 3.9 the extra installs nothing and
 # CrossEncoderReranker raises its ImportError rather than resolving to the
 # vulnerable 5.1.2. No fleet consumer installs [rerank] (checked 2026-10-06).
+#
+# Marker raised to >=3.11 (2026-10-24): sentence-transformers pulls filelock
+# (via torch + huggingface-hub), and every filelock release fixing the
+# <=4.2.0 advisories (first fixed 4.2.1) requires Python >=3.11, so the 3.10
+# lock fork could only hold the vulnerable 4.0.7. Dependabot's uv security
+# updater resolves every fork at once, so its filelock job failed
+# `security_update_not_possible` (latest resolvable 4.0.7, lowest
+# non-vulnerable 4.2.1). Same shape as the 3.9 cut above: on 3.10 the extra
+# installs nothing and CrossEncoderReranker raises its ImportError.
 rerank = [
-    "sentence-transformers>=5.6.0; python_version >= '3.10'",
+    "sentence-transformers>=5.6.0; python_version >= '3.11'",
 ]
 # Parquet row-count completeness predicate (nousergon_lib.artifact_freshness
 # .check_completeness, config#3086, CompletenessCheck.kind="parquet_row_count").
