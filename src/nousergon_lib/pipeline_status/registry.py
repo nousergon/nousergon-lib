@@ -1810,6 +1810,64 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
+#: The declared SUBSTANTIVE subset of each spine: the stages whose entry means a
+#: run did the pipeline's WORK, as distinct from standing up the infrastructure
+#: around it (alpha-engine-config-I11081; Brian's ruling 2026-10-24, "(a)
+#: Declared stages").
+#:
+#: It is read by the operator rerun vacuity guards (``nousergon-data``
+#: ``scripts/weekday_sf_rerun.py``), which refuse a ``--start`` whose input can
+#: enter none of these stages. :data:`PIPELINE_STAGE_ORDER` itself is unchanged,
+#: because every ``pipeline_status`` consumer reads it as "what a complete cycle
+#: enters", and that is a different judgment.
+#:
+#: WHY A SUBSET IS NEEDED, measured 2026-10-23 on the nousergon-data ``main``
+#: definitions. With EVERY declared skip flag true, the preopen spine still has
+#: ``StartExecutorEC2`` and ``CodeFreshnessGate`` enterable for any role, and the
+#: reconcile spine still has ``StopTradingInstance`` enterable under
+#: ``operator-replay``. No skip flag gates those stages, so a guard reading the
+#: full spine could NEVER call a weekday rerun vacuous. It would be inert on
+#: exactly the shape it exists for: a rerun that boots the box, runs the
+#: freshness gate, does nothing, and goes green.
+#:
+#: The rule for membership: a stage is substantive when it produces the
+#: pipeline's output, or decides on it, and a skip flag can switch it off. The
+#: infrastructure stages (instance start/stop, the code-freshness gate, the
+#: collection-manifest readiness wait) are excluded. They run on every route,
+#: and entering them proves nothing about whether the run did anything.
+#: ``nousergon-data``'s commissioning test pins the other half: for every
+#: weekday pipeline, an all-flags-true input enters NONE of these stages, so
+#: the guard can fire.
+#:
+#: Every pipeline in :data:`PIPELINE_STAGE_ORDER` is declared here. The weekly
+#: entry is the full spine, because its rerun guard already reads the full spine
+#: (alpha-engine-config-I11075). Each entry must be a non-empty, order-preserving
+#: subset of that pipeline's spine, and ``tests/test_pipeline_status_registry.py``
+#: asserts both.
+VACUITY_SPINE: Final[dict[str, tuple[str, ...]]] = {
+    "ne-weekly-freshness-pipeline": PIPELINE_STAGE_ORDER["ne-weekly-freshness-pipeline"],
+    "ne-preopen-trading-pipeline": (
+        "PredictorInference",
+        "CheckPredictorCoverage",
+        "RunMorningPlanner",
+        "RunDaemon",
+    ),
+    "ne-postclose-trading-pipeline": ("CaptureSnapshot",),
+    "ne-postclose-reconcile-pipeline": ("EODReconcile",),
+}
+
+
+def vacuity_spine_for(state_machine: str) -> tuple[str, ...]:
+    """Declared substantive-stage subset (:data:`VACUITY_SPINE`) for an ARN or bare name.
+
+    Returns ``()`` for an undeclared pipeline. As with :func:`stage_order_for`, a
+    caller must treat that as "cannot be judged" and refuse, never as "nothing was
+    expected, so it passed".
+    """
+    name = state_machine.rsplit(":", 1)[-1] if state_machine else ""
+    return VACUITY_SPINE.get(name, ())
+
+
 #: Terminal states that end an execution SUCCEEDED having deliberately not
 #: done the work. Reaching one is CORRECT behaviour and must never page —
 #: and must never be counted as a completed cycle either.
