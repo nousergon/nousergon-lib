@@ -129,8 +129,17 @@ rag-local-ann = [
 # release exists for 3.9. On 3.9 the extra installs nothing and
 # CrossEncoderReranker raises its ImportError rather than resolving to the
 # vulnerable 5.1.2. No fleet consumer installs [rerank] (checked 2026-10-06).
+#
+# Marker raised to >=3.11 (2026-10-24): sentence-transformers pulls filelock
+# (via torch + huggingface-hub), and every filelock release fixing the
+# <=4.2.0 advisories (first fixed 4.2.1) requires Python >=3.11, so the 3.10
+# lock fork could only hold the vulnerable 4.0.7. Dependabot's uv security
+# updater resolves every fork at once, so its filelock job failed
+# `security_update_not_possible` (latest resolvable 4.0.7, lowest
+# non-vulnerable 4.2.1). Same shape as the 3.9 cut above: on 3.10 the extra
+# installs nothing and CrossEncoderReranker raises its ImportError.
 rerank = [
-    "sentence-transformers>=5.6.0; python_version >= '3.10'",
+    "sentence-transformers>=5.6.0; python_version >= '3.11'",
 ]
 # Parquet row-count completeness predicate (nousergon_lib.artifact_freshness
 # .check_completeness, config#3086, CompletenessCheck.kind="parquet_row_count").
