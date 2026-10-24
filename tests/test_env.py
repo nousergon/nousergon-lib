@@ -38,7 +38,7 @@ def _write(tmp_path: Path, doc: dict) -> Path:
 def test_packaged_registry_is_valid_and_defaults_to_prod():
     reg = env.load_registry()
     assert reg.default == "prod"
-    assert env.environment_names() == ["prod"]
+    assert env.environment_names() == ["prod", "staging"]
     assert env.current_name() == "prod"
 
 
@@ -68,12 +68,67 @@ def test_derived_values_compose_from_declared_parts():
     assert "research" in e.roles("buckets")
 
 
+# ------------------------------------------------------------------ staging
+# Declared ahead of its account and stack (S-03 second slice); no consumer
+# resolves it until NE_ENV=staging is set. These pin the isolation the plan
+# promises (ENV-PROD-OWNS-DATA) without naming any literal here.
+
+
+def test_staging_is_a_separate_account_in_the_same_region():
+    prod, staging = env.resolve("prod"), env.resolve("staging")
+    assert re.fullmatch(r"[0-9]{12}", staging.account)
+    assert staging.account != prod.account
+    assert staging.region == prod.region
+
+
+def test_staging_writes_only_its_own_bucket_and_reads_prod_data():
+    prod, staging = env.resolve("prod"), env.resolve("staging")
+    prod_buckets = {prod.bucket(r) for r in prod.roles("buckets")}
+    # the crucible store is where staging writes; it must never be a prod bucket
+    assert staging.bucket("crucible") not in prod_buckets
+    assert staging.s3_uri("crucible").startswith(f"s3://{staging.bucket('crucible')}/")
+    # the data of record is prod's, read-only: same research bucket and ArcticDB root
+    assert staging.bucket("research") == prod.bucket("research")
+    assert staging.s3_uri("arcticdb") == prod.s3_uri("arcticdb")
+    # staging's universe lives in its own bucket, and is a subset
+    assert staging.universe_scope == "subset"
+    assert staging.universe_uri.startswith(f"s3://{staging.bucket('crucible')}/")
+
+
+def test_staging_pages_are_muted_and_land_in_the_staging_account():
+    staging = env.resolve("staging")
+    assert staging.topic("pages") == staging.topic("pages_muted")
+    assert staging.topic("pages").endswith("-muted")
+    assert f":{staging.account}:" in staging.topic_arn("pages")
+
+
+def test_staging_has_no_fixed_boxes_and_a_lower_llm_cap():
+    prod, staging = env.resolve("prod"), env.resolve("staging")
+    assert staging.roles("instances") == []
+    assert 0 < staging.llm_cap_usd < prod.llm_cap_usd
+
+
+def test_staging_schedules_are_offset_from_prod():
+    prod, staging = env.resolve("prod"), env.resolve("staging")
+    for role in staging.roles("schedules_et"):
+        assert role in prod.roles("schedules_et"), f"staging schedule {role!r} has no prod counterpart"
+        assert staging.schedule_et(role) != prod.schedule_et(role), f"{role} runs at the same time as prod"
+
+
+def test_staging_lacks_prod_only_roles_and_says_so():
+    staging = env.resolve("staging")
+    with pytest.raises(env.UnknownRoleError, match="declared: crucible"):
+        staging.stack("orchestration")
+    with pytest.raises(env.UnknownRoleError):
+        staging.instance("trading")
+
+
 # ------------------------------------------------------------ fails loudly
 
 
 def test_unknown_environment_from_argument_raises():
-    with pytest.raises(env.UnknownEnvironmentError, match=r"'staging' \(from argument\).*declared: prod"):
-        env.resolve("staging")
+    with pytest.raises(env.UnknownEnvironmentError, match=r"'qa' \(from argument\).*declared: prod, staging"):
+        env.resolve("qa")
 
 
 def test_unknown_environment_from_ne_env_raises(monkeypatch):
@@ -140,7 +195,7 @@ def _mutated(mutate) -> dict:
         (lambda d: d["environments"]["prod"]["schedules_et"]["weekly"].update(time_et="7:00"), "time_et"),
         (lambda d: d["environments"]["prod"]["schedules_et"]["weekly"].update(days="SATURDAY"), "days"),
         (lambda d: d["environments"]["prod"].update(llm_cap_usd=-1), "llm_cap_usd"),
-        (lambda d: d.update(default="staging"), "default"),
+        (lambda d: d.update(default="qa"), "default"),
         (lambda d: d.update(schema_version=2), "schema_version"),
         (lambda d: d.update(environments={}), "environments"),
         (lambda d: d["environments"].update({"Prod": d["environments"]["prod"]}), "Prod"),
@@ -188,6 +243,28 @@ def test_parity_reports_each_difference(tmp_path):
     diffs = env.diff_against_packaged(_write(tmp_path, doc))
     assert any("buckets.research" in d and "other-bucket" in d for d in diffs)
     assert any("topics.watchdog: only in the packaged copy" in d for d in diffs)
+
+
+def test_parity_catches_a_missing_environment_in_either_direction(tmp_path):
+    # governance file lost staging -> only in the packaged copy
+    doc = _doc()
+    doc["environments"].pop("staging")
+    diffs = env.diff_against_packaged(_write(tmp_path, doc))
+    assert diffs == ["environments.staging: only in the packaged copy"]
+    # governance file gained an environment the library does not ship -> only in the file
+    doc = _doc()
+    doc["environments"]["qa"] = copy.deepcopy(doc["environments"]["staging"])
+    path = _write(tmp_path, doc)
+    assert env.diff_against_packaged(path) == [f"environments.qa: only in {path}"]
+
+
+def test_parity_catches_a_staging_value_drift(tmp_path):
+    doc = _doc()
+    doc["environments"]["staging"]["llm_cap_usd"] = 50.0
+    doc["environments"]["staging"]["topics"]["pages"] = "crucible-v2-pages"
+    diffs = env.diff_against_packaged(_write(tmp_path, doc))
+    assert any(d.startswith("environments.staging.llm_cap_usd:") for d in diffs)
+    assert any(d.startswith("environments.staging.topics.pages:") for d in diffs)
 
 
 # ----------------------------------------------------------------------- CLI
