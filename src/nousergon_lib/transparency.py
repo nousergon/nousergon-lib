@@ -45,7 +45,7 @@ import os
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -65,7 +65,7 @@ DEFAULT_NAMESPACE_OUT = "AlphaEngine/Substrate"
 DEFAULT_SNS_TOPIC = "arn:aws:sns:us-east-1:711398986525:alpha-engine-alerts"
 
 
-def _rehearsal_token(env: Any = None) -> str | None:
+def _rehearsal_token(env: Mapping[str, str] | None = None) -> str | None:
     """The rehearsal's execution name, or ``None`` for a production run.
 
     A weekly-SF rehearsal runs this checker through the same
