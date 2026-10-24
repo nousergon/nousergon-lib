@@ -26,6 +26,7 @@ from nousergon_lib.pipeline_status.cycle_shape import (
     REHEARSAL_EXECUTION_PREFIX,
     CycleVerdict,
     build_cycle_shape,
+    declared_skips_from_input,
     is_rehearsal_execution,
     read_cycle_shape,
 )
@@ -252,3 +253,95 @@ def test_the_prefix_matches_the_phase_registry_literal():
     from nousergon_lib.phase_registry import REHEARSAL_EXECUTION_PREFIX as PHASE_PREFIX
 
     assert REHEARSAL_EXECUTION_PREFIX == PHASE_PREFIX
+
+
+# ── alpha-engine-config-I9051: the launch-time skip set is on the record ─────
+
+#: The flags ``watch-rerun-2026-08-22-3`` was launched with, as named in
+#: alpha-engine-config-I9051 (``describe-execution`` 2026-08-28 counted 23 and
+#: the issue names 22 of them, so only those 22 are used here).
+_RERUN_SKIPS_20260822 = (
+    "skip_aggregate_costs",
+    "skip_backtester",
+    "skip_challenger_shadow",
+    "skip_counterfactual",
+    "skip_data_phase1",
+    "skip_data_phase2",
+    "skip_eval_judge",
+    "skip_evaluator",
+    "skip_morning_enrich",
+    "skip_parity",
+    "skip_portfolio_optimizer_backtest",
+    "skip_predictor_backtest",
+    "skip_predictor_training",
+    "skip_rag_ingestion",
+    "skip_rationale_clustering",
+    "skip_regime_retrospective_eval",
+    "skip_regime_substrate",
+    "skip_replay_concordance",
+    "skip_report_card",
+    "skip_research_self_test",
+    "skip_scanner",
+    "skip_signals_envelope",
+)
+
+
+def test_an_execution_told_to_skip_carries_the_names_it_was_told():
+    """1 stage entered BECAUSE the input said so: the row now says so too."""
+    payload = {"pipeline_role": "watch-rerun", "run_date": "2026-10-16", **dict.fromkeys(_RERUN_SKIPS_20260822, True)}
+    sfn = _WeekSFN([("watch-rerun-2026-10-16-3", "SUCCEEDED", payload, ["ReportCard"])])
+    shape = read_cycle_shape(ARN, "2026-10-16", client=sfn, stage_spine=SPINE)
+
+    row = next(e for e in shape.executions if e.execution_name == "watch-rerun-2026-10-16-3")
+    assert row.skips == tuple(sorted(_RERUN_SKIPS_20260822))
+    as_dict = row.to_dict()
+    assert as_dict["skips_count"] == len(_RERUN_SKIPS_20260822) == 22
+    assert as_dict["skips"] == sorted(_RERUN_SKIPS_20260822)
+    # The marker payload carries it per execution, additively.
+    marker_row = next(e for e in shape.to_dict()["executions"] if e["execution_name"] == "watch-rerun-2026-10-16-3")
+    assert marker_row["skips_count"] == 22
+    assert marker_row["stages_entered_count"] == 1
+
+
+def test_an_execution_that_declared_nothing_carries_an_empty_set_not_null():
+    """Same 1-of-N entry, no declaration: the row says [] and the two rows are
+    no longer byte-identical."""
+    payload = {"pipeline_role": "watch-rerun", "run_date": "2026-10-16", "skip_parity": False}
+    sfn = _WeekSFN([("watch-rerun-2026-10-16-3", "FAILED", payload, ["ReportCard"])])
+    shape = read_cycle_shape(ARN, "2026-10-16", client=sfn, stage_spine=SPINE)
+
+    row = next(e for e in shape.executions if e.execution_name == "watch-rerun-2026-10-16-3")
+    assert row.skips == ()
+    assert row.to_dict()["skips"] == []
+    assert row.to_dict()["skips_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        {},
+        {"input": None},
+        {"input": 7},
+        {"input": "{not json"},
+        {"input": json.dumps(["skip_parity"])},
+    ],
+)
+def test_an_unreadable_input_is_unknown_never_no_skips(desc):
+    assert declared_skips_from_input(desc) is None
+
+
+def test_the_pure_fold_leaves_skips_unknown_when_no_map_is_given():
+    outcome = classify_work(
+        state_machine_name=PIPELINE,
+        status=RunStatus.SUCCEEDED,
+        entered_states=list(SPINE),
+        execution_arn="arn:x",
+        execution_name="sat",
+        stage_spine=SPINE,
+    )
+    shape = build_cycle_shape(
+        pipeline=PIPELINE, run_date="2026-10-16", outcomes=[(outcome, "weekly", list(SPINE))], stage_spine=SPINE
+    )
+    assert shape.executions[0].skips is None
+    assert shape.executions[0].to_dict()["skips"] is None
+    assert shape.executions[0].to_dict()["skips_count"] is None

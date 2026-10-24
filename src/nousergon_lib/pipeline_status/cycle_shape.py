@@ -133,7 +133,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from .partition import cycle_keys
 from .read import (
@@ -164,6 +164,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "CONTRIBUTING_ROLES",
     "REHEARSAL_EXECUTION_PREFIX",
+    "declared_skips_from_input",
     "is_rehearsal_execution",
     "cycle_key_for",
     "CycleExecution",
@@ -226,6 +227,40 @@ def is_rehearsal_execution(describe_resp: Mapping[str, Any]) -> bool:
         return True
     run_mode = parsed.get("run_mode")
     return isinstance(run_mode, str) and run_mode.strip().lower() == _REHEARSAL_RUN_MODE
+
+
+def declared_skips_from_input(describe_resp: Mapping[str, object]) -> tuple[str, ...] | None:
+    """The truthy ``skip_*`` flags this execution was LAUNCHED with, sorted.
+
+    ``alpha-engine-config-I9051``: an execution that entered 1 of 16 stages
+    because its input told it to skip the rest, and one that entered 1 of 16
+    because it died, used to produce byte-identical
+    :class:`CycleExecution` rows. This puts the launch-time declaration on the
+    record, so a reader of the marker can check the classification against
+    its evidence instead of re-deriving it.
+
+    Returns ``()`` for a readable input that declares no skip (or only falsy
+    ones). Returns ``None`` when the input cannot be read (missing, not a
+    string, unparseable, or not a JSON object). Unknown is a third fact, and
+    rendering it as ``()`` would assert "no skips were declared" on no
+    evidence. An execution launched before a given flag existed reads as not
+    declaring it, which is true of its input.
+
+    This records the declaration only. It does not change any verdict:
+    completeness is still graded on the walk's evidence, including the
+    cadence-declared skip markers (``alpha-engine-config-I11170``).
+    """
+    raw_input = describe_resp.get("input")
+    if not raw_input or not isinstance(raw_input, str):
+        return None
+    try:
+        parsed = json.loads(raw_input)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    flags = cast("dict[object, object]", parsed)
+    return tuple(sorted(k for k, v in flags.items() if isinstance(k, str) and k.startswith("skip_") and v))
 
 
 #: How far back ``read_cycle_shape`` will walk ``ListExecutions`` looking for
@@ -305,6 +340,11 @@ class CycleExecution:
     #: union; its RUNNING status does not, because it cannot terminate before
     #: the thing it is running. See :func:`build_cycle_shape`.
     is_observer: bool = False
+    #: The truthy ``skip_*`` flags in this execution's launch input, sorted
+    #: (:func:`declared_skips_from_input`). ``None`` means the input was not
+    #: read or could not be parsed, which is unknown and never "no skips";
+    #: ``()`` means a readable input declared none (alpha-engine-config-I9051).
+    skips: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -318,6 +358,8 @@ class CycleExecution:
             "stages_entered": list(self.stages_entered),
             "stages_entered_count": len(self.stages_entered),
             "is_observer": self.is_observer,
+            "skips": list(self.skips) if self.skips is not None else None,
+            "skips_count": len(self.skips) if self.skips is not None else None,
         }
 
 
@@ -487,8 +529,15 @@ def build_cycle_shape(
     walk_exhausted: bool = False,
     observer_execution_arn: str | None = None,
     rehearsals_excluded: Sequence[str] = (),
+    input_skips: Mapping[str, tuple[str, ...] | None] | None = None,
 ) -> CycleShape:
     """Fold one cycle's executions into a single verdict. Pure.
+
+    ``input_skips`` maps an execution ARN to its launch-time skip declaration
+    (:func:`declared_skips_from_input`; :func:`read_cycle_shape` builds it). An
+    ARN absent from the map gets ``skips=None`` (unknown). It is carried onto
+    each :class:`CycleExecution` and never read by the fold
+    (``alpha-engine-config-I9051``).
 
     ``outcomes`` is ``[(work_outcome, pipeline_role, all_entered_states)]``,
     most-recent-first or oldest-first — order is irrelevant to the union and
@@ -568,6 +617,7 @@ def build_cycle_shape(
             stages_entered=outcome.stages_entered,
             all_states_entered=tuple(states),
             is_observer=bool(observer) and (outcome.execution_arn or "") == observer,
+            skips=(input_skips or {}).get(outcome.execution_arn or ""),
         )
         for outcome, role, states in contributors
     )
@@ -713,6 +763,7 @@ def read_cycle_shape(
     next_token: str | None = None
     collected: list[tuple[WorkOutcome, str | None, list[str]]] = []
     rehearsals: list[str] = []
+    skips_by_arn: dict[str, tuple[str, ...] | None] = {}
     observer = (observer_execution_arn or "").strip()
     exhausted = False
     floor = _walk_floor(keys, lookback_days)
@@ -774,6 +825,7 @@ def read_cycle_shape(
                 stage_spine=stage_spine,
             )
             collected.append((outcome, _extract_pipeline_role(desc), states))
+            skips_by_arn[arn] = declared_skips_from_input(cast("Mapping[str, object]", desc))
 
         if before_floor:
             break
@@ -802,6 +854,7 @@ def read_cycle_shape(
         walk_exhausted=exhausted,
         observer_execution_arn=observer_execution_arn,
         rehearsals_excluded=rehearsals,
+        input_skips=skips_by_arn,
     )
 
 
