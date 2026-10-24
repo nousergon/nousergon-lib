@@ -15,8 +15,12 @@
 # one setting, NE_ENV (default `default:` below). Unknown keys anywhere fail
 # the schema; an unknown role or environment raises at resolve time.
 #
-# Prod values only (S-03, no behaviour change). Staging is added by the
-# milestone that provisions it (S-06 account, S-17 stack), not before.
+# prod is the default and the only environment any consumer resolves today.
+# staging (S-03 second slice) is DECLARED ahead of the account (S-06,
+# alpha-engine-config-I12494) and stack (S-17, I12505) that make it real:
+# nothing reads it until a consumer is switched with NE_ENV=staging, so adding
+# it changes no behaviour. Prod data is read-only from staging; staging writes
+# only its own stores (ENV-PROD-OWNS-DATA).
 # Times are America/New_York wall-clock (DST ends 2026-11-01).
 
 schema_version: 1
@@ -90,3 +94,62 @@ environments:
       weekly: {days: SAT, time_et: "07:00"}
       alerts_sweep: {days: DAILY, time_et: "21:00"}
       heartbeat: {days: SAT, time_et: "17:00"}
+
+  # Staging (epic alpha-engine-config-I12488; plan section 3 "What runs in
+  # staging"). Same role names as prod, so code resolves the same role in
+  # either environment. A role prod has and staging lacks is deliberate: asking
+  # for it in staging raises rather than silently reaching a prod resource.
+  staging:
+    account: "041443079404"
+    region: us-east-1
+
+    buckets:
+      research: alpha-engine-research            # PROD data of record, READ-ONLY cross-account (S-08, I12496)
+      crucible: alpha-engine-crucible-v2-staging # staging's own crucible store: the only bucket staging writes
+
+    stores:
+      crucible: {bucket: crucible, prefix: crucible}     # CRUCIBLE_STORE (staging bucket)
+      arcticdb: {bucket: research, prefix: arcticdb}     # the prod library, read-only
+
+    # Same template (crucible-v2.yaml) in the staging account (S-17, I12505).
+    stacks:
+      crucible: crucible-v2
+
+    # Neon staging branch: not provisioned yet (S-10, I12498).
+    state_store:
+      neon_branch: null
+
+    # Muted pages: every page role resolves to the stack's zero-subscriber
+    # PagesMutedTopic, so nothing in staging can page (plan: "Alerts: no
+    # pages"; a staging-gate page on promotion day is S-20's, not this file's).
+    topics:
+      pages: crucible-v2-pages-muted
+      pages_muted: crucible-v2-pages-muted
+
+    # No fixed boxes: staging runs on spot and never on a prod instance.
+    instances: {}
+
+    ssm_prefixes:
+      crucible: /crucible-v2/
+      llm: /nous-ergon/
+
+    # Low per-run LLM ceiling (CRUCIBLE_LLM_CAP_USD), with a cheap model or
+    # recorded replies (S-17).
+    llm_cap_usd: 0.5
+
+    # The fixed adversarial ~100-name subset (splits, restatements, delistings,
+    # symbol changes). A declared list in staging's own bucket, written by S-17.
+    universe:
+      scope: subset
+      bucket: crucible
+      key: universe/staging_subset.json
+
+    # Light runs, offset AFTER the prod chain so they read that day's prod data
+    # and never compete with prod for spot capacity. S-21 (I12509) owns the
+    # final times; they stay in ET so DST needs no edit.
+    schedules_et:
+      data_daily: {days: MON-FRI, time_et: "23:00"}
+      serve_daily_m: {days: MON-FRI, time_et: "23:30"}
+      serve_daily_u: {days: MON-FRI, time_et: "23:30"}
+      serve_daily_s: {days: MON-FRI, time_et: "23:45"}
+      weekly: {days: SAT, time_et: "15:00"}

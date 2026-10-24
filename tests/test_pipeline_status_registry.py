@@ -239,3 +239,51 @@ def test_director_poll_companion_rolls_up_into_the_director_row():
     the existing ``Director`` row rather than render as its own."""
     assert registry.WAIT_GROUPING.get("WaitForDirector") == "Director"
     assert "Director" in registry.STATE_TO_ARCHIVE_PAGE
+
+
+# ── alpha-engine-config-I11081: the declared substantive-stage subset ─────────
+
+
+def test_every_spine_pipeline_declares_a_vacuity_spine():
+    assert set(registry.VACUITY_SPINE) == set(registry.PIPELINE_STAGE_ORDER)
+
+
+@pytest.mark.parametrize("pipeline", sorted(registry.PIPELINE_STAGE_ORDER))
+def test_vacuity_spine_is_a_non_empty_ordered_subset_of_the_spine(pipeline):
+    spine = registry.PIPELINE_STAGE_ORDER[pipeline]
+    vac = registry.VACUITY_SPINE[pipeline]
+    assert vac, f"{pipeline}: an empty vacuity spine makes every rerun vacuous"
+    assert set(vac) <= set(spine), f"{pipeline}: {sorted(set(vac) - set(spine))} not in the spine"
+    assert list(vac) == [s for s in spine if s in vac], f"{pipeline}: order differs from the spine"
+
+
+def test_infrastructure_stages_are_not_substantive():
+    """The stages no skip flag gates. Measured 2026-10-23: including any of them
+    made the weekday guard structurally unable to fire (alpha-engine-config-I11081)."""
+    pre = registry.VACUITY_SPINE["ne-preopen-trading-pipeline"]
+    for stage in ("StartExecutorEC2", "CodeFreshnessGate", "WaitForCollectionManifests"):
+        assert stage not in pre
+    rec = registry.VACUITY_SPINE["ne-postclose-reconcile-pipeline"]
+    for stage in ("WaitForCollectionManifests", "StopTradingInstance"):
+        assert stage not in rec
+
+
+def test_weekly_vacuity_spine_is_the_full_spine():
+    # The weekly rerun guard (I11075) reads the full spine; this release must not
+    # change its verdicts.
+    assert (registry.VACUITY_SPINE["ne-weekly-freshness-pipeline"]
+            == registry.PIPELINE_STAGE_ORDER["ne-weekly-freshness-pipeline"])
+
+
+def test_vacuity_spine_for_accepts_arn_or_name_and_is_empty_when_undeclared():
+    arn = "arn:aws:states:us-east-1:000000000000:stateMachine:ne-postclose-trading-pipeline"
+    assert registry.vacuity_spine_for(arn) == ("CaptureSnapshot",)
+    assert registry.vacuity_spine_for("ne-postclose-trading-pipeline") == ("CaptureSnapshot",)
+    assert registry.vacuity_spine_for("no-such-pipeline") == ()
+    assert registry.vacuity_spine_for("") == ()
+
+
+def test_vacuity_spine_is_exported_from_the_package():
+    import nousergon_lib.pipeline_status as ps
+    assert ps.vacuity_spine_for is registry.vacuity_spine_for
+    assert "VACUITY_SPINE" in ps.__all__ and "vacuity_spine_for" in ps.__all__
