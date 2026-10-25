@@ -60,6 +60,25 @@ jobs:
           repository: nousergon/nousergon-lib
           path: _nousergon-lib-script
 
+      # The script ref FLOATS by decision (alpha-engine-config-I9118, option
+      # (c)); every run records the nousergon-lib commit and script sha256 it
+      # executed, so a fleet-wide verdict change after a merge here is
+      # traceable to the script that moved (see openrouter-guard.yml).
+      - name: Record the guard script this run executed
+        env:
+          SCRIPT: _nousergon-lib-script/scripts/validate_merge_group_required_checks.py
+        run: |
+          set -euo pipefail
+          lib_sha="$(git -C _nousergon-lib-script rev-parse HEAD)"
+          script_sha256="$(sha256sum "$SCRIPT" | cut -d' ' -f1)"
+          echo "::notice title=guard script provenance::nousergon-lib@${lib_sha} scripts/validate_merge_group_required_checks.py sha256=${script_sha256}"
+          {
+            echo "### Guard script provenance"
+            echo ""
+            echo "- nousergon-lib commit: \`${lib_sha}\` (floating ref, alpha-engine-config-I9118)"
+            echo "- \`scripts/validate_merge_group_required_checks.py\` sha256: \`${script_sha256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
         with:
