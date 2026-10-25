@@ -52,25 +52,49 @@ PY
 
 echo "measured coverage: ${PCT}% (${COLOR})"
 
-# The contents API needs the blob sha to replace an existing file. Its absence
-# is a hard error rather than a create, because a missing document means the
-# `badges` branch is gone — and silently recreating it would hide that the
-# README badge has been rendering an error to every reader in the meantime.
-SHA="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${DOC}?ref=${BRANCH}" --jq '.sha')"
-
-if [ -z "${SHA}" ]; then
-  echo "::error::${DOC} not found on the ${BRANCH} branch — the README badge is broken" >&2
-  exit 1
-fi
-
-if [ "$(gh api "repos/${GITHUB_REPOSITORY}/contents/${DOC}?ref=${BRANCH}" --jq '.content' | base64 --decode)" = "$(cat badge-endpoint.json)" ]; then
-  echo "coverage unchanged at ${PCT}% — nothing to publish"
+# Two pushes to main seconds apart (a merge, then its merge-time version bump)
+# run this step concurrently. Both read the same blob sha, the first PUT wins,
+# and the second used to fail with a sha conflict, turning main red on a run
+# whose tests had passed (2026-10-24 18:16Z, f2119412 vs 00783664). Two rules
+# close that:
+#   1. Only the run for the CURRENT head of main publishes. An older run that
+#      lost the race would otherwise overwrite a newer figure, and a newer push
+#      is already measuring the tree that ships.
+#   2. A sha conflict re-reads the document and retries, a bounded number of
+#      times, so two runs for the same head (a re-run) cannot fail each other.
+HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
+if [ -n "${GITHUB_SHA:-}" ] && [ "${HEAD_SHA}" != "${GITHUB_SHA}" ]; then
+  echo "main is now ${HEAD_SHA:0:12}, not this run's ${GITHUB_SHA:0:12} — the newer push publishes; nothing to do"
   exit 0
 fi
 
-gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/${DOC}" \
-  -f message="chore(badges): coverage ${PCT}% from ${GITHUB_SHA:-HEAD}" \
-  -f branch="${BRANCH}" \
-  -f sha="${SHA}" \
-  -f content="$(base64 < badge-endpoint.json | tr -d '\n')" \
-  --jq '.commit.sha'
+ATTEMPTS="${BADGE_PUBLISH_ATTEMPTS:-3}"
+for attempt in $(seq 1 "${ATTEMPTS}"); do
+  # The contents API needs the blob sha to replace an existing file. Its absence
+  # is a hard error rather than a create, because a missing document means the
+  # `badges` branch is gone — and silently recreating it would hide that the
+  # README badge has been rendering an error to every reader in the meantime.
+  SHA="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${DOC}?ref=${BRANCH}" --jq '.sha')"
+  if [ -z "${SHA}" ]; then
+    echo "::error::${DOC} not found on the ${BRANCH} branch — the README badge is broken" >&2
+    exit 1
+  fi
+
+  if [ "$(gh api "repos/${GITHUB_REPOSITORY}/contents/${DOC}?ref=${BRANCH}" --jq '.content' | base64 --decode)" = "$(cat badge-endpoint.json)" ]; then
+    echo "coverage unchanged at ${PCT}% — nothing to publish"
+    exit 0
+  fi
+
+  if gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/${DOC}" \
+      -f message="chore(badges): coverage ${PCT}% from ${GITHUB_SHA:-HEAD}" \
+      -f branch="${BRANCH}" \
+      -f sha="${SHA}" \
+      -f content="$(base64 < badge-endpoint.json | tr -d '\n')" \
+      --jq '.commit.sha'; then
+    exit 0
+  fi
+  echo "::warning::badge PUT failed (attempt ${attempt}/${ATTEMPTS}); re-reading ${DOC} and retrying" >&2
+  sleep "${BADGE_PUBLISH_BACKOFF_S:-3}"
+done
+echo "::error::could not publish the coverage badge after ${ATTEMPTS} attempts" >&2
+exit 1
