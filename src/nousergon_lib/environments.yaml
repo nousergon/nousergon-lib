@@ -112,8 +112,12 @@ environments:
       arcticdb: {bucket: research, prefix: arcticdb}     # the prod library, read-only
 
     # Same template (crucible-v2.yaml) in the staging account (S-17, I12505).
+    # data_collection: the weekly/collection half only (S-18, I12506; row added
+    # by I12646). `orchestration` is deliberately NOT declared: it carries fixed
+    # prod boxes and v1 Lambda ARNs, so asking staging for it must raise.
     stacks:
       crucible: crucible-v2
+      data_collection: nousergon-data-collection
 
     # Neon staging branch: not provisioned yet (S-10, I12498).
     state_store:
@@ -122,9 +126,13 @@ environments:
     # Muted pages: every page role resolves to the stack's zero-subscriber
     # PagesMutedTopic, so nothing in staging can page (plan: "Alerts: no
     # pages"; a staging-gate page on promotion day is S-20's, not this file's).
+    # alerts (I12646) is the same muted topic, so the data_collection stack's
+    # AlertsTopicName derives to a topic whose only subscriber is the S-20
+    # digest sink. No `alerts_muted` role: the muted topic is the only one.
     topics:
       pages: crucible-v2-pages-muted
       pages_muted: crucible-v2-pages-muted
+      alerts: crucible-v2-pages-muted
 
     # No fixed boxes: staging runs on spot and never on a prod instance.
     instances: {}
