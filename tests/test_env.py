@@ -102,6 +102,15 @@ def test_staging_pages_are_muted_and_land_in_the_staging_account():
     assert f":{staging.account}:" in staging.topic_arn("pages")
 
 
+def test_staging_data_collection_stack_and_alerts_topic_resolve_muted():
+    """alpha-engine-config-I12646: the S-18 parameters of nousergon-data-collection derive."""
+    staging = env.resolve("staging")
+    assert staging.stack("data_collection") == "nousergon-data-collection"
+    assert staging.topic("alerts").endswith("-muted")
+    assert staging.topic("alerts") == staging.topic("pages_muted")
+    assert staging.topic_arn("alerts").startswith(f"arn:aws:sns:{staging.region}:{staging.account}:")
+
+
 def test_staging_has_no_fixed_boxes_and_a_lower_llm_cap():
     prod, staging = env.resolve("prod"), env.resolve("staging")
     assert staging.roles("instances") == []
