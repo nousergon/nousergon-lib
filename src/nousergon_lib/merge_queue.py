@@ -36,7 +36,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -98,8 +98,10 @@ def gh_api(path: str) -> Any:
 
 
 def _api_or_none(api: ApiFn, path: str) -> Any:
-    """Read a path whose absence is a legitimate answer (a 404 from the classic
-    protection endpoint means 'this repo is ruleset-only', not 'error')."""
+    """Read a path whose failure is a legitimate answer ONLY because the caller
+    has a fallback for it. `gh_api` raises the same way for a 404 (ruleset-only
+    repo) and a 403 (token lacks admin), so a None here means "not read", never
+    "nothing there" — see :func:`_classic_contexts`."""
     try:
         return api(path)
     except Exception:
@@ -111,7 +113,9 @@ def required_contexts(repo: str, *, api: ApiFn = gh_api) -> list[str]:
     rulesets AND classic branch protection, deduplicated, order preserved.
 
     An empty list means *no required checks*, which is a real state and not an
-    error — several fleet repos have none.
+    error — several fleet repos have none. A repo whose classic protection
+    cannot be read by either endpoint RAISES rather than returning a list that
+    silently omits it (`alpha-engine-config-I12731`).
     """
     contexts: list[str] = []
 
@@ -127,13 +131,76 @@ def required_contexts(repo: str, *, api: ApiFn = gh_api) -> list[str]:
                 if ctx and ctx not in contexts:
                     contexts.append(ctx)
 
-    prot = _api_or_none(api, f"/repos/{repo}/branches/main/protection")
-    if isinstance(prot, dict):
-        for ctx in prot.get("required_status_checks", {}).get("contexts", []) or []:
-            if ctx not in contexts:
-                contexts.append(ctx)
+    for ctx in _classic_contexts(repo, api):
+        if ctx not in contexts:
+            contexts.append(ctx)
 
     return contexts
+
+
+def _contexts_of(required_status_checks: object) -> list[str]:
+    """Contexts from a classic `required_status_checks` object: the legacy
+    `contexts` list plus the newer `checks[].context` form, which GitHub returns
+    side by side and which can diverge."""
+    if not isinstance(required_status_checks, dict):
+        return []
+    rsc = cast("dict[str, object]", required_status_checks)
+    raw: list[object] = list(cast("list[object]", rsc.get("contexts") or []))
+    for check in cast("list[object]", rsc.get("checks") or []):
+        if isinstance(check, dict):
+            raw.append(cast("dict[str, object]", check).get("context"))
+    out: list[str] = []
+    for ctx in raw:
+        if isinstance(ctx, str) and ctx and ctx not in out:
+            out.append(ctx)
+    return out
+
+
+def _classic_contexts(repo: str, api: ApiFn) -> list[str]:
+    """Required contexts from classic branch protection on `main`.
+
+    **Two reads, because the admin one is usually refused.**
+    `/branches/main/protection` needs admin, so a workflow `GITHUB_TOKEN` and
+    the nightly token get 403 there — and a 404 (ruleset-only repo) looks the
+    same through `gh_api`. Treating either as "no classic protection" made the
+    guard pass VACUOUSLY on `nousergon-data`, whose three required checks live
+    only in classic protection (`alpha-engine-config-I12731`). So on any failure
+    the non-admin `/branches/main` is read instead: its
+    `.protection.required_status_checks` carries the same contexts under
+    `contents: read`, and on a ruleset-only repo it reads as unprotected or
+    carries contexts already gathered from the rulesets.
+
+    If NEITHER is readable this raises. An unmeasurable classic set is not an
+    empty one, and an empty set is what the guard reports as "nothing to
+    validate" — the one answer it may never invent (`principles.md` §2.7).
+    """
+    prot = _api_or_none(api, f"/repos/{repo}/branches/main/protection")
+    if isinstance(prot, dict):
+        return _contexts_of(cast("dict[str, object]", prot).get("required_status_checks"))
+
+    try:
+        branch = api(f"/repos/{repo}/branches/main")
+    except Exception as exc:
+        raise RuntimeError(
+            f"{repo}: classic branch protection is unreadable — "
+            f"/branches/main/protection refused and /branches/main failed "
+            f"({exc}); refusing to report its required checks as none"
+        ) from exc
+    if not isinstance(branch, dict):
+        raise RuntimeError(
+            f"{repo}: /branches/main returned no branch object; "
+            f"refusing to report its required checks as none"
+        )
+    branch_obj = cast("dict[str, object]", branch)
+    protection = branch_obj.get("protection")
+    if not isinstance(protection, dict):
+        if branch_obj.get("protected"):
+            raise RuntimeError(
+                f"{repo}: main is protected but /branches/main carries no "
+                f"`protection` object; required checks are unmeasurable"
+            )
+        return []
+    return _contexts_of(cast("dict[str, object]", protection).get("required_status_checks"))
 
 
 def active_merge_queue(repo: str, *, api: ApiFn = gh_api) -> MergeQueueConfig | None:
