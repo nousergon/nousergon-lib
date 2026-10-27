@@ -59,6 +59,7 @@ __all__ = [
     "RegistrySchemaError",
     "UnknownEnvironmentError",
     "UnknownRoleError",
+    "RoutingNotAllowedError",
     "Environment",
     "load_registry",
     "validate_registry",
@@ -100,6 +101,10 @@ class UnknownRoleError(EnvRegistryError, KeyError):
         return str(self.args[0]) if self.args else ""
 
 
+class RoutingNotAllowedError(EnvRegistryError, ValueError):
+    """The trader asked for an order route its environment does not allow."""
+
+
 # --------------------------------------------------------------------- schema
 
 _ROLE = r"^[a-z][a-z0-9_]*$"
@@ -127,6 +132,24 @@ class _Schedule(_Strict):
     time_et: str = Field(pattern=r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 
 
+class _Trader(_Strict):
+    #: Order routes the trader may enable in this environment (the values of
+    #: crucible-trader's ``CRUCIBLE_TRADER_ORDER_ROUTING``). REQUIRED, and an
+    #: empty list is a statement: this environment never routes (staging,
+    #: S-19, ``alpha-engine-config-I12685``). Deny is the only reading of a
+    #: route that is not listed.
+    routing_allowed: list[str]
+
+    @model_validator(mode="after")
+    def _check(self) -> _Trader:
+        for route in self.routing_allowed:
+            if not _ROLE_RE.match(route):
+                raise ValueError(f"trader.routing_allowed: {route!r} must match {_ROLE}")
+        if len(set(self.routing_allowed)) != len(self.routing_allowed):
+            raise ValueError(f"trader.routing_allowed repeats a route: {self.routing_allowed}")
+        return self
+
+
 class _StateStore(_Strict):
     #: ``None`` declares the branch absent (not yet provisioned), which is a
     #: statement, not an omission: the key itself is still required.
@@ -147,6 +170,7 @@ class _Environment(_Strict):
     instances: dict[str, str]
     ssm_prefixes: dict[str, str]
     llm_cap_usd: float = Field(ge=0)
+    trader: _Trader
     universe: _Universe
     schedules_et: dict[str, _Schedule]
 
@@ -292,6 +316,23 @@ class Environment:
     def universe_uri(self) -> str:
         u = self._spec.universe
         return f"s3://{self.bucket(u.bucket)}/{u.key}"
+
+    @property
+    def routing_allowed(self) -> tuple[str, ...]:
+        """Order routes the trader may enable here; empty means it never routes."""
+        return tuple(self._spec.trader.routing_allowed)
+
+    def assert_routing_allowed(self, route: str) -> None:
+        """Raise :class:`RoutingNotAllowedError` unless ``route`` is declared here.
+
+        Deny by default: a route the registry does not list is refused, and an
+        environment that lists none (staging) refuses every route.
+        """
+        if route not in self._spec.trader.routing_allowed:
+            allowed = ", ".join(self._spec.trader.routing_allowed) or "(none: this environment never routes)"
+            raise RoutingNotAllowedError(
+                f"environment {self.name!r} does not allow order route {route!r}; allowed: {allowed}"
+            )
 
     def schedule_et(self, role: str) -> tuple[str, str]:
         """``(days, "HH:MM")`` in America/New_York for a declared schedule."""

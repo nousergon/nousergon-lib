@@ -78,6 +78,12 @@ environments:
     # Per-weekly-run LLM spend ceiling, USD (crucible.llm.DEFAULT_LLM_CAP_USD).
     llm_cap_usd: 5.0
 
+    # Order routes the trader may enable (crucible-trader
+    # CRUCIBLE_TRADER_ORDER_ROUTING values; alpha-engine-config-I12685). prod
+    # routes to IB PAPER only; the router itself refuses anything else.
+    trader:
+      routing_allowed: [ib_paper]
+
     # The declared universe (CRUCIBLE_UNIVERSE_URI). full = every declared name.
     universe:
       scope: full
@@ -144,6 +150,11 @@ environments:
     # Low per-run LLM ceiling (CRUCIBLE_LLM_CAP_USD), with a cheap model or
     # recorded replies (S-17).
     llm_cap_usd: 0.5
+
+    # Staging never routes (S-19, alpha-engine-config-I12507 / -I12685): its
+    # trader is shadow, or simulated fills at the close with no broker reached.
+    trader:
+      routing_allowed: []
 
     # The fixed adversarial ~100-name subset (splits, restatements, delistings,
     # symbol changes). A declared list in staging's own bucket, written by S-17.
