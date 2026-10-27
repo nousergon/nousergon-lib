@@ -146,6 +146,26 @@ def test_unknown_environment_from_ne_env_raises(monkeypatch):
         env.resolve()
 
 
+def test_staging_never_routes_and_prod_routes_to_ib_paper_only():
+    """alpha-engine-config-I12685: the registry, not only the trader's NE_ENV
+    branch, forbids ib_paper in staging."""
+    staging = env.resolve("staging")
+    assert staging.routing_allowed == ()
+    with pytest.raises(env.RoutingNotAllowedError, match="never routes"):
+        staging.assert_routing_allowed("ib_paper")
+
+    prod = env.resolve("prod")
+    assert prod.routing_allowed == ("ib_paper",)
+    prod.assert_routing_allowed("ib_paper")
+    with pytest.raises(env.RoutingNotAllowedError, match="ib_live"):
+        prod.assert_routing_allowed("ib_live")
+
+
+def test_every_declared_environment_states_its_routing():
+    for name in env.environment_names():
+        assert isinstance(env.resolve(name).routing_allowed, tuple)
+
+
 def test_ne_env_selects_the_environment(monkeypatch, tmp_path):
     doc = _doc()
     staging = copy.deepcopy(doc["environments"]["prod"])
@@ -204,6 +224,12 @@ def _mutated(mutate) -> dict:
         (lambda d: d["environments"]["prod"]["schedules_et"]["weekly"].update(time_et="7:00"), "time_et"),
         (lambda d: d["environments"]["prod"]["schedules_et"]["weekly"].update(days="SATURDAY"), "days"),
         (lambda d: d["environments"]["prod"].update(llm_cap_usd=-1), "llm_cap_usd"),
+        (lambda d: d["environments"]["prod"].pop("trader"), "trader"),
+        (lambda d: d["environments"]["prod"]["trader"].pop("routing_allowed"), "routing_allowed"),
+        (lambda d: d["environments"]["prod"]["trader"].update(routing_allowed=["IB-Paper"]), "IB-Paper"),
+        (lambda d: d["environments"]["prod"]["trader"].update(routing_allowed=["ib_paper", "ib_paper"]), "repeats"),
+        (lambda d: d["environments"]["prod"]["trader"].update(routing_allowed="ib_paper"), "routing_allowed"),
+        (lambda d: d["environments"]["prod"]["trader"].update(extra="x"), "extra"),
         (lambda d: d.update(default="qa"), "default"),
         (lambda d: d.update(schema_version=2), "schema_version"),
         (lambda d: d.update(environments={}), "environments"),
