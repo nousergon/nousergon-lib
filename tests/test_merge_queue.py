@@ -293,8 +293,100 @@ def test_a_ruleset_only_repo_404s_on_classic_protection_and_still_reads():
             }}]
         },
         "/repos/o/r/branches/main/protection": RuntimeError("404 Branch not protected"),
+        # Recorded live from nousergon-lib 2026-10-27: a ruleset-only repo
+        # reads as `protected` with classic protection disabled.
+        "/repos/o/r/branches/main": {"protected": True, "protection": {
+            "enabled": False,
+            "required_status_checks": {"checks": [], "contexts": [], "enforcement_level": "off"},
+        }},
     })
     assert mq.required_contexts("o/r", api=api) == ["tests"]
+
+
+_EMPTY_RULESETS = {_RULESET_LIST: []}
+
+
+def test_classic_only_repo_403_on_protection_falls_back_to_the_branch_endpoint():
+    """`alpha-engine-config-I12731`: a non-admin token gets 403 on
+    `/protection`, and that used to read as "no required checks" — so the guard
+    passed vacuously on nousergon-data. The non-admin `/branches/main` carries
+    the same contexts (shape recorded live from nousergon-data 2026-10-27)."""
+    api = _api({
+        **_EMPTY_RULESETS,
+        "/repos/o/r/branches/main/protection": RuntimeError(
+            "gh api failed: Resource not accessible by integration (HTTP 403)"
+        ),
+        "/repos/o/r/branches/main": {"protected": True, "protection": {
+            "enabled": True,
+            "required_status_checks": {
+                "checks": [
+                    {"app_id": 15368, "context": "test"},
+                    {"app_id": 15368, "context": "iam-policy-change-guard"},
+                    {"app_id": 15368, "context": "rehearsal-path-guard"},
+                ],
+                "contexts": ["test", "iam-policy-change-guard", "rehearsal-path-guard"],
+                "enforcement_level": "everyone",
+            },
+        }},
+    })
+    assert mq.required_contexts("o/r", api=api) == [
+        "test", "iam-policy-change-guard", "rehearsal-path-guard",
+    ]
+
+
+def test_fallback_reads_the_checks_form_when_contexts_is_empty():
+    api = _api({
+        **_EMPTY_RULESETS,
+        "/repos/o/r/branches/main/protection": RuntimeError("HTTP 403"),
+        "/repos/o/r/branches/main": {"protected": True, "protection": {
+            "enabled": True,
+            "required_status_checks": {"checks": [{"context": "only-in-checks"}], "contexts": []},
+        }},
+    })
+    assert mq.required_contexts("o/r", api=api) == ["only-in-checks"]
+
+
+def test_both_classic_reads_unreadable_raises_rather_than_reporting_none():
+    """Fail closed: an unmeasurable classic set must never become the empty
+    list the guard prints as "nothing to validate"."""
+    api = _api({
+        **_EMPTY_RULESETS,
+        "/repos/o/r/branches/main/protection": RuntimeError("HTTP 403"),
+        "/repos/o/r/branches/main": RuntimeError("HTTP 403"),
+    })
+    with pytest.raises(RuntimeError, match="unreadable"):
+        mq.required_contexts("o/r", api=api)
+
+
+def test_protected_branch_without_a_protection_object_raises():
+    api = _api({
+        **_EMPTY_RULESETS,
+        "/repos/o/r/branches/main/protection": RuntimeError("HTTP 403"),
+        "/repos/o/r/branches/main": {"protected": True},
+    })
+    with pytest.raises(RuntimeError, match="unmeasurable"):
+        mq.required_contexts("o/r", api=api)
+
+
+def test_unprotected_branch_without_a_protection_object_is_genuinely_none():
+    api = _api({
+        **_EMPTY_RULESETS,
+        "/repos/o/r/branches/main/protection": RuntimeError("HTTP 404"),
+        "/repos/o/r/branches/main": {"protected": False},
+    })
+    assert mq.required_contexts("o/r", api=api) == []
+
+
+def test_readable_admin_protection_does_not_consult_the_fallback():
+    """The admin read is authoritative when it answers; `/branches/main` is
+    deliberately unrecorded here, so touching it would raise."""
+    api = _api({
+        **_EMPTY_RULESETS,
+        "/repos/o/r/branches/main/protection": {
+            "required_status_checks": {"contexts": ["from-classic"]}
+        },
+    })
+    assert mq.required_contexts("o/r", api=api) == ["from-classic"]
 
 
 def test_an_unreadable_ruleset_list_raises_rather_than_reporting_clean():
