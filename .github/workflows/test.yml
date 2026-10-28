@@ -169,7 +169,7 @@ jobs:
   # races) stay silent. Reusable workflow + transport in nousergon-lib.
   # See alpha-engine-config#1128.
   notify-main-failure:
-    needs: [test, pyright]
+    needs: [test, pyright, uv-lock]
     if: ${{ failure() && github.ref == 'refs/heads/main' }}
     uses: nousergon/nousergon-lib/.github/workflows/notify-ci-failure.yml@da7cd5f45eebbe94bd2524a5fa17a3db917ed961 # main
     secrets: inherit
@@ -203,3 +203,22 @@ jobs:
       # existing job, not a new workflow: stdlib only, ~1s.
       - name: Hard-coded environment references (observe)
         run: python3 scripts/hardcoded_env_refs.py --repo .
+
+  # uv.lock must match pyproject.toml (alpha-engine-config-I12753). The
+  # merge-time auto-bump pushes straight to main and, until I12753, left the
+  # lock's own project version behind on every release, so `uv lock --check`
+  # failed on main with nothing red. scripts/autobump.py now sets that line in
+  # the bump commit; this job proves it on every PR, merge group and push.
+  # uv is pinned (a lock written by one uv can need rewriting by another).
+  uv-lock:
+    name: uv lock --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+      - name: Install uv (pinned)
+        run: python -m pip install --quiet "uv==0.12.24"
+      - name: Lockfile is current
+        run: uv lock --check

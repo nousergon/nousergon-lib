@@ -65,6 +65,9 @@ jobs:
             echo "no src/ or pyproject.toml changes since v${VERSION} — nothing to release. No-op."
             exit 0
           fi
+          # autobump.py also sets uv.lock's own project version
+          # (alpha-engine-config-I12753); `commit -a` carries it, since the
+          # lock is tracked.
           NEW="$(python3 scripts/autobump.py)"
           git config user.name "nousergon-autobump"
           git config user.email "autobump@users.noreply.github.com"

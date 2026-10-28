@@ -158,3 +158,23 @@ def test_autobump_pins_load_bearing_invariants(autobump_text):
         "Bump delegated away from scripts/autobump.py — the tested, "
         "lockstep-asserting writer — to something unvalidated."
     )
+
+
+def test_autobump_commit_carries_the_lock(autobump_text):
+    # alpha-engine-config-I12753: autobump.py edits uv.lock; the bump commit
+    # must stage every tracked change (`commit -a`) or the lock is left behind
+    # and `uv lock --check` fails on main after every release.
+    assert re.search(r"git commit -a", autobump_text), (
+        "auto-version-bump.yml no longer commits with -a — uv.lock, edited by "
+        "scripts/autobump.py, would be left out of the bump commit."
+    )
+
+
+def test_uv_lock_check_runs_in_ci():
+    yaml = pytest.importorskip("yaml")
+    wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "test.yml").read_text())
+    job = wf["jobs"]["uv-lock"]
+    runs = [s.get("run", "") for s in job["steps"]]
+    assert any(r.strip() == "uv lock --check" for r in runs)
+    assert any(re.search(r'uv==\d+\.\d+\.\d+', r) for r in runs), "uv must be pinned"
+    assert "uv-lock" in wf["jobs"]["notify-main-failure"]["needs"]
