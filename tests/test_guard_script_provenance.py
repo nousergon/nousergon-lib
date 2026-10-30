@@ -32,6 +32,7 @@ def test_the_floating_script_guards_are_found():
         "merge-group-required-check-guard.yml",
         "openrouter-guard.yml",
         "provider-linkage-guard.yml",
+        "pr-path-guard.yml",
     } <= names
 
 
@@ -44,7 +45,10 @@ def test_provenance_is_recorded_between_checkout_and_scan(wf: Path):
     )
     scan = next(
         i for i, s in enumerate(steps)
-        if f"{SCRIPT_CHECKOUT_PATH}/scripts/" in (s.get("run") or "")
+        # The scan runs a file out of the floating checkout: `scripts/` for most
+        # guards, `src/nousergon_lib/` for one that is also an importable module
+        # (pr-path-guard.yml, alpha-engine-config-I9830).
+        if any(f"{SCRIPT_CHECKOUT_PATH}/{d}/" in (s.get("run") or "") for d in ("scripts", "src"))
         and "sha256sum" not in (s.get("run") or "")
     )
     record = [

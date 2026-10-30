@@ -1,0 +1,71 @@
+name: PR-path live-state guard
+
+# Reusable (workflow_call) fleet primitive (alpha-engine-config-I9830):
+# fails when a job in the CALLER's workflows can run on pull_request or
+# pull_request_target and is not declared, with a reason, in the caller's
+# `.pr-reachable-jobs.yaml`. scm-platform-policy.md 3.1 (Brian ruling
+# 2026-08-10): a check grades the diff; a live-state check does not belong on
+# the PR path. The rules (whole-string exclusions, both PR events, a second
+# admission for job-level `uses:`, stale entries and dark inputs are red) live
+# in src/nousergon_lib/pr_path_guard.py; read its module docstring before
+# changing them.
+#
+# The caller's own job that calls THIS workflow is itself PR-reachable and a
+# job-level `uses:`, so it must appear in its `.pr-reachable-jobs.yaml` under
+# both `pr_reachable` and `reusable`. That is deliberate: no exemption by name.
+#
+# Caller:
+#   on: {pull_request: {branches: [main]}, push: {branches: [main]}}
+#   permissions: {contents: read}
+#   jobs:
+#     guard:
+#       uses: nousergon/nousergon-lib/.github/workflows/pr-path-guard.yml@<sha>
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: pr-path live-state guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # Under workflow_call the checkout above gets the CALLER's repo. The
+      # guard lives here; its ref floats by the same decision as
+      # provider-linkage-guard.yml (alpha-engine-config-I9118, option (c)),
+      # and every run records what it executed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: nousergon/nousergon-lib
+          path: _nousergon-lib-script
+
+      - name: Record the guard script this run executed
+        env:
+          SCRIPT: _nousergon-lib-script/src/nousergon_lib/pr_path_guard.py
+        run: |
+          set -euo pipefail
+          lib_sha="$(git -C _nousergon-lib-script rev-parse HEAD)"
+          script_sha256="$(sha256sum "$SCRIPT" | cut -d' ' -f1)"
+          echo "::notice title=guard script provenance::nousergon-lib@${lib_sha} src/nousergon_lib/pr_path_guard.py sha256=${script_sha256}"
+          {
+            echo "### Guard script provenance"
+            echo ""
+            echo "- nousergon-lib commit: \`${lib_sha}\` (floating ref, alpha-engine-config-I9118)"
+            echo "- \`src/nousergon_lib/pr_path_guard.py\` sha256: \`${script_sha256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install --quiet pyyaml
+
+      - name: No undeclared job on the pull_request path
+        run: python3 _nousergon-lib-script/src/nousergon_lib/pr_path_guard.py --workflow-dir .github/workflows --allowlist .pr-reachable-jobs.yaml
