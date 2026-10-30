@@ -189,3 +189,69 @@ def test_the_module_imports_nothing_beyond_the_standard_library_and_yaml():
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             roots.add(node.module.split(".")[0])
     assert roots - set(sys.stdlib_module_names) - {"__future__"} == {"yaml"}
+
+
+class TestAllowlistFileAndCli:
+    CALLER = (
+        "name: PR-path live-state guard\n"
+        "on:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [main]\n"
+        "permissions:\n  contents: read\n"
+        "jobs:\n  guard:\n    uses: nousergon/nousergon-lib/.github/workflows/pr-path-guard.yml@" + "b" * 40 + "\n"
+    )
+
+    def _repo(self, tmp_path: Path, allowlist: str | None) -> Path:
+        _tree(tmp_path, ci__yml=_wf("pull_request", _job("test")), pr_path_guard__yml=self.CALLER)
+        if allowlist is not None:
+            (tmp_path / ".pr-reachable-jobs.yaml").write_text(allowlist, encoding="utf-8")
+        return tmp_path
+
+    GOOD = (
+        "schema_version: 1\n"
+        "pr_reachable:\n"
+        "  ci.yml:test: unit tests over the checkout; no credential\n"
+        "  pr_path_guard.yml:guard: this guard; reads only the checkout\n"
+        "reusable:\n  - pr_path_guard.yml:guard\n"
+    )
+
+    def _main(self, repo: Path) -> int:
+        return g.main(
+            [
+                "--workflow-dir",
+                str(repo / ".github" / "workflows"),
+                "--allowlist",
+                str(repo / ".pr-reachable-jobs.yaml"),
+            ]
+        )
+
+    def test_a_documented_caller_with_its_allowlist_passes(self, tmp_path, capsys):
+        assert self._main(self._repo(tmp_path, self.GOOD)) == 0
+        assert "2 PR-reachable job(s)" in capsys.readouterr().out
+
+    def test_a_missing_allowlist_starts_red(self, tmp_path, capsys):
+        assert self._main(self._repo(tmp_path, None)) == 1
+        out = capsys.readouterr().out
+        assert "::error title=pr-path-guard unlisted::ci.yml:test" in out
+        assert "pr_path_guard.yml:guard" in out
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["pr_reachable: {}\n", "schema_version: 1\npr_reachable: [a]\n", "schema_version: 1\nreusable: x\n", "[\n"],
+    )
+    def test_a_malformed_allowlist_is_exit_2_never_empty(self, tmp_path, bad):
+        assert self._main(self._repo(tmp_path, bad)) == 2
+
+    def test_load_allowlist_returns_both_sets(self, tmp_path):
+        repo = self._repo(tmp_path, self.GOOD)
+        reachable, reusable = g.load_allowlist(repo / ".pr-reachable-jobs.yaml")
+        assert set(reachable) == {"ci.yml:test", "pr_path_guard.yml:guard"}
+        assert reusable == frozenset({"pr_path_guard.yml:guard"})
+
+
+def test_the_reusable_workflow_runs_this_module_against_the_callers_allowlist():
+    wf = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "pr-path-guard.yml"
+    doc = __import__("yaml").safe_load(wf.read_text(encoding="utf-8"))
+    assert set(doc[True]) == {"workflow_call"}, "the reusable guard must not itself run on a PR event here"
+    runs = " ".join(s.get("run", "") for s in doc["jobs"]["guard"]["steps"])
+    assert "_nousergon-lib-script/src/nousergon_lib/pr_path_guard.py" in runs
+    assert "--allowlist .pr-reachable-jobs.yaml" in runs
+    assert doc["permissions"] == {"contents": "read"}

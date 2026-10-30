@@ -47,12 +47,19 @@ from one test, with their own allowlist::
     def test_no_live_state_job_runs_on_the_pull_request_path():
         assert_no_live_state_on_pr_path(WORKFLOW_DIR, PR_REACHABLE_JOBS)
 
+Or, with no Python dependency at all, a repo calls the reusable
+``.github/workflows/pr-path-guard.yml`` and keeps its allowlist in
+``.pr-reachable-jobs.yaml`` (see :func:`load_allowlist`). That runs this file
+as a script: ``python3 pr_path_guard.py [--workflow-dir D] [--allowlist F]``.
+
 Standard library plus ``yaml`` only.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+import argparse
+import sys
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -260,3 +267,65 @@ def assert_no_live_state_on_pr_path(
         raise AssertionError(
             f"{len(findings)} live-state-on-PR-path finding(s):\n" + "\n".join(f"  {f}" for f in findings)
         )
+
+
+#: The allowlist file a repo keeps at its root when it uses the reusable workflow.
+DEFAULT_ALLOWLIST = ".pr-reachable-jobs.yaml"
+
+
+class AllowlistError(ValueError):
+    """The allowlist file is malformed. Never read as an empty allowlist."""
+
+
+def load_allowlist(path: Path) -> tuple[dict[str, str], frozenset[str]]:
+    """Read ``.pr-reachable-jobs.yaml``: ``{schema_version: 1, pr_reachable: {key: reason}, reusable: [key]}``.
+
+    A missing file is an empty allowlist, so every PR-reachable job is a
+    finding: adopting the guard starts red until each job is declared.
+    """
+    if not path.exists():
+        return {}, frozenset()
+    try:
+        document: object = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise AllowlistError(f"{path}: not valid YAML: {exc}") from exc
+    if not isinstance(document, dict):
+        raise AllowlistError(f"{path}: not a mapping")
+    if document.get("schema_version") != 1:  # pyright: ignore[reportUnknownMemberType] -- raw YAML mapping
+        raise AllowlistError(f"{path}: schema_version must be 1")
+    raw_reachable: object = document.get("pr_reachable") or {}  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- raw YAML mapping
+    raw_reusable: object = document.get("reusable") or []  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType] -- raw YAML mapping
+    if not isinstance(raw_reachable, dict):
+        raise AllowlistError(f"{path}: pr_reachable must map '<workflow>:<job>' to a reason")
+    if not isinstance(raw_reusable, list):
+        raise AllowlistError(f"{path}: reusable must be a list of '<workflow>:<job>' keys")
+    reachable = {str(k): str(v) for k, v in raw_reachable.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType] -- raw YAML mapping
+    reusable = frozenset(str(k) for k in raw_reusable)  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType] -- raw YAML list
+    return reachable, reusable
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Exit 0 on a clean, non-vacuous pass, 1 on findings, 2 on a malformed allowlist."""
+    ap = argparse.ArgumentParser(description="No live-state job on the pull_request path (scm-platform-policy.md 3.1).")
+    _ = ap.add_argument("--workflow-dir", default=".github/workflows")
+    _ = ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST)
+    args = ap.parse_args(argv)
+    workflow_dir = Path(str(args.workflow_dir))
+    allowlist = Path(str(args.allowlist))
+    try:
+        reachable, reusable = load_allowlist(allowlist)
+    except AllowlistError as exc:
+        print(f"::error::{exc}")
+        return 2
+    findings = check(workflow_dir, reachable, reusable)
+    for finding in findings:
+        print(f"::error title=pr-path-guard {finding.kind}::{finding.key}: {finding.message}")
+    if findings:
+        print(f"{len(findings)} finding(s). Allowlist: {allowlist} ({len(reachable)} declared job(s)).")
+        return 1
+    print(f"No live-state job on the PR path: {len(reachable)} PR-reachable job(s), each declared in {allowlist}.")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover -- script entry for the reusable workflow
+    sys.exit(main())
