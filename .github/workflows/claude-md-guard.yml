@@ -15,6 +15,16 @@ name: CLAUDE.md guard
 #
 # Do NOT call this from alpha-engine-config — it is the one alpha-engine
 # repo where CLAUDE.md SHOULD be tracked.
+#
+# BOTH names, and the gitignore too (alpha-engine-config-I8049). Since the
+# 2026-07-23 migration AGENTS.md is the CANONICAL agent-instruction file and
+# CLAUDE.md is a symlink to it, so a guard naming CLAUDE.md alone protected
+# the pointer and was blind to the content. On 2026-08-21 telos and
+# nousergon-docs gitignored CLAUDE.md and not AGENTS.md, with an untracked
+# AGENTS.md in both trees. A clean `git ls-files` today is one `git add -A`
+# from failing, so the job also asserts `git check-ignore` for each name.
+# The job id and file path are unchanged on purpose: callers pin this file
+# by SHA and a rename would break every one of them at once.
 
 on:
   workflow_call: {}
@@ -29,10 +39,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      - name: Fail if CLAUDE.md is tracked
+      - name: Fail if AGENTS.md or CLAUDE.md is tracked or not gitignored
         run: |
-          if git ls-files | grep -qx CLAUDE.md; then
-            echo "::error::CLAUDE.md is committed in this repo. CLAUDE.md is gitignored/untracked in every public alpha-engine repo by design (2026-03-22) — it accumulates infra/IP-structure detail that must not be public. Remove it from git (git rm --cached CLAUDE.md) and confirm .gitignore still excludes it."
-            exit 1
-          fi
-          echo "CLAUDE.md is not tracked — OK."
+          fail=0
+          for name in AGENTS.md CLAUDE.md; do
+            if git ls-files --error-unmatch -- "$name" >/dev/null 2>&1; then
+              echo "::error::$name is committed in this repo. Agent-instruction files are untracked in every public repo by design (2026-03-22): they accumulate infra/IP-structure detail that must not be public. AGENTS.md is the canonical file and CLAUDE.md a symlink to it, so both must stay out. Remove it from git (git rm --cached $name) and keep it in .gitignore."
+              fail=1
+            elif ! git check-ignore -q --no-index -- "$name"; then
+              echo "::error::$name is not gitignored in this repo. It is untracked today, but one 'git add -A' would publish it. Add $name to .gitignore (AGENTS.md is the canonical file, CLAUDE.md a symlink to it: both must be ignored)."
+              fail=1
+            else
+              echo "$name is untracked and gitignored — OK."
+            fi
+          done
+          exit "$fail"
