@@ -930,14 +930,6 @@ except ImportError:  # pragma: no cover - Python < 3.11
     except ImportError:
         _sre_c = _sre_p = None
 
-#: Code points ``re.IGNORECASE`` matches to an ASCII letter, mapped to that
-#: lowercase letter: A-Z, plus the four non-ASCII ones Python's matcher folds
-#: (KELVIN SIGN, I WITH DOT ABOVE, DOTLESS I, LONG S). ``str.lower`` is not
-#: usable here: it turns U+0130 into TWO characters. Pinned by a test that
-#: recomputes the set over every code point.
-_CASEFOLD_ASCII = {c: c + 32 for c in range(ord("A"), ord("Z") + 1)} | {
-    0x212A: ord("k"), 0x130: ord("i"), 0x131: ord("i"), 0x17F: ord("s"),
-}
 #: A literal shorter than this proves too little to be worth the check.
 _MIN_LITERAL = 3
 
@@ -976,11 +968,15 @@ def _seq_literals(seq) -> frozenset[str] | None:
 
 def required_literals(regex: re.Pattern[str]) -> tuple[bool, frozenset[str]] | None:
     """``(casefold, literals)``: every match of ``regex`` contains one of
-    ``literals`` (compared after ``_CASEFOLD_ASCII`` when ``casefold``), or
-    ``None`` when that cannot be shown. PERFORMANCE ONLY (I9938): a C-speed
-    substring test that lets ``scan`` skip a pattern for a file before its
-    slower regex search. Patterns under IGNORECASE qualify only with ASCII
-    literals; any other flag disqualifies."""
+    ``literals`` (lowercased when ``casefold``), or ``None`` when that cannot
+    be shown. PERFORMANCE ONLY (I9938): a C-speed substring test that lets
+    ``scan`` skip a pattern for a file before its slower regex search.
+    Patterns under IGNORECASE qualify only with ASCII literals, and ``scan``
+    applies a casefold check only to an all-ASCII body, where folding is
+    exactly A-Z to a-z on every Python version: ``re.IGNORECASE`` also folds
+    a few non-ASCII letters onto ASCII ones (U+0130, U+0131, U+017F,
+    U+212A), and a non-ASCII body therefore always takes the regex instead.
+    Any other flag disqualifies."""
     if _sre_p is None:
         return None
     flags = regex.flags & ~re.UNICODE
@@ -999,7 +995,7 @@ def required_literals(regex: re.Pattern[str]) -> tuple[bool, frozenset[str]] | N
     if casefold:
         if not all(lit.isascii() for lit in lits):
             return None
-        lits = frozenset(lit.translate(_CASEFOLD_ASCII) for lit in lits)
+        lits = frozenset(lit.lower() for lit in lits)
     return casefold, lits
 
 
@@ -1097,13 +1093,14 @@ def scan(
         # strings, so a body without any of them has no line that can hit --
         # true of every pattern, edge assertions or not. `body_prefilter_safe`:
         # a safe pattern absent from the whole body cannot hit any line.
-        folded = None
+        folded: str | None = None
+        ascii_body = body.isascii()
         applicable = []
         for klass, regex, is_dist, safe, lits in plans[is_dependency_file]:
-            if lits is not None:
+            if lits is not None and (ascii_body or not lits[0]):
                 casefold, needles = lits
                 if casefold and folded is None:
-                    folded = body.translate(_CASEFOLD_ASCII)
+                    folded = body.lower()
                 hay = folded if casefold else body
                 if not any(n in hay for n in needles):
                     continue

@@ -1202,19 +1202,6 @@ def _all_patterns_all_classes():
     return plg.compile_patterns(plg.ALL_PROVIDER_NAMES, plg.PATTERN_CLASSES)
 
 
-def test_casefold_table_is_every_code_point_ignorecase_maps_to_ascii():
-    any_letter = __import__("re").compile(r"(?i)[a-z]")
-    found = {}
-    for cp in range(0x110000):
-        ch = chr(cp)
-        if any_letter.fullmatch(ch):
-            letter = next(x for x in "abcdefghijklmnopqrstuvwxyz"
-                          if __import__("re").fullmatch(f"(?i){x}", ch))
-            if ch != letter:
-                found[cp] = ord(letter)
-    assert found == plg._CASEFOLD_ASCII
-
-
 def test_every_hit_line_contains_a_required_literal_of_each_pattern_it_hits():
     covered = set()
     for klass, regex in _all_patterns_all_classes():
@@ -1226,7 +1213,9 @@ def test_every_hit_line_contains_a_required_literal_of_each_pattern_it_hits():
             if lits is None:
                 continue
             casefold, needles = lits
-            hay = line.translate(plg._CASEFOLD_ASCII) if casefold else line
+            if casefold and not line.isascii():
+                continue  # scan never applies a casefold literal check to non-ASCII text
+            hay = line.lower() if casefold else line
             assert any(n in hay for n in needles), (klass, line, needles)
     assert covered == {k for k, _ in _all_patterns_all_classes()}, "a pattern class has no hit line"
 
