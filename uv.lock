@@ -1279,7 +1279,6 @@ type-check = [
 requires-dist = [
     { name = "arcticdb", marker = "extra == 'arcticdb'", specifier = ">=6.11" },
     { name = "boto3", specifier = ">=1.34" },
-    { name = "eval-type-backport", marker = "python_full_version < '3.10'", specifier = ">=0.2.0" },
     { name = "hnswlib", marker = "extra == 'rag-local-ann'", specifier = ">=0.8" },
     { name = "jsonschema", marker = "extra == 'contracts'", specifier = ">=4.21" },
     { name = "jsonschema", marker = "extra == 'gates'", specifier = ">=4.21" },
