@@ -99,11 +99,10 @@ class TestAsSource:
 
     def test_absent_optionals_are_omitted_not_invented(self) -> None:
         r = _hybrid_result(
-            document_id=None, url=None, section_label=None,
+            url=None, section_label=None,
             retrieval_method="vector", keyword_score=None, combined_score=None,
         )
         src = r.as_source("c1")
-        assert src["document_id"] is None
         assert src["uri"] is None
         assert "section_label" not in src["meta"]
         assert "rank" not in src["retrieval"]
@@ -113,6 +112,14 @@ class TestAsSource:
     def test_missing_chunk_id_raises(self) -> None:
         with pytest.raises(ValueError, match="chunk_id"):
             _hybrid_result(chunk_id=None).as_source("c1")
+
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_missing_document_id_raises(self, missing) -> None:
+        # alpha-engine-config-I12680: both ids, or a loud failure. A chunk
+        # whose parent document is unknown cannot be joined back to
+        # rag.documents, so it is not citable.
+        with pytest.raises(ValueError, match="document_id"):
+            _hybrid_result(document_id=missing).as_source("c1")
 
     def test_from_mapping_accepts_it(self) -> None:
         llm_trace = pytest.importorskip(

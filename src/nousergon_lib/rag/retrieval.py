@@ -90,13 +90,24 @@ class RetrievalResult:
                 tracked it.
 
         Raises:
-            ValueError: :attr:`chunk_id` is ``None``. A source with no
-                stable id is exactly the uncitable shape this exists to end.
+            ValueError: :attr:`chunk_id` or :attr:`document_id` is ``None``.
+                A source with no stable id is exactly the uncitable shape
+                this exists to end, and knowledge-integrity § Retrieval
+                provenance requires both ids or a loud failure
+                (alpha-engine-config-I12680). A caller that may hold
+                results without ids filters them first and logs what it
+                withheld, as crucible-research's ``rag_retrieval_tools``
+                does (``RAG_UNIDENTIFIED``).
         """
         if not self.chunk_id:
             raise ValueError(
                 "RetrievalResult.as_source: chunk_id is None — a source "
                 "needs a stable id to be cited"
+            )
+        if not self.document_id:
+            raise ValueError(
+                "RetrievalResult.as_source: document_id is None — a cited "
+                "chunk must name its parent rag.documents row"
             )
         retrieval: dict[str, Any] = {
             "method": self.retrieval_method,
@@ -124,9 +135,7 @@ class RetrievalResult:
             "kind": "rag_chunk",
             "source_id": f"rag.chunks/{self.chunk_id}",
             "text": self.content if text is None else text,
-            "document_id": (
-                f"rag.documents/{self.document_id}" if self.document_id else None
-            ),
+            "document_id": f"rag.documents/{self.document_id}",
             "uri": self.url or None,
             "version": f"filed:{filed}" if filed else None,
             "retrieval": {k: v for k, v in retrieval.items() if v is not None},
