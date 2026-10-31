@@ -886,6 +886,123 @@ def _is_registry_subject(text: str, registry_names: frozenset[str]) -> bool:
     return any(name in text for name in registry_names)
 
 
+#: Syntax whose meaning can depend on where a line starts or ends: anchors,
+#: ``\B``, lookarounds, backreferences, the MULTILINE/DOTALL inline flags,
+#: and the ASCII/LOCALE flags (they change what ``\b`` counts as a word).
+#: Deliberately coarse -- a false positive only costs speed (see below).
+_LINE_CONTEXT_SYNTAX_RE = re.compile(r"\^|\$|\\[ABZz]|\(\?[=!<]|\\[1-9]|\(\?P=|\(\?[aiLux-]*[msaL]")
+
+
+def body_prefilter_safe(regex: re.Pattern[str]) -> bool:
+    """True when ``regex`` matching some line of a text implies it matches
+    the text as a whole, so ``regex.search(body) is None`` proves no line of
+    ``body`` can hit and the per-line pass may skip it (alpha-engine-config-
+    I9938).
+
+    PERFORMANCE ONLY, and exact. ``scan`` ran every pattern over every line --
+    28M ``finditer`` calls and ~25 s on nous-ergon-ops, which put that repo's
+    required ``secrets`` PR job over the one-minute billing floor on most
+    runs. A pattern built only from consuming syntax matches a line exactly
+    when it matches that same substring inside the whole text: the line's
+    characters are the same characters. What can differ is an assertion
+    about the line's EDGE, where the line has a string boundary and the
+    text has a line separator, so any such syntax (anchors, ``\\B``,
+    lookarounds) or a flag that changes ``^``/``$``/``.`` makes the pattern
+    unsafe, and an unsafe pattern keeps the full per-line pass. ``\\b`` is
+    the one edge assertion kept: every ``str.splitlines`` separator is a
+    non-word character, so ``\\b`` at a line edge reads the same against
+    the separator as against the string boundary (pinned by a test over
+    every separator). A body hit
+    without a line hit (``\\s+`` spanning a newline) only means the per-line
+    pass runs and finds nothing, exactly as before."""
+    if regex.flags & (re.MULTILINE | re.DOTALL | re.ASCII | re.LOCALE):
+        return False
+    return _LINE_CONTEXT_SYNTAX_RE.search(regex.pattern) is None
+
+
+try:  # the stdlib's own regex parser; private, so its absence only costs speed
+    import re._constants as _sre_c  # noqa: PLC2701
+    import re._parser as _sre_p  # noqa: PLC2701
+except ImportError:  # pragma: no cover - Python < 3.11
+    try:
+        import sre_constants as _sre_c  # type: ignore[no-redef]
+        import sre_parse as _sre_p  # type: ignore[no-redef]
+    except ImportError:
+        _sre_c = _sre_p = None
+
+#: Code points ``re.IGNORECASE`` matches to an ASCII letter, mapped to that
+#: lowercase letter: A-Z, plus the four non-ASCII ones Python's matcher folds
+#: (KELVIN SIGN, I WITH DOT ABOVE, DOTLESS I, LONG S). ``str.lower`` is not
+#: usable here: it turns U+0130 into TWO characters. Pinned by a test that
+#: recomputes the set over every code point.
+_CASEFOLD_ASCII = {c: c + 32 for c in range(ord("A"), ord("Z") + 1)} | {
+    0x212A: ord("k"), 0x130: ord("i"), 0x131: ord("i"), 0x17F: ord("s"),
+}
+#: A literal shorter than this proves too little to be worth the check.
+_MIN_LITERAL = 3
+
+
+def _seq_literals(seq) -> frozenset[str] | None:
+    """Strings at least one of which every match of parsed ``seq`` contains,
+    or ``None`` when none can be named. Exact by construction: only items
+    every match must pass through are used (top-level LITERAL runs, a BRANCH
+    as the union of its branches, a flag-free group), never anything inside
+    a repeat, lookaround or conditional."""
+    best, run = "", []
+    for op, av in seq:
+        if op is _sre_c.LITERAL:
+            run.append(chr(av))
+            continue
+        if len(run) > len(best):
+            best = "".join(run)
+        run = []
+    if len(run) > len(best):
+        best = "".join(run)
+    if len(best) >= _MIN_LITERAL:
+        return frozenset({best})
+    for op, av in seq:
+        if op is _sre_c.BRANCH:
+            sets = [_seq_literals(branch) for branch in av[1]]
+            if sets and all(sets):
+                return frozenset().union(*sets)
+        elif op is _sre_c.SUBPATTERN:
+            *_, add_flags, del_flags, sub = av
+            if not add_flags and not del_flags:
+                found = _seq_literals(sub)
+                if found:
+                    return found
+    return None
+
+
+def required_literals(regex: re.Pattern[str]) -> tuple[bool, frozenset[str]] | None:
+    """``(casefold, literals)``: every match of ``regex`` contains one of
+    ``literals`` (compared after ``_CASEFOLD_ASCII`` when ``casefold``), or
+    ``None`` when that cannot be shown. PERFORMANCE ONLY (I9938): a C-speed
+    substring test that lets ``scan`` skip a pattern for a file before its
+    slower regex search. Patterns under IGNORECASE qualify only with ASCII
+    literals; any other flag disqualifies."""
+    if _sre_p is None:
+        return None
+    flags = regex.flags & ~re.UNICODE
+    if flags not in (0, re.IGNORECASE):
+        return None
+    try:
+        parsed = _sre_p.parse(regex.pattern, regex.flags)
+    except Exception:  # noqa: BLE001 - a parser change only costs speed
+        return None
+    casefold = bool((flags | parsed.state.flags) & re.IGNORECASE)
+    if (parsed.state.flags & ~re.UNICODE) & ~re.IGNORECASE:
+        return None
+    lits = _seq_literals(list(parsed))
+    if not lits:
+        return None
+    if casefold:
+        if not all(lit.isascii() for lit in lits):
+            return None
+        lits = frozenset(lit.translate(_CASEFOLD_ASCII) for lit in lits)
+    return casefold, lits
+
+
 def scan(
     repo: Path,
     extensions: frozenset[str],
@@ -944,6 +1061,15 @@ def scan(
     dist_suffix = f":{CLASS_DIST}"
     other_patterns = tuple((k, r) for k, r in patterns if not k.endswith(dist_suffix))
     dist_patterns = tuple((k, r) for k, r in patterns if k.endswith(dist_suffix))
+    # (class, regex, is_dist, body-prefilter-safe, required literals),
+    # decided once per scan.
+    plans = {
+        dep: tuple(
+            (k, r, k.endswith(dist_suffix), body_prefilter_safe(r), required_literals(r))
+            for k, r in pats
+        )
+        for dep, pats in ((False, other_patterns), (True, other_patterns + dist_patterns))
+    }
 
     matches: list[Match] = []
     for fp in _tracked_files(repo, extensions, extra_filename_re):
@@ -966,14 +1092,31 @@ def scan(
         is_dependency_file = (
             extra_filename_re is not None and extra_filename_re.match(fp.name) is not None
         )
-        applicable = other_patterns + (dist_patterns if is_dependency_file else ())
         body = strip_comments(rel, text) if strip else text
+        # Exact prefilters. `required_literals`: a match CONSUMES one of these
+        # strings, so a body without any of them has no line that can hit --
+        # true of every pattern, edge assertions or not. `body_prefilter_safe`:
+        # a safe pattern absent from the whole body cannot hit any line.
+        folded = None
+        applicable = []
+        for klass, regex, is_dist, safe, lits in plans[is_dependency_file]:
+            if lits is not None:
+                casefold, needles = lits
+                if casefold and folded is None:
+                    folded = body.translate(_CASEFOLD_ASCII)
+                hay = folded if casefold else body
+                if not any(n in hay for n in needles):
+                    continue
+            if safe and regex.search(body) is None:
+                continue
+            applicable.append((klass, regex, is_dist))
+        if not applicable:
+            continue
         for lineno, line in enumerate(body.splitlines(), 1):
             router_spans = (
                 _router_dist_spans(line) if (router_aware and is_dependency_file) else ()
             )
-            for klass, regex in applicable:
-                is_dist = klass.endswith(dist_suffix)
+            for klass, regex, is_dist in applicable:
                 hit = False
                 for m in regex.finditer(line):
                     if is_dist and router_spans and _inside(m.span(), router_spans):
