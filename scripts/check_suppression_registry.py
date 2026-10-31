@@ -30,7 +30,7 @@ registry (alpha-engine-config, nousergon-lib, nous-ergon-ops, nousergon-data);
 only ``REGISTRY`` differs. Change all copies together.
 
     check_suppression_registry.py            # offline half, exit 1 on a finding
-    check_suppression_registry.py --live     # also: every owning issue is OPEN
+    GH_TOKEN=... check_suppression_registry.py --live   # also: every owning issue is OPEN
 """
 
 from __future__ import annotations
@@ -214,9 +214,12 @@ def live_problems(rows: list[Row], state_of=None) -> list[str]:
     """Every row whose owning issue is not OPEN. An unreadable state is a
     problem too: a check that cannot look must not report the issue open."""
     if state_of is None:
-        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        # GH_TOKEN only: the caller (a workflow step's `env:`, or `gh auth
+        # token` by hand) passes it. nousergon-data's secret-read guard forbids
+        # reading the pinned GITHUB_TOKEN name from the environment.
+        token = os.environ.get("GH_TOKEN") or ""
         if not token:
-            return ["--live: GH_TOKEN/GITHUB_TOKEN is empty, so no issue state was read"]
+            return ["--live: GH_TOKEN is empty, so no issue state was read"]
         state_of = lambda n: _issue_state(n, token)  # noqa: E731
     problems: list[str] = []
     for row in rows:
