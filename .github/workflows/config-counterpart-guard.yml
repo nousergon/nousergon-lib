@@ -20,6 +20,24 @@ name: Config counterpart guard
 # required status checks. Do NOT call on push/main runs — the guard's
 # question ("is the counterpart unmerged?") only makes sense pre-merge.
 #
+# merge_group (alpha-engine-config-I12754): a repo that enforces merges
+# through a merge queue must also call this on `merge_group`, or the required
+# context never reports and the queue deadlocks. A merge_group event has no
+# github.head_ref, so the guard resolves the PR number from
+# merge_group.head_ref (refs/heads/gh-readonly-queue/<base>/pr-<N>-<sha>),
+# reads that PR's head branch through the pulls API, and asks the same
+# ls-remote question. That is gate-label-guard's out-of-band resolution
+# (config-I3682), and like it, any parse or API failure fails CLOSED. It does
+# not pass on merge_group just because the PR-time run passed: a counterpart
+# branch pushed after that run would be missed.
+#
+# The pulls read uses github.token, so a caller that runs a merge queue grants
+# `pull-requests: read` on the calling job. This file deliberately declares no
+# `permissions:` of its own: a callee that asks for more than its caller
+# grants fails at startup, and crucible-research calls it with
+# `permissions: {}`. Without the grant, the merge_group path fails closed with
+# an error naming it, the same outcome as before this path existed.
+#
 # Fork PRs: ALPHA_ENGINE_CONFIG_TOKEN is unavailable in fork contexts, so the
 # check cannot query the private config repo. It PASSES with a logged notice
 # — deliberate, documented degrade: lockstep pairs are an internal-workflow
@@ -42,10 +60,32 @@ jobs:
       - name: Fail while a same-named alpha-engine-config branch exists
         env:
           TOKEN: ${{ secrets.ALPHA_ENGINE_CONFIG_TOKEN }}
-          BRANCH: ${{ github.head_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
+          if [ "$EVENT_NAME" = 'pull_request' ] || [ "$EVENT_NAME" = 'pull_request_target' ]; then
+            BRANCH="$PR_HEAD_REF"
+          elif [ "$EVENT_NAME" = 'merge_group' ]; then
+            QUEUE_REF=$(jq -r '.merge_group.head_ref // empty' "$GITHUB_EVENT_PATH")
+            echo "merge_group.head_ref: $QUEUE_REF"
+            PR_NUM=$(printf '%s' "$QUEUE_REF" | sed -nE 's#^refs/heads/gh-readonly-queue/.+/pr-([0-9]+)-[0-9a-f]+$#\1#p')
+            if [ -z "$PR_NUM" ]; then
+              echo "::error::Could not extract a PR number from merge_group.head_ref ('$QUEUE_REF') — expected refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>. Failing closed: cannot tell whether a counterpart branch exists."
+              exit 1
+            fi
+            if ! BRANCH=$(gh api "repos/${REPO}/pulls/${PR_NUM}" --jq '.head.ref'); then
+              echo "::error::Could not read PR #${PR_NUM}'s head branch from the pulls API — failing closed. If the error above is 403 'Resource not accessible by integration', the calling job needs 'permissions: pull-requests: read'."
+              exit 1
+            fi
+            echo "Resolved merge_group entry to PR #${PR_NUM}, head branch '${BRANCH}'."
+          else
+            echo "::error::config-counterpart-guard called from event '${EVENT_NAME}' — call it only from pull_request or merge_group workflows."
+            exit 1
+          fi
           if [ -z "$BRANCH" ]; then
-            echo "::error::config-counterpart-guard called from a non-pull_request event (no head_ref) — call it only from pull_request workflows."
+            echo "::error::No head branch resolved for this ${EVENT_NAME} run — failing closed."
             exit 1
           fi
           if [ -z "$TOKEN" ]; then

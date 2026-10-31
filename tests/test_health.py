@@ -108,7 +108,9 @@ def _opt(produced: bool) -> Deliverable:
 _TRUTH_TABLE = [
     # id,                          deliverables,               error,   warnings,      expected
     ("all-good-ok",                [_req(True), _opt(True)],   None,    [],            "ok"),
-    ("empty-deliverables-ok",      [],                         None,    [],            "ok"),
+    # alpha-engine-config-I9708: an empty population asserted no work, so it
+    # is never "ok" (it used to be, and every "all produced" clause was vacuous).
+    ("empty-deliverables-degraded", [],                        None,    [],            "degraded"),
     ("warnings-only-degraded",     [_req(True)],               None,    ["w"],         "degraded"),
     ("opt-missing-degraded",       [_req(True), _opt(False)],  None,    [],            "degraded"),
     ("opt-missing+warn-degraded",  [_req(True), _opt(False)],  None,    ["w"],         "degraded"),
