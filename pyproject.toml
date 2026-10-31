@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.196"
+version = "0.124.198"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # Floor is 3.10 (alpha-engine-config-I11251/I11253/I11254/I11255/I11256).
@@ -34,13 +34,9 @@ dependencies = [
     # guard (only guarded its future edge, so pre-2025 weekdays answered True).
     # Consumer sweep: bump floor from v0.59.41 to v0.59.52 (PR206 merged).
     "krepis>=0.59.52",
-    # Pydantic V2 evaluates field annotations at class-construction time
-    # via get_type_hints, which on Python 3.9 cannot eval PEP 604 union
-    # syntax (``str | None``) even when guarded by
-    # ``from __future__ import annotations``. eval_type_backport is the
-    # backport Pydantic's own error message points to. 3.10+ has the
-    # syntax natively, so the dep is conditional on 3.9.
-    "eval_type_backport>=0.2.0; python_version < '3.10'",
+    # No eval_type_backport: it existed only for Python 3.9, where Pydantic V2
+    # cannot eval PEP 604 unions. requires-python >=3.10 makes its marker
+    # unsatisfiable, so it was a dead declaration (alpha-engine-config-I11735).
 ]
 
 [project.scripts]
