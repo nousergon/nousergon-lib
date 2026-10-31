@@ -203,6 +203,23 @@ caller: every repo runs the same grader from the library it already pins. Stdlib
 nousergon-cost-gate --base origin/main --head HEAD --repo-visibility public
 ```
 
+### `workflow_health_semantics` — finding-surface declaration guard (console entry: `workflow-health-semantics`)
+
+A workflow can declare, in its own file, that a named step's non-zero exit is a
+FINDING rather than a break (`WORKFLOW_HEALTH_SEMANTICS: finding-surface`), or that it
+is operator-gated (`operator-gated`). That declaration is a mute, so it drifts toward
+silence: rename the step and the mute no longer matches anything. This guard reads the
+declared step names and the workflow's own `steps[].name` from the **same file**, and
+exits non-zero on a step that does not exist, a missing issue or reason, an undeclared
+`continue-on-error` step, or a semantics value outside the closed vocabulary. Every
+declaring repo runs it as a pull-request check from the library version it pins; the
+fleet's sched-health reconciler imports the same functions, so the guard and the grader
+cannot disagree. Stdlib + `pyyaml` only.
+
+```bash
+workflow-health-semantics --workflow-dir .github/workflows
+```
+
 ### `agent_schemas` — canonical LLM-output Pydantic schemas
 
 Shared contract surface for the 14 LLM-output classes used in `with_structured_output(...)` calls across the research pipeline (sector quant + qual + peer review, macro economist + critic, held-stock thesis update, CIO, eval-judge rubric). Lives here so downstream tooling — replay harness in alpha-engine-backtester, future cheap-model-concordance signals — can validate against the canonical contract without a heavy cross-repo dep on research.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.195"
+version = "0.124.196"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # Floor is 3.10 (alpha-engine-config-I11251/I11253/I11254/I11255/I11256).
@@ -50,6 +50,10 @@ universe-scope-lint = "nousergon_lib.contracts.universe_scope_lint:main"
 # so every fleet repo runs the SAME grader from the library it already pins,
 # rather than a reusable workflow a public repo structurally cannot call.
 nousergon-cost-gate = "nousergon_lib.cost_gate.cli:main"
+# Finding-surface declaration guard (alpha-engine-config-I9707). Every repo
+# that declares WORKFLOW_HEALTH_SEMANTICS in a workflow runs this as a
+# pull-request check, from the library version it already pins.
+workflow-health-semantics = "nousergon_lib.workflow_health_semantics:main"
 
 [project.optional-dependencies]
 arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
