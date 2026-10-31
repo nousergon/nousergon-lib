@@ -1,0 +1,42 @@
+# Suppression registry for nousergon-lib (alpha-engine-config-I9727).
+#
+# A suppression is a collection that makes a check skip a KNOWN DEFECT. Each
+# row names one collection, the owning OPEN alpha-engine-config issue, and an
+# expiry. scripts/check_suppression_registry.py (a verbatim copy of
+# alpha-engine-config's; only REGISTRY differs) reads this file: offline
+# (tests/test_check_suppression_registry.py, merge-blocking) the collection
+# exists, holds the declared keys, a `keys: all` ledger is not empty, and no
+# row has expired; --live requires every owning issue OPEN. Schema and
+# rationale: alpha-engine-config private-docs/SUPPRESSION_REGISTRY.yaml.
+#
+# Graded 2026-10-31 and NOT listed:
+#   src/nousergon_lib/groom_eligibility.py::_KNOWN_EXPECTED_RED_CHECKS
+#     (drift checks that are red on a PR branch by construction; a structural
+#     allowance, not a deferred defect);
+#   scripts/hardcoded_env_refs.py::EXEMPT_* and contracts/universe_scope_lint
+#     _ALLOWED_* (scope: docs, the guard's own files, the one legitimate
+#     reader);
+#   tests/test_rag_egress_regression_guard.py::_KNOWN_SAFE (empty);
+#   .openrouter-allowlist.yaml and .provider-linkage-allowlist.yaml (already
+#     carry a per-entry `expires`).
+# Not covered: .gitleaks-baseline.json (a list of finding objects, which this
+#   reader does not model; gitleaks config is express lane).
+
+suppressions:
+  - collection: .hardcoded-env-refs-baseline.json::files
+    keys: all
+    exhaustive: true
+    issue: alpha-engine-config-I12924
+    expires: 2027-03-31
+    reason: >-
+      63 files with hard-coded account IDs or bucket names, held shrink-only
+      by the S-04 guard; its tracker (I12492) closed when the guard shipped.
+  - collection: .basedpyright/baseline.json::files
+    keys: all
+    exhaustive: true
+    issue: alpha-engine-config-I12607
+    expires: 2027-03-31
+    reason: >-
+      Strict-typing errors in 88 files that existed when strict mode was
+      switched on. basedpyright fails on any new error; the baseline may only
+      shrink.
