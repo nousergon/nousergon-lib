@@ -1168,3 +1168,146 @@ def test_a_repo_may_delete_its_now_unnecessary_router_entry(tmp_path):
     _add(repo, "requirements.txt", "krepis[flow-doctor, openai]==0.59.62\n")
     _allowlist(repo, "schema_version: 1\nentries: []\n")
     assert plg.main(["--repo", str(repo), "--include-dist"]) == 0
+
+
+# -- the scan prefilters are exact (alpha-engine-config-I9938) ---------------
+#
+# `scan` skips a pattern for a file when `required_literals` or
+# `body_prefilter_safe` proves it cannot hit any line. These pin that the
+# proofs hold for every pattern in the table, at every line edge and under
+# every case-fold the matcher applies, and that the scan's result is the same
+# as the plain per-line loop it replaced.
+
+#: Every line separator `str.splitlines` honours.
+_SEPARATORS = ("\n", "\r", "\r\n", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+
+#: Lines that hit, between them, every pattern class in the table, including
+#: the case-fold oddities `re.IGNORECASE` accepts (U+0130/U+0131/U+017F/U+212A).
+_HIT_LINES = (
+    "anthropic.Anthropic(", "anthropic.AsyncAnthropic(", "from  anthropic import AsyncAnthropic",
+    "ChatAnthropic(", "@anthropic-ai/sdk", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "API.ANTHROPIC.COM", "ANTHROPIC_BASE_URL", "anthropic", "openai.OpenAI(", "openai.AsyncOpenAI(",
+    "from openai import OpenAI", "ChatOpenAI(", "OPENAI_API_KEY", "apİ.openai.com",
+    "OPENAI_BASE_URL", "OpenAI", "OPENROUTER_API_KEY", "openrouter.aı", "DEEPSEEK_API_KEY",
+    "api.deepſeek.com", "XAI_API_KEY", "GROK_API_KEY", "api.x.ai", "xai_sdk",
+    "google.generativeai", "genai.GenerativeModel(", "ChatGoogleGenerativeAI(",
+    "@google/generative-ai", "GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY",
+    "generativelanguage.googleapis.com", "google-genai", "GROQ_API_KEY", "api.groq.com", "groq",
+    "MISTRAL_API_KEY", "api.mistral.ai", "mistralai", "GLM_API_KEY", "ZHIPU_API_KEY",
+    "open.bigmodel.cn", "zhipuai", "bedrock-runtime", "@ai-sdk/", "api.Kimi.example",
+)
+
+
+def _all_patterns_all_classes():
+    return plg.compile_patterns(plg.ALL_PROVIDER_NAMES, plg.PATTERN_CLASSES)
+
+
+def test_every_hit_line_contains_a_required_literal_of_each_pattern_it_hits():
+    covered = set()
+    for klass, regex in _all_patterns_all_classes():
+        lits = plg.required_literals(regex)
+        for line in _HIT_LINES:
+            if regex.search(line) is None:
+                continue
+            covered.add(klass)
+            if lits is None:
+                continue
+            casefold, needles = lits
+            if casefold and not line.isascii():
+                continue  # scan never applies a casefold literal check to non-ASCII text
+            hay = line.lower() if casefold else line
+            assert any(n in hay for n in needles), (klass, line, needles)
+    assert covered == {k for k, _ in _all_patterns_all_classes()}, "a pattern class has no hit line"
+
+
+@pytest.mark.parametrize("sep", _SEPARATORS)
+def test_a_safe_pattern_hitting_a_line_hits_the_whole_text_at_every_edge(sep):
+    for klass, regex in _all_patterns_all_classes():
+        if not plg.body_prefilter_safe(regex):
+            continue
+        for line in _HIT_LINES:
+            if regex.search(line) is None:
+                continue
+            for body in (line + sep + "x", "x" + sep + line, "x" + sep + line + sep + "y"):
+                assert regex.search(body) is not None, (klass, repr(sep), line)
+
+
+@pytest.mark.parametrize("pattern,flags,safe", [
+    (r"OPENAI_API_KEY", 0, True),
+    (r"\bChatOpenAI\(", 0, True),
+    (r"api\.openai\.com", "I", True),
+    (r"^openai", 0, False),
+    (r"openai$", 0, False),
+    (r"\Aopenai", 0, False),
+    (r"(?<![\w.-])openai", 0, False),
+    (r"openai(?=\s)", 0, False),
+    (r"\Bopenai", 0, False),
+    (r"(\w)openai\1", 0, False),
+    (r"(?m)openai", 0, False),
+    (r"(?s)open.ai", 0, False),
+    (r"(?a)\bopenai", 0, False),
+    (r"openai", "M", False),
+])
+def test_body_prefilter_safe_refuses_line_edge_syntax(pattern, flags, safe):
+    import re as _re
+    f = {"I": _re.IGNORECASE, "M": _re.MULTILINE}.get(flags, 0) if flags else 0
+    assert plg.body_prefilter_safe(_re.compile(pattern, f)) is safe
+
+
+@pytest.mark.parametrize("pattern,flags,expected", [
+    (r"abc(?:def|ghi)", 0, (False, {"abc"})),
+    (r"(?:abcd|efgh)", 0, (False, {"abcd", "efgh"})),
+    (r"(?:abcd|xy)", 0, None),
+    (r"x*abcd", 0, (False, {"abcd"})),
+    (r"(?:abcd)?xy", 0, None),
+    (r"API\.X\.ai", "I", (True, {"api.x.ai"})),
+    (r"(?i)API\.X\.ai", 0, (True, {"api.x.ai"})),
+    (r"café", "I", None),
+    (r"abcd", "M", None),
+])
+def test_required_literals_names_only_what_every_match_consumes(pattern, flags, expected):
+    import re as _re
+    f = {"I": _re.IGNORECASE, "M": _re.MULTILINE}.get(flags, 0) if flags else 0
+    got = plg.required_literals(_re.compile(pattern, f))
+    assert (got if got is None else (got[0], set(got[1]))) == expected
+
+
+def _reference_scan(repo: Path, patterns, *, strip: bool = True):
+    """The per-line loop `scan` ran before its prefilters, over the same file
+    selection and exemptions -- the oracle the prefiltered scan must equal."""
+    dist_suffix = f":{plg.CLASS_DIST}"
+    out = []
+    for fp in plg._tracked_files(repo, plg.DEFAULT_EXTENSIONS, plg.DEPENDENCY_FILENAME_RE):
+        rel = str(fp.relative_to(repo))
+        text = fp.read_text(errors="replace")
+        is_dep = plg.DEPENDENCY_FILENAME_RE.match(fp.name) is not None
+        applicable = [(k, r) for k, r in patterns if is_dep or not k.endswith(dist_suffix)]
+        body = plg.strip_comments(rel, text) if strip else text
+        for lineno, line in enumerate(body.splitlines(), 1):
+            for klass, regex in applicable:
+                if regex.search(line):
+                    out.append((rel, lineno, klass, line.strip()))
+    return out
+
+
+def test_prefiltered_scan_equals_the_plain_per_line_loop(tmp_path):
+    repo = _git_repo(tmp_path)
+    patterns = _all_patterns_all_classes()
+    for i, sep in enumerate(_SEPARATORS):
+        _add(repo, f"src/m{i}.py", sep.join(("x = 1",) + _HIT_LINES + ("y = 2",)) + "\n")
+        _add(repo, f"cfg/c{i}.yaml", sep.join(_HIT_LINES) + "\n")
+    _add(repo, "requirements.txt", "\n".join(("openai==1.0", "anthropic>=0.3", "xai-sdk", "groq",
+                                              "google-genai", "mistralai", "zhipuai", "requests")) + "\n")
+    _add(repo, "web/a.ts", "// ANTHROPIC_API_KEY in a comment\nconst k = 'OPENAI_API_KEY';\n"
+                           "/* from openai import OpenAI */ from /*c*/ openai import OpenAI\n")
+    _add(repo, "quiet.py", "print('nothing to see')\n" * 50)
+    got = plg.scan(repo, plg.DEFAULT_EXTENSIONS, patterns, registry_aware=False,
+                   absence_aware=False, router_aware=False,
+                   extra_filename_re=plg.DEPENDENCY_FILENAME_RE)
+    raw = plg.scan(repo, plg.DEFAULT_EXTENSIONS, patterns, strip=False, registry_aware=False,
+                   absence_aware=False, router_aware=False,
+                   extra_filename_re=plg.DEPENDENCY_FILENAME_RE)
+    as_tuples = lambda ms: [(m.path, m.line, m.pattern_class, m.text) for m in ms]  # noqa: E731
+    assert as_tuples(got) == _reference_scan(repo, patterns)
+    assert as_tuples(raw) == _reference_scan(repo, patterns, strip=False)
+    assert len(got) > 100
