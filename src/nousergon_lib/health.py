@@ -308,9 +308,16 @@ def derive_status(
 
     1. ``error`` present                       → ``"failed"``
     2. a *required* deliverable is absent       → ``"failed"``
-    3. warnings present, or a *non-required*
-       deliverable is absent                    → ``"degraded"``
+    3. warnings present, a *non-required*
+       deliverable is absent, or NO deliverable
+       was declared at all                      → ``"degraded"``
     4. otherwise                                → ``"ok"``
+
+    An empty ``deliverables`` list is ``"degraded"``, never ``"ok"``
+    (alpha-engine-config-I9708): a run that declared nothing asserted no work,
+    and an empty population makes every "all of them were produced" clause
+    vacuously true. That is a run nothing observed, not a clean run
+    (``principles.md`` §2.7).
 
     **Structural invariant.** It is impossible for this function to return
     ``"ok"`` while a required deliverable is absent. The ``"ok"`` value is
@@ -330,6 +337,9 @@ def derive_status(
     if blockers:
         return "failed"
     # Reaching here guarantees: no error AND no missing required deliverable.
+    if not deliverables:
+        # alpha-engine-config-I9708: nothing declared, so nothing was asserted.
+        return "degraded"
     if warnings or any(not d.produced for d in deliverables):
         return "degraded"
     return "ok"

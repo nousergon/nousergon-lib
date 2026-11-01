@@ -53,6 +53,30 @@ name: Notify CI failure
 # ONLY — it never changes the dispatch step, the dedup key, or any existing
 # consumer's message shape, so every consumer that doesn't set it is
 # byte-for-byte unaffected. Empty string (the default) appends nothing.
+#
+# Runner (alpha-engine-config-I11697): the job follows the fleet's
+# CI_RUNNER_MODE switch for PRIVATE callers and stays on ubuntu-latest for
+# everyone else. It used to hardcode ubuntu-latest, so a CodeBuild flip moved
+# every private caller's own jobs and left this one consuming the
+# included-minutes allowance the flip exists to protect (measured 2026-10-31:
+# the largest single cause of unreachable jobs in alpha-engine-config and
+# nous-ergon-ops).
+#   * Inside a called workflow both `vars` and `github` resolve in the
+#     CALLER's context (the fleet already relies on this in
+#     alpha-engine-config cost-gate.yml), so the caller's org-level
+#     CI_RUNNER_MODE and repository decide the runner; callers pass nothing.
+#   * The label names the shared `nousergon-private-runner` CodeBuild project,
+#     the form nous-ergon-ops and telos-ops use. Its org webhook serves only
+#     the private repos it lists. A per-repo label
+#     (`codebuild-<repo>-runner-...`) would name a project that exists for
+#     alpha-engine-config alone and strand every other caller's job.
+#   * `github.event.repository.private` gates the route. Public callers
+#     (crucible-*, nousergon-data, krepis, this repo) pay nothing for hosted
+#     minutes and have no CodeBuild runner, so a flip must not move them. An
+#     event payload without the field reads as not-private and stays hosted:
+#     the unknown case fails toward the runner that always exists.
+#   * actions/setup-python has no amzn2023/arm64 build (alpha-engine-config
+#     I7846), so on the CodeBuild lane the fallback installs Python with dnf.
 
 on:
   workflow_call:
@@ -79,7 +103,7 @@ on:
 jobs:
   notify:
     name: telegram alert
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'codebuild' && github.event.repository.private == true && format('codebuild-nousergon-private-runner-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     steps:
       # STEP 1 — Dispatch FIRST (config#2855 follow-on). Whether the Fleet CI
       # Watch agent is dispatched decides whether the fallback Telegram below
@@ -139,16 +163,27 @@ jobs:
       # `dispatched` output (dispatch crashed before writing it) is `!= 'true'`
       # too, so an unknown dispatch state fails safe toward alerting.
       - name: Set up Python
-        if: ${{ always() && steps.dispatch.outputs.dispatched != 'true' }}
+        if: ${{ always() && steps.dispatch.outputs.dispatched != 'true' && runner.environment == 'github-hosted' }}
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.12"
+
+      # CodeBuild lane (self-hosted, amzn2023/arm64): setup-python has no build
+      # there, so install with dnf and name the interpreter explicitly. The
+      # image's bare `python` is a pyenv shim on a drifting minor and its
+      # `python3` is the system 3.9, so neither is used.
+      - name: Set up Python (CodeBuild runner)
+        if: ${{ always() && steps.dispatch.outputs.dispatched != 'true' && runner.environment != 'github-hosted' }}
+        run: |
+          dnf install -y -q python3.12 python3.12-pip
+          python3.12 --version
+          echo "PY=python3.12" >> "$GITHUB_ENV"
 
       - name: Install alerts CLI (base lib, no extras)
         if: ${{ always() && steps.dispatch.outputs.dispatched != 'true' }}
         env:
           LIB_REF: ${{ inputs.lib_ref }}
-        run: pip install "nousergon-lib @ git+https://github.com/nousergon/nousergon-lib@${LIB_REF}"
+        run: '"${PY:-python}" -m pip install "nousergon-lib @ git+https://github.com/nousergon/nousergon-lib@${LIB_REF}"'
 
       - name: Publish Telegram alert (fallback — agent not dispatched)
         if: ${{ always() && steps.dispatch.outputs.dispatched != 'true' }}
@@ -172,7 +207,7 @@ jobs:
             MSG="${MSG}
           ${BLAST_RADIUS_MESSAGE}"
           fi
-          python -m krepis.alerts publish \
+          "${PY:-python}" -m krepis.alerts publish \
             --no-sns \
             --severity error \
             --source "ci:${CI_REPOSITORY}@${CI_REF_NAME}" \
