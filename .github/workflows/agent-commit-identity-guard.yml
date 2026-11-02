@@ -1,0 +1,100 @@
+name: Agent commit identity guard
+
+# Reusable (workflow_call) fleet primitive: fail a PR whose agent-session
+# commit (a `Claude-Session:` trailer) is authored, committed or signed off
+# as the owner (alpha-engine-config-I13060, prevention for
+# nous-ergon-ops-I2019). The rule, the owner resolution and the one exemption
+# (GitHub-synthesised `web-flow` commits) are documented in
+# scripts/agent_commit_identity_guard.py.
+#
+# Option (a) of the issue: a PR check binds every surface that pushes,
+# including the laptop; a pre-push hook in worker checkouts would bind only
+# the cloud workers.
+#
+# CONSUMERS: add one workflow file, pinned per the fleet convention. The
+# `caller-` concurrency prefix is mandatory for the reason given in
+# provider-linkage-guard.yml (alpha-engine-config-I7862).
+#
+#   name: Agent commit identity guard
+#   on:
+#     pull_request:
+#       branches: [main]
+#   permissions:
+#     contents: read
+#   concurrency:
+#     group: caller-${{ github.workflow }}-${{ github.event.pull_request.number }}
+#     cancel-in-progress: true
+#   jobs:
+#     guard:
+#       uses: nousergon/nousergon-lib/.github/workflows/agent-commit-identity-guard.yml@<commit-sha>
+#
+# `owner-logins` adds owner accounts beyond the PR opener (a bot-opened PR
+# names no owner by itself). It is an input, not a literal here, because
+# this repo is public.
+#
+# pull_request only. On push and merge_group every commit is synthesised by
+# GitHub as the PR opener, which is the exemption, so there is nothing to
+# judge; the script says so and passes if a caller wires those events.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+    inputs:
+      owner-logins:
+        description: "Extra owner GitHub logins, comma-separated"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: agent commit identity guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+
+      # Under workflow_call the checkout above is the CALLER's repo; the
+      # script lives here. The script ref floats, as provider-linkage-guard's
+      # does (alpha-engine-config-I9118 option c), and the run records which
+      # commit and sha256 it executed. On this repo's own PRs it runs the
+      # PR's copy, so a change to the guard is judged by itself.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: nousergon/nousergon-lib
+          ref: ${{ github.repository == 'nousergon/nousergon-lib' && github.sha || '' }}
+          path: _nousergon-lib-script
+
+      - name: Record the guard script this run executed
+        env:
+          SCRIPT: _nousergon-lib-script/scripts/agent_commit_identity_guard.py
+        run: |
+          set -euo pipefail
+          lib_sha="$(git -C _nousergon-lib-script rev-parse HEAD)"
+          script_sha256="$(sha256sum "$SCRIPT" | cut -d' ' -f1)"
+          echo "::notice title=guard script provenance::nousergon-lib@${lib_sha} scripts/agent_commit_identity_guard.py sha256=${script_sha256}"
+          {
+            echo "### Guard script provenance"
+            echo ""
+            echo "- nousergon-lib commit: \`${lib_sha}\` (floating ref, alpha-engine-config-I9118)"
+            echo "- \`scripts/agent_commit_identity_guard.py\` sha256: \`${script_sha256}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No agent-session commit claims the owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_LOGINS: ${{ inputs.owner-logins }}
+        run: |
+          set -euo pipefail
+          python3 _nousergon-lib-script/scripts/agent_commit_identity_guard.py \
+            --repo . --event "$GITHUB_EVENT_PATH" --owner-login "${OWNER_LOGINS:-}"
