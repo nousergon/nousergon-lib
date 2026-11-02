@@ -59,6 +59,31 @@ name: Provider direct-linkage guard
 #   jobs:
 #     guard:
 #       uses: nousergon/nousergon-lib/.github/workflows/provider-linkage-guard.yml@<commit-sha>
+#
+# Runner (alpha-engine-config-I12850): the job follows the fleet's
+# CI_RUNNER_MODE switch for PRIVATE callers and stays on ubuntu-latest for
+# everyone else -- the same rule notify-ci-failure.yml adopted in
+# nousergon-lib-PR517 (alpha-engine-config-I11697). It used to hardcode
+# ubuntu-latest, so a CodeBuild flip left every private caller's guard job on
+# the hosted allowance the flip exists to protect; measured 2026-11-02 it was
+# one of the last two jobs in nous-ergon-ops that ci_runner_mode_guard counted
+# as unreachable by a flip.
+#   * Inside a called workflow `vars` and `github` resolve in the CALLER's
+#     context, so the caller's org-level CI_RUNNER_MODE and repository decide
+#     the runner; callers pass nothing.
+#   * The label names the shared `nousergon-private-runner` CodeBuild project,
+#     whose org webhook serves the private repos it lists. A per-repo label
+#     would name a project that exists for one repo alone.
+#   * `github.event.repository.private` gates the route. Public callers
+#     (crucible-*, nousergon-data, this repo's own pull_request/push runs) pay
+#     nothing for hosted minutes and have no CodeBuild runner, so a flip must
+#     not move them. A payload without the field reads as not-private and
+#     stays hosted: the unknown case fails toward the runner that always
+#     exists.
+#   * actions/setup-python has no amzn2023/arm64 build (alpha-engine-config
+#     I7846), so on the CodeBuild lane Python comes from dnf and later steps
+#     name the interpreter through $PY. On a hosted runner $PY is unset and
+#     the steps run the same setup-python interpreter as before.
 
 on:
   pull_request:
@@ -77,7 +102,7 @@ concurrency:
 jobs:
   guard:
     name: provider direct-linkage guard
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'codebuild' && github.event.repository.private == true && format('codebuild-nousergon-private-runner-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -119,12 +144,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python
+        if: ${{ runner.environment == 'github-hosted' }}
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.11"
 
+      # CodeBuild lane (self-hosted, amzn2023/arm64): setup-python has no build
+      # there, so install with dnf and name the interpreter explicitly. The
+      # image's bare `python` is a pyenv shim on a drifting minor and its
+      # `python3` is the system 3.9, so neither is used.
+      - name: Set up Python (CodeBuild runner)
+        if: ${{ runner.environment != 'github-hosted' }}
+        run: |
+          dnf install -y -q python3.12 python3.12-pip
+          python3.12 --version
+          echo "PY=python3.12" >> "$GITHUB_ENV"
+
       - name: Install deps
-        run: pip install --quiet pyyaml
+        run: '"${PY:-python3}" -m pip install --quiet pyyaml'
 
       - name: No unallowlisted direct provider linkage
-        run: python3 _nousergon-lib-script/scripts/provider_linkage_guard.py --repo . --include-dist
+        run: '"${PY:-python3}" _nousergon-lib-script/scripts/provider_linkage_guard.py --repo . --include-dist'
