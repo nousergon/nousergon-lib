@@ -64,7 +64,13 @@ concurrency:
 jobs:
   guard:
     name: openrouter direct-linkage guard
-    runs-on: ubuntu-latest
+    # Follows the fleet CI_RUNNER_MODE switch for PRIVATE callers only, the
+    # rule notify-ci-failure.yml adopted in nousergon-lib-PR517 and
+    # provider-linkage-guard.yml in PR518 (alpha-engine-config-I12850): `vars`
+    # and `github` resolve in the CALLER's context, so a public caller (no
+    # CodeBuild runner, free hosted minutes) and an event payload without
+    # `private` stay on ubuntu-latest.
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'codebuild' && github.event.repository.private == true && format('codebuild-nousergon-private-runner-{0}-{1}', github.run_id, github.run_attempt) || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -105,12 +111,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python
+        if: ${{ runner.environment == 'github-hosted' }}
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: "3.11"
 
+      # CodeBuild lane (self-hosted, amzn2023/arm64): setup-python has no build
+      # there, so install with dnf and name the interpreter explicitly. The
+      # image's bare `python` is a pyenv shim on a drifting minor and its
+      # `python3` is the system 3.9, so neither is used.
+      - name: Set up Python (CodeBuild runner)
+        if: ${{ runner.environment != 'github-hosted' }}
+        run: |
+          dnf install -y -q python3.12 python3.12-pip
+          python3.12 --version
+          echo "PY=python3.12" >> "$GITHUB_ENV"
+
       - name: Install deps
-        run: pip install --quiet pyyaml
+        run: '"${PY:-python3}" -m pip install --quiet pyyaml'
 
       - name: No unallowlisted direct OpenRouter linkage
-        run: python3 _nousergon-lib-script/scripts/openrouter_guard.py --repo .
+        run: '"${PY:-python3}" _nousergon-lib-script/scripts/openrouter_guard.py --repo .'
