@@ -302,7 +302,7 @@ def test_a_forged_github_committer_is_not_exempt(tmp_path, capsys):
 
 
 def test_is_github_synthesised_needs_the_signature():
-    base = dict(sha="a" * 40, author_name="x", author_email="x@example.org",
-                committer_name="GitHub", committer_email="noreply@github.com", message="")
+    base = {"sha": "a" * 40, "author_name": "x", "author_email": "x@example.org",
+            "committer_name": "GitHub", "committer_email": "noreply@github.com", "message": ""}
     assert not g.is_github_synthesised(g.Commit(**base, committer_login="web-flow"))
     assert g.is_github_synthesised(g.Commit(**base, committer_login="web-flow", signature_valid=True))
