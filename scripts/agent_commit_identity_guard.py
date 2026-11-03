@@ -81,6 +81,8 @@ class Commit:
     message: str
     author_login: str | None = None
     committer_login: str | None = None
+    #: GitHub's ``commit.verification`` reads ``verified`` with reason ``valid``.
+    signature_valid: bool = False
 
 
 @dataclass
@@ -120,8 +122,19 @@ def signoffs(message: str) -> list[tuple[str, str]]:
 
 
 def is_github_synthesised(c: Commit) -> bool:
-    """Committed by GitHub itself on the token holder's behalf."""
-    return (c.committer_login or "").lower() == _WEB_FLOW_LOGIN or _norm_email(c.committer_email) == _WEB_FLOW_EMAIL
+    """Committed by GitHub itself on the token holder's behalf.
+
+    The committer email is set by whoever makes the commit (a local
+    ``GIT_COMMITTER_EMAIL=noreply@github.com`` resolves to ``web-flow`` too),
+    so it is not proof. GitHub signs what it synthesises, and a signature
+    GitHub reports as ``valid`` for a ``noreply@github.com`` committer can only
+    be GitHub's own: both are required.
+    """
+    return (
+        (c.committer_login or "").lower() == _WEB_FLOW_LOGIN
+        and _norm_email(c.committer_email) == _WEB_FLOW_EMAIL
+        and c.signature_valid
+    )
 
 
 def names_owner(name: str, email: str, login: str | None, owner: Owner) -> str | None:
@@ -233,8 +246,13 @@ def resolve_logins(commits: list[Commit], github_repo: str, get: Getter) -> list
         data = get(f"repos/{github_repo}/commits/{c.sha}") or {}
         author = (data.get("author") or {}).get("login")
         committer = (data.get("committer") or {}).get("login")
+        verification = (data.get("commit") or {}).get("verification") or {}
+        signed = verification.get("verified") is True and verification.get("reason") == "valid"
         out.append(
-            Commit(c.sha, c.author_name, c.author_email, c.committer_name, c.committer_email, c.message, author, committer)
+            Commit(
+                c.sha, c.author_name, c.author_email, c.committer_name, c.committer_email, c.message,
+                author, committer, signed,
+            )
         )
     return out
 
