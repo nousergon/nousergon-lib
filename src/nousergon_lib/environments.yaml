@@ -78,6 +78,11 @@ environments:
     # Per-weekly-run LLM spend ceiling, USD (crucible.llm.DEFAULT_LLM_CAP_USD).
     llm_cap_usd: 5.0
 
+    # Where this environment's alerts go (S-20, alpha-engine-config-I12508).
+    # page = the normal path, which may reach a phone. The default environment
+    # must say page; the schema refuses anything else.
+    alert_routing: page
+
     # Order routes the trader may enable (crucible-trader
     # CRUCIBLE_TRADER_ORDER_ROUTING values; alpha-engine-config-I12685). prod
     # routes to IB PAPER only; the router itself refuses anything else.
@@ -150,6 +155,12 @@ environments:
     # Low per-run LLM ceiling (CRUCIBLE_LLM_CAP_USD), with a cheap model or
     # recorded replies (S-17).
     llm_cap_usd: 0.5
+
+    # Staging never pages (S-20, alpha-engine-config-I12508): its alerts are
+    # records for the daily digest's staging section and the console pane. The
+    # one staging-caused page, a soak-gate failure on promotion day, is raised
+    # by promote.yml in the prod lane.
+    alert_routing: digest
 
     # Staging never routes (S-19, alpha-engine-config-I12507 / -I12685): its
     # trader is shadow, or simulated fills at the close with no broker reached.
