@@ -78,7 +78,7 @@ class _Repo:
         return self._git("rev-parse", "HEAD").strip()
 
 
-def _getter(repo: _Repo, *, profile: Any = None, fail: str = "") -> Any:
+def _getter(repo: _Repo, *, profile: Any = None, fail: str = "", forged: bool = False) -> Any:
     """GitHub stand-in: the owner's email resolves to the owner login, GitHub's
     own committer address to ``web-flow``; nothing else resolves."""
     logins = {OWNER[1]: OWNER_LOGIN, GITHUB[1]: "web-flow"}
@@ -93,8 +93,12 @@ def _getter(repo: _Repo, *, profile: Any = None, fail: str = "") -> Any:
         sha = path.rsplit("/", 1)[-1]
         out = repo._git("show", "-s", "--format=%ae%x00%ce", sha).strip()
         ae, ce = out.split("\x00")
+        # GitHub signs what it commits; a local commit claiming its address is unsigned.
+        signed = ce == GITHUB[1] and not forged
         return {"author": {"login": logins[ae]} if ae in logins else None,
-                "committer": {"login": logins[ce]} if ce in logins else None}
+                "committer": {"login": logins[ce]} if ce in logins else None,
+                "commit": {"verification": {"verified": signed,
+                                            "reason": "valid" if signed else "unsigned"}}}
 
     return get
 
@@ -285,3 +289,20 @@ def test_workflow_runs_the_script_on_pull_requests_read_only():
     scan = steps[-1]["run"]
     assert "scripts/agent_commit_identity_guard.py" in scan and '--event "$GITHUB_EVENT_PATH"' in scan
     assert steps[-1]["env"]["GH_TOKEN"] == "${{ github.token }}"
+
+
+def test_a_forged_github_committer_is_not_exempt(tmp_path, capsys):
+    """Codex review 2026-11-03: GIT_COMMITTER_EMAIL=noreply@github.com on a
+    local commit resolves to web-flow; without GitHub's valid signature it is
+    judged like any other agent commit."""
+    repo = _Repo(tmp_path / "r")
+    repo.commit(f"forged\n\n{SESSION}\n", author=OWNER, committer=GITHUB)
+    assert _run(repo, forged=True) == 1
+    assert "AUTHORED as the owner" in capsys.readouterr().out
+
+
+def test_is_github_synthesised_needs_the_signature():
+    base = dict(sha="a" * 40, author_name="x", author_email="x@example.org",
+                committer_name="GitHub", committer_email="noreply@github.com", message="")
+    assert not g.is_github_synthesised(g.Commit(**base, committer_login="web-flow"))
+    assert g.is_github_synthesised(g.Commit(**base, committer_login="web-flow", signature_valid=True))
