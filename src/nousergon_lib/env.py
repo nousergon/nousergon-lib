@@ -45,12 +45,14 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 __all__ = [
+    "ALERT_ROUTING_DIGEST",
+    "ALERT_ROUTING_PAGE",
     "ENV_VAR",
     "REGISTRY_VAR",
     "PACKAGED_REGISTRY",
@@ -77,6 +79,12 @@ REGISTRY_VAR = "NE_ENV_REGISTRY"
 PACKAGED_REGISTRY = Path(__file__).parent / "environments.yaml"
 #: The only schema version this resolver reads.
 SCHEMA_VERSION = 1
+
+#: ``alert_routing`` values (S-20, alpha-engine-config-I12508). ``page``: the
+#: normal alert path, which may reach a phone. ``digest``: the environment's
+#: alerts are records for its daily digest and console pane, and never page.
+ALERT_ROUTING_PAGE = "page"
+ALERT_ROUTING_DIGEST = "digest"
 
 
 class EnvRegistryError(Exception):
@@ -170,6 +178,7 @@ class _Environment(_Strict):
     instances: dict[str, str]
     ssm_prefixes: dict[str, str]
     llm_cap_usd: float = Field(ge=0)
+    alert_routing: Literal["page", "digest"]
     trader: _Trader
     universe: _Universe
     schedules_et: dict[str, _Schedule]
@@ -215,6 +224,15 @@ class _Registry(_Strict):
                 raise ValueError(f"environment name {name!r} must match {_ENV_NAME.pattern}")
         if self.default not in self.environments:
             raise ValueError(f"default {self.default!r} is not a declared environment")
+        # A consumer that sets no NE_ENV gets the default, so the default must
+        # page: a registry edit can make a declared environment digest-only, but
+        # never the one every unconfigured process resolves (fails toward the
+        # operator, as krepis.alerts' own defaults do; I12508).
+        if self.environments[self.default].alert_routing != ALERT_ROUTING_PAGE:
+            raise ValueError(
+                f"default environment {self.default!r} must have alert_routing: {ALERT_ROUTING_PAGE}, "
+                f"got {self.environments[self.default].alert_routing!r}"
+            )
         return self
 
 
@@ -284,6 +302,7 @@ class Environment:
     account: str
     region: str
     llm_cap_usd: float
+    alert_routing: str
     neon_branch: str | None
     universe_scope: str
     _spec: _Environment
@@ -366,6 +385,7 @@ def resolve(name: str | None = None, *, registry: str | os.PathLike[str] | None 
         account=spec.account,
         region=spec.region,
         llm_cap_usd=spec.llm_cap_usd,
+        alert_routing=spec.alert_routing,
         neon_branch=spec.state_store.neon_branch,
         universe_scope=spec.universe.scope,
         _spec=spec,

@@ -161,6 +161,22 @@ def test_staging_never_routes_and_prod_routes_to_ib_paper_only():
         prod.assert_routing_allowed("ib_live")
 
 
+def test_staging_alerts_go_to_the_digest_and_prod_pages():
+    """alpha-engine-config-I12508 (S-20): staging never pages; the registry,
+    not a caller's guess, says so."""
+    assert env.resolve("staging").alert_routing == env.ALERT_ROUTING_DIGEST
+    assert env.resolve("prod").alert_routing == env.ALERT_ROUTING_PAGE
+
+
+def test_the_default_environment_must_page():
+    """A process that sets no NE_ENV resolves the default; making the default
+    digest-only would silence every unconfigured consumer, so it is refused."""
+    doc = _doc()
+    doc["environments"][doc["default"]]["alert_routing"] = "digest"
+    with pytest.raises(env.RegistrySchemaError, match="must have alert_routing: page"):
+        env.validate_registry(doc)
+
+
 def test_every_declared_environment_states_its_routing():
     for name in env.environment_names():
         assert isinstance(env.resolve(name).routing_allowed, tuple)
@@ -224,6 +240,8 @@ def _mutated(mutate) -> dict:
         (lambda d: d["environments"]["prod"]["schedules_et"]["weekly"].update(time_et="7:00"), "time_et"),
         (lambda d: d["environments"]["prod"]["schedules_et"]["weekly"].update(days="SATURDAY"), "days"),
         (lambda d: d["environments"]["prod"].update(llm_cap_usd=-1), "llm_cap_usd"),
+        (lambda d: d["environments"]["prod"].pop("alert_routing"), "alert_routing"),
+        (lambda d: d["environments"]["prod"].update(alert_routing="telegram"), "alert_routing"),
         (lambda d: d["environments"]["prod"].pop("trader"), "trader"),
         (lambda d: d["environments"]["prod"]["trader"].pop("routing_allowed"), "routing_allowed"),
         (lambda d: d["environments"]["prod"]["trader"].update(routing_allowed=["IB-Paper"]), "IB-Paper"),
