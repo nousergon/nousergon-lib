@@ -28,6 +28,8 @@ capability_gate:
     inspector2:
     - inspector2:BatchGetAccountStatus
     - inspector2:ListFindings
+    invoicing:
+    - invoicing:ListInvoiceSummaries
   free_prefixes:
     account: declared free in the private SSoT
     cloudformation: declared free in the private SSoT
@@ -36,6 +38,7 @@ capability_gate:
     codestar-connections: declared free in the private SSoT
     iam: declared free in the private SSoT
     inspector2: declared free in the private SSoT
+    invoicing: declared free in the private SSoT
     organizations: declared free in the private SSoT
     rolesanywhere: declared free in the private SSoT
     sts: declared free in the private SSoT
