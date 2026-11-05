@@ -320,6 +320,19 @@ def run(
             f"could not read the owner profile for {', '.join(unread)}, and an agent-session "
             "commit carries a Signed-off-by line that only the profile can judge"
         )
+    # Without the profile there is no owner NAME to judge by, so an agent
+    # commit whose author or committer resolved to no login (an email linked
+    # to no account) was judged by nothing at all (codex 2774b7ac6e9626fe).
+    unjudged = [
+        c for c in commits
+        if is_agent_commit(c.message) and (c.author_login is None or c.committer_login is None)
+    ]
+    if unread and not found and not owner.names and unjudged:
+        raise VerifyError(
+            f"could not read the owner profile for {', '.join(unread)}, and agent-session "
+            f"commit(s) {', '.join(c.sha[:12] for c in unjudged)} carry an author or committer "
+            "that no login resolves, so only the owner's profile name could judge them"
+        )
     for line in found:
         print(f"::error::{line}")
     if found:
