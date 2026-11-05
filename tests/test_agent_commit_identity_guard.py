@@ -210,10 +210,18 @@ def test_unreadable_profile_with_an_unjudged_signoff_fails_closed(tmp_path):
 
 def test_unreadable_profile_without_a_signoff_still_judges_by_login(tmp_path):
     repo = _Repo(tmp_path / "r")
-    repo.commit(f"fix\n\n{SESSION}\n", author=AGENT)
-    assert _run(repo, fail="users/") == 0
-    repo.commit(f"fix 2\n\n{SESSION}\n", author=OWNER)
+    repo.commit(f"fix\n\n{SESSION}\n", author=OWNER)
     assert _run(repo, fail="users/") == 1
+
+
+def test_unreadable_profile_cannot_pass_an_unresolved_author_unjudged(tmp_path):
+    """codex 2774b7ac6e9626fe: with no profile there is no owner name, so an
+    owner-NAMED author on an email no login resolves, without a sign-off,
+    used to pass. It now fails closed rather than unjudged."""
+    repo = _Repo(tmp_path / "r")
+    repo.commit(f"fix\n\n{SESSION}\n", author=(OWNER[0], "unlinked@example.org"))
+    assert _run(repo, fail="users/") == 2
+    assert _run(repo) == 1  # with the profile, the name check catches it
 
 
 def test_bad_range_fails_closed(tmp_path):
