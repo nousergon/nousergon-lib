@@ -1,0 +1,77 @@
+# pyarrow/numpy lockstep check for THIS repo's pull requests
+# (alpha-engine-config-I13002; mechanism record nous-ergon-ops#2041).
+#
+# pyarrow >= 26 refuses to import under NumPy 1.x, and the pair broke the
+# fleet three times in October through a surface the previous fix had not
+# touched. nousergon-data `constraints/pyarrow-numpy.toml` is the ONE
+# declaration of the pair. This repo is registered there as a LIBRARY
+# (`[libraries.nousergon-lib]`): it is installed into nine consuming venvs
+# with different specs, so its ranges must stay COMPATIBLE with every one of
+# them (pyarrow range contains each consumer's; numpy range admits 1.26.4 for
+# a numpy<2 consumer and every 2.x otherwise) rather than equal to any one.
+# This job runs nousergon-data's checker against this PR's head:
+#
+#   check_pyarrow_numpy_constraint.py --repo nousergon-lib --root <this checkout>
+#
+# so a change here (or a Dependabot bump) that narrows the pyarrow floor past
+# a consumer, raises the numpy floor to 2, or moves the lock outside the
+# declared range goes red HERE, on its own PR, instead of being found by the
+# daily cross-repo run after merge. It also fails on a new file here that
+# declares or pip-installs the pair without being registered.
+#
+# Trigger: only PRs touching a file kind the checker reads (pyproject, lock,
+# Dependabot config, requirements/toml/cfg/shell/Dockerfile, workflows and
+# scripts). Library code under src/ and tests/ is not watched; the daily
+# cross-repo run (alpha-engine-config pyarrow-numpy-constraint.yml) covers it.
+# Because of the path filter this job must not be made a REQUIRED check
+# as-is: a required check that never reports leaves unrelated PRs pending.
+#
+# A red run is a finding. Fix it by changing the declaration in nousergon-data
+# FIRST (this job reads it from nousergon-data main), then the surface here;
+# never by editing this job.
+name: pyarrow-numpy-constraint
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "uv.lock"
+      - "**/uv.lock"
+      - ".github/dependabot.yml"
+      - ".github/workflows/**"
+      - ".github/scripts/**"
+      - "scripts/**"
+      - "**/requirements*.txt"
+      - "**/requirements*.in"
+      - "**/*.toml"
+      - "**/*.cfg"
+      - "**/*.sh"
+      - "**/Dockerfile*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          path: this-repo
+      - name: Checkout nousergon-data (the declaration and its checker)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: nousergon/nousergon-data
+          path: nousergon-data
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
+        with:
+          python-version: "3.12"
+      - name: Install the checker's dependencies
+        run: python3 -m pip install --quiet packaging pyyaml
+      - name: Check this repo's pyarrow/numpy surfaces against the shared constraint
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: python3 nousergon-data/scripts/check_pyarrow_numpy_constraint.py --repo "$REPO_NAME" --root this-repo
