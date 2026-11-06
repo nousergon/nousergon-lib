@@ -62,7 +62,8 @@ def test_derived_values_compose_from_declared_parts():
     assert e.s3_uri("crucible") == f"s3://{e.bucket('crucible')}/crucible"
     assert e.universe_uri.startswith(f"s3://{e.bucket('research')}/")
     assert e.schedule_et("weekly") == ("SAT", "07:00")
-    assert e.neon_branch is None
+    assert e.neon_branch == "main"
+    assert env.resolve("staging").neon_branch == "staging"
     assert e.llm_cap_usd == 5.0
     assert e.universe_scope == "full"
     assert "research" in e.roles("buckets")
