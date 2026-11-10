@@ -83,7 +83,7 @@ DEFAULT_EXPERIMENT_ID = "reference"
 
 _CONFIG_REPO_DIRNAME = "alpha-engine-config"
 
-PathLike = Union[str, os.PathLike]
+PathLike = Union[str, os.PathLike[str]]
 
 
 def _config_roots(repo_root: Path, github_workspace: str | None) -> list[Path]:

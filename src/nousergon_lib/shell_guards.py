@@ -78,7 +78,7 @@ class EmbeddedUnit:
 
 def embedded_units(script_text: str) -> list[EmbeddedUnit]:
     """Every ``[Unit] … [Install]`` block written inside *script_text*."""
-    units = []
+    units: list[EmbeddedUnit] = []
     for match in re.finditer(r"\[Unit\].*?\[Install\]", script_text, re.S):
         body = match.group(0)
         type_match = re.search(r"^Type=(\S+)", body, re.M)
@@ -110,7 +110,7 @@ def endless_execstart_violations(script_text: str) -> list[str]:
     ``Type=oneshot`` and is not flagged: the check keys on the ExecStart
     script's own body containing an unbounded loop, not on the type alone.
     """
-    violations = []
+    violations: list[str] = []
     for unit in embedded_units(script_text):
         if not unit.execstart:
             continue
@@ -136,7 +136,7 @@ def unprovided_binary_violations(block_text: str) -> list[str]:
     bootstrap's job is to establish preconditions, not to require them — so
     every fatal guard must be preceded, in the same block, by an install.
     """
-    violations = []
+    violations: list[str] = []
     for match in re.finditer(r"command -v (\S+)[^\n]*\|\|[^\n]*exit 1", block_text):
         binary = match.group(1)
         preceding = block_text[: match.start()]

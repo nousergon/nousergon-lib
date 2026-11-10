@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 class _BinRecord(TypedDict, total=False):
@@ -41,6 +42,7 @@ class _BinRecord(TypedDict, total=False):
     n: int
     mean_pred: float     # mean predicted probability in the bin
     hit_rate: float      # empirical P(y=1) in the bin
+    dropped_reason: str
 
 
 class ECEResult(TypedDict, total=False):
@@ -54,11 +56,11 @@ class ECEResult(TypedDict, total=False):
 
 
 def expected_calibration_error(
-    predicted_probs: np.ndarray | list[float],
-    actual_binary: np.ndarray | list[float],
+    predicted_probs: NDArray[np.generic] | list[float],
+    actual_binary: NDArray[np.generic] | list[float],
     *,
     n_bins: int = 10,
-    bin_edges: np.ndarray | list[float] | None = None,
+    bin_edges: NDArray[np.generic] | list[float] | None = None,
     min_bin_n: int = 0,
     min_samples: int = 1,
 ) -> ECEResult:
@@ -146,7 +148,7 @@ def expected_calibration_error(
         }
 
         if n_bin < min_bin_n:
-            record["dropped_reason"] = f"n<{min_bin_n}"  # type: ignore[typeddict-unknown-key]
+            record["dropped_reason"] = f"n<{min_bin_n}"
             dropped.append(record)
             continue
 
