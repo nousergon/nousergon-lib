@@ -118,10 +118,18 @@ def test_staging_has_no_fixed_boxes_and_a_lower_llm_cap():
     assert 0 < staging.llm_cap_usd < prod.llm_cap_usd
 
 
+#: Roles staging may run at prod's own time. The offset exists so a staging job never
+#: competes with prod's same job for spot capacity; prod's trader session runs on the
+#: executor box, not spot, and staging's must trade the same session (from the open).
+SAME_TIME_AS_PROD = frozenset({"trader_session"})
+
+
 def test_staging_schedules_are_offset_from_prod():
     prod, staging = env.resolve("prod"), env.resolve("staging")
     for role in staging.roles("schedules_et"):
         assert role in prod.roles("schedules_et"), f"staging schedule {role!r} has no prod counterpart"
+        if role in SAME_TIME_AS_PROD:
+            continue
         assert staging.schedule_et(role) != prod.schedule_et(role), f"{role} runs at the same time as prod"
 
 
