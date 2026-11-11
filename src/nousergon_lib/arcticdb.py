@@ -30,14 +30,40 @@ import gc
 import logging
 import os
 import sys
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
 
     import pandas as pd
-    from arcticdb.version_store.library import Library, VersionedItem
+    from arcticdb.version_store.library import Library, ReadRequest, VersionedItem
+
+
+class _OpenedArctic(Protocol):
+    """The ``Arctic`` handle this module actually uses."""
+
+    def get_library(self, name: str, *, create_if_missing: bool = False) -> Library: ...
+
+
+class _ArcticModule(Protocol):
+    """Attributes touched on a lazily imported ``arcticdb`` module."""
+
+    Arctic: Callable[[str], _OpenedArctic]
+    ReadRequest: Callable[..., ReadRequest]
+    DataError: type[object]
+
+
+class _S3Body(Protocol):
+    def read(self) -> bytes: ...
+
+
+class _S3ObjectResponse(Protocol):
+    def __getitem__(self, key: str) -> _S3Body: ...
+
+
+class _S3Client(Protocol):
+    def get_object(self, *, Bucket: str, Key: str) -> _S3ObjectResponse: ...
 
 log = logging.getLogger(__name__)
 
@@ -213,7 +239,7 @@ def _apply_loaded_io_threads(chosen: str) -> None:
     set_config_int(IO_THREADS_CONFIG_KEY, threads)
 
 
-def _import_arcticdb():
+def _import_arcticdb() -> _ArcticModule:
     """Lazy import helper with a uniform error message."""
     configure_arcticdb_io_threads()
     try:
@@ -224,10 +250,10 @@ def _import_arcticdb():
             "nousergon-lib[arcticdb] or add arcticdb to the deploy "
             f"image: {exc}"
         ) from exc
-    return adb
+    return cast("_ArcticModule", adb)
 
 
-def open_arctic(bucket: str, *, region: str | None = None):
+def open_arctic(bucket: str, *, region: str | None = None) -> _OpenedArctic:
     """Return an ``arcticdb.Arctic`` instance pointed at ``bucket``.
 
     Raises ``RuntimeError`` if ``arcticdb`` is not installed.
@@ -316,8 +342,8 @@ def read_settled_only(
     symbol: str,
     *,
     region: str | None = None,
-    as_of=None,
-    **read_kwargs,
+    as_of: int | str | pd.Timestamp | None = None,
+    **read_kwargs: Any,  # pyright: ignore[reportExplicitAny]  # forwarded unchanged to Library.read
 ) -> pd.DataFrame | None:
     """THE read-path chokepoint for a published/final-report price read
     (config#2459 scope item 2).
@@ -405,13 +431,13 @@ def read_settled_only(
 
 
 def write_correction(
-    lib,
+    lib: Library,
     symbol: str,
     df: pd.DataFrame,
     *,
     reason: str,
     source: str,
-    correction_time=None,
+    correction_time: pd.Timestamp | None = None,
 ) -> VersionedItem:
     """Write a post-hoc correction to a previously-published settled
     value as a NEW ArcticDB version — never an in-place overwrite
@@ -473,7 +499,7 @@ def write_correction(
 
 
 def _load_constituent_membership(
-    bucket: str, *, s3_client=None
+    bucket: str, *, s3_client: _S3Client | None = None
 ) -> dict[str, list[str]]:
     """Read the PIT constituent membership map from S3.
 
@@ -496,7 +522,7 @@ def _load_constituent_membership(
             raise RuntimeError(
                 f"boto3 is required to read {HISTORICAL_CONSTITUENTS_KEY}: {exc}"
             ) from exc
-        s3_client = boto3.client("s3")
+        s3_client = cast("_S3Client", boto3.client("s3"))  # pyright: ignore[reportUnknownMemberType]
 
     import json
 
@@ -576,7 +602,7 @@ def get_universe_symbols(
     *,
     as_of: date | None = None,
     region: str | None = None,
-    s3_client=None,
+    s3_client: _S3Client | None = None,
 ) -> set[str]:
     """Return the set of universe symbols, optionally as-of a past date.
 
@@ -648,12 +674,12 @@ _SLIM_EQUIVALENT_LOOKBACK_DAYS = 730
 
 
 def _load_arctic_frames(
-    lib,
-    symbols,
+    lib: Library,
+    symbols: Iterable[str],
     *,
     lookback_days: int,
     end: pd.Timestamp | str | None,
-    columns,
+    columns: Sequence[str] | None,
     label: str,
 ) -> dict[str, pd.DataFrame]:
     """Shared read core for the universe + macro ArcticDB readers.
@@ -726,14 +752,17 @@ def _load_arctic_frames(
         end_ts = end_ts.tz_localize(None)
     start_ts = end_ts - pd.Timedelta(days=lookback_days)
 
-    def _normalize(df):
+    def _normalize(df: pd.DataFrame | None) -> pd.DataFrame | None:
         if df is None or df.empty:
             return None
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         if df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-        return df[~df.index.duplicated(keep="last")].sort_index()
+        return cast(
+            "pd.DataFrame",
+            df[~df.index.duplicated(keep="last")].sort_index(),  # pyright: ignore[reportUnknownMemberType]
+        )
 
     requests = [
         adb.ReadRequest(
@@ -763,16 +792,13 @@ def _load_arctic_frames(
     total = len(requests)
     while start < total:
         chunk_reqs = requests[start : start + READ_BATCH_CHUNK_SIZE]
-        # ``symbols`` and ``lib`` are the untyped ArcticDB boundary. The cast
-        # keeps the rest of the chunk loop on known types; the ignores are the
-        # same unknown-member gap the single read_batch call already had.
-        chunk_syms = cast(
-            "list[str]",
-            symbols[start : start + READ_BATCH_CHUNK_SIZE],
-        )
+        chunk_syms = symbols[start : start + READ_BATCH_CHUNK_SIZE]
+        # lazy=False (the default) returns a list. The union also includes
+        # LazyDataFrameCollection, which this call never requests.
+        # list is invariant, so list[ReadRequest] is not list[str | ReadRequest].
         results = cast(
             "list[object]",
-            lib.read_batch(chunk_reqs),  # pyright: ignore[reportUnknownMemberType]
+            lib.read_batch(chunk_reqs),  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         )
         res: object | None = None
         for sym, res in zip(chunk_syms, results):
@@ -818,10 +844,10 @@ def _load_arctic_frames(
 def load_universe_ohlcv(
     bucket: str,
     *,
-    symbols=None,
+    symbols: Iterable[str] | None = None,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
     end: pd.Timestamp | str | None = None,
-    columns=None,
+    columns: Sequence[str] | None = None,
     region: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load a ticker -> OHLCV DataFrame dict from the ArcticDB **universe** lib.
@@ -878,11 +904,11 @@ def load_universe_ohlcv(
 
 def load_macro_series(
     bucket: str,
-    symbols,
+    symbols: Iterable[str],
     *,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
     end: pd.Timestamp | str | None = None,
-    columns=None,
+    columns: Sequence[str] | None = None,
     region: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load a symbol -> OHLCV DataFrame dict from the ArcticDB **macro** lib.
