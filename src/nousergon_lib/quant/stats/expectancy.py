@@ -23,10 +23,12 @@ Pure-compute. Operates on a returns array; no I/O.
 from __future__ import annotations
 
 import logging
-from typing import TypedDict, cast
+from collections.abc import Iterable
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +37,15 @@ class ExpectancyResult(TypedDict, total=False):
     status: str
     n: int
     hit_rate: float
-    avg_win: float
+    avg_win: float | None
     avg_loss: float  # magnitude (positive number)
-    win_loss_ratio: float
+    win_loss_ratio: float | None
     expectancy: float
-    expectancy_per_unit_loss: float  # expectancy / avg_loss; the "R-multiple" expectancy
+    expectancy_per_unit_loss: float | None  # expectancy / avg_loss; the "R-multiple" expectancy
 
 
 def compute_expectancy(
-    returns: pd.Series | np.ndarray,
+    returns: pd.Series | NDArray[np.generic],
     threshold: float = 0.0,
     min_samples: int = 10,
 ) -> ExpectancyResult:
@@ -97,11 +99,11 @@ def compute_expectancy(
             "status": "no_wins",
             "n": n,
             "hit_rate": 0.0,
-            "avg_win": None,  # type: ignore[typeddict-item]
+            "avg_win": None,
             "avg_loss": float(-losses.mean()) if losses.size else 0.0,
-            "win_loss_ratio": None,  # type: ignore[typeddict-item]
+            "win_loss_ratio": None,
             "expectancy": float(excess.mean()),
-            "expectancy_per_unit_loss": None,  # type: ignore[typeddict-item]
+            "expectancy_per_unit_loss": None,
         }
 
     if losses.size == 0:
@@ -111,9 +113,9 @@ def compute_expectancy(
             "hit_rate": 1.0,
             "avg_win": float(wins.mean()),
             "avg_loss": 0.0,
-            "win_loss_ratio": None,  # type: ignore[typeddict-item]
+            "win_loss_ratio": None,
             "expectancy": float(excess.mean()),
-            "expectancy_per_unit_loss": None,  # type: ignore[typeddict-item]
+            "expectancy_per_unit_loss": None,
         }
 
     avg_win = float(wins.mean())
@@ -128,10 +130,14 @@ def compute_expectancy(
         "hit_rate": hit_rate,
         "avg_win": avg_win,
         "avg_loss": avg_loss,
-        "win_loss_ratio": win_loss_ratio,  # type: ignore[typeddict-item]
+        "win_loss_ratio": win_loss_ratio,
         "expectancy": expectancy,
-        "expectancy_per_unit_loss": epul,  # type: ignore[typeddict-item]
+        "expectancy_per_unit_loss": epul,
     }
+
+
+class _GroupableFrame(Protocol):
+    def groupby(self, by: str) -> Iterable[tuple[object, pd.DataFrame]]: ...
 
 
 def compute_expectancy_by_group(
@@ -154,7 +160,8 @@ def compute_expectancy_by_group(
     if group_col not in df.columns:
         raise KeyError(f"group_col {group_col!r} not in dataframe")
     out: dict[str, ExpectancyResult] = {}
-    for group_value, sub in df.groupby(group_col):
+    # pandas ships no stubs here; describe the group iterator at this boundary.
+    for group_value, sub in cast(_GroupableFrame, df).groupby(group_col):
         # return_col is plain str (not a literal), so pyright can't
         # statically rule out DataFrame.__getitem__'s duplicate-column
         # -label overload; it was confirmed present in df.columns above,
