@@ -16,6 +16,9 @@ Using this module guarantees that:
   stays importable on consumers that don't install the ``[arcticdb]``
   optional extra (e.g. lightweight CLI tools that only use the logging
   submodule).
+- :func:`configure_arcticdb_io_threads` sizes the VersionStore I/O pool
+  before that import. An explicit ``ARCTICDB_VersionStore_NumIOThreads_int``
+  already in the environment is left alone.
 
 Requires the ``arcticdb`` optional extra
 (``nousergon-lib[arcticdb]``) to actually call any function here.
@@ -23,8 +26,10 @@ Requires the ``arcticdb`` optional extra
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
+import sys
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast
 
@@ -143,8 +148,74 @@ def arctic_uri(bucket: str, *, region: str | None = None) -> str:
     )
 
 
+# ArcticDB reads ARCTICDB_* once, inside its own import
+# (``set_config_from_env_vars``). On a small host the default I/O pool is
+# about 1.5x the CPU count — 3 threads where a scanner measured 150 symbols
+# at 45-47s, and 5-6s at 32. ``setdefault`` so a value already in the
+# environment always wins. The config API outranks the environment, so once
+# arcticdb is loaded we push that same winning value through
+# ``set_config_int`` and never a different default.
+IO_THREADS_ENV = "ARCTICDB_VersionStore_NumIOThreads_int"
+IO_THREADS_CONFIG_KEY = "VersionStore.NumIOThreads"
+DEFAULT_IO_THREADS = 32
+
+# nousergon-data ``UNIVERSE_CHUNK_SIZE`` after the 2026-05-11 daily_append
+# OOM: one read_batch of ~900 full histories held the process over the
+# 2GB trading host. 150 symbols is the batch the 32-thread measurement used.
+READ_BATCH_CHUNK_SIZE = 150
+
+
+def configure_arcticdb_io_threads(n: int = DEFAULT_IO_THREADS) -> str:
+    """Set the ArcticDB I/O pool unless the environment already did.
+
+    Does not import arcticdb when nothing has imported it yet. Call this
+    before the first ``import arcticdb`` so the import-time env scan picks
+    the value up. When arcticdb is already
+    loaded, the same winning value is applied with ``set_config_int`` —
+    libraries opened after this call read the pool size at construction.
+    An explicit ``ARCTICDB_VersionStore_NumIOThreads_int`` is returned
+    unchanged and is what gets pushed; ``n`` is only the fallback.
+
+    Returns the value now in the environment.
+    """
+    existing = os.environ.get(IO_THREADS_ENV)
+    if existing is None:
+        os.environ[IO_THREADS_ENV] = str(int(n))
+    chosen = os.environ[IO_THREADS_ENV]
+    _apply_loaded_io_threads(chosen)
+    return chosen
+
+
+def _apply_loaded_io_threads(chosen: str) -> None:
+    """Push ``chosen`` into a running interpreter. No-op before import."""
+    loaded = sys.modules.get("arcticdb")
+    # A stub module (tests) has no ``__path__``. Importing ``arcticdb.config``
+    # then would bind the real package's setter if a previous test had loaded
+    # it, and overwrite that process's pool.
+    if loaded is None or getattr(loaded, "__path__", None) is None:
+        return
+    try:
+        threads = int(chosen)
+    except ValueError:
+        log.warning(
+            "ArcticDB IO thread env %s=%r is not an int; leaving the loaded pool unchanged",
+            IO_THREADS_ENV,
+            chosen,
+        )
+        return
+    try:
+        from arcticdb.config import (  # pyright: ignore[reportMissingTypeStubs]
+            set_config_int,  # pyright: ignore[reportUnknownVariableType]
+        )
+    except ImportError:
+        log.debug("arcticdb.config.set_config_int unavailable", exc_info=True)
+        return
+    set_config_int(IO_THREADS_CONFIG_KEY, threads)
+
+
 def _import_arcticdb():
     """Lazy import helper with a uniform error message."""
+    configure_arcticdb_io_threads()
     try:
         import arcticdb as adb
     except ImportError as exc:
@@ -597,14 +668,16 @@ def _load_arctic_frames(
     / empty frames are logged at WARNING and dropped — the caller decides
     how to handle a partial load.
 
-    ONE ``read_batch`` call, not N threaded ``read`` calls
-    (alpha-engine-config-I7812). ArcticDB's batch API pipelines the whole
-    request set through its own C++ IO pool, which issues the object-store
+    ``read_batch`` in chunks of :data:`READ_BATCH_CHUNK_SIZE`, not N threaded
+    ``read`` calls (alpha-engine-config-I7812). ArcticDB's batch API pipelines
+    a request set through its own C++ IO pool, which issues the object-store
     GETs with far more concurrency than a Python ``ThreadPoolExecutor`` of
     per-symbol ``lib.read`` calls and pays the per-symbol index lookup once
-    per batch rather than once per thread hop. Measured 2026-08-20 against
-    the live ``alpha-engine-research`` universe library, 905 symbols,
-    ``columns=["Close"]``:
+    per batch rather than once per thread hop. The pool size is set by
+    :func:`configure_arcticdb_io_threads` (default 32; an explicit
+    ``ARCTICDB_VersionStore_NumIOThreads_int`` wins) before arcticdb is
+    imported. Measured 2026-08-20 against the live ``alpha-engine-research``
+    universe library, 905 symbols, ``columns=["Close"]``:
 
     ==========================  ==========  =========
     read shape                  569d window 65d window
@@ -625,6 +698,13 @@ def _load_arctic_frames(
     argument would describe nothing. No fleet call site passed it (grepped
     2026-08-20 across all repos under ``~/Development``); the two public
     wrappers dropped it in the same commit.
+
+    Chunks of :data:`READ_BATCH_CHUNK_SIZE` (150) match nousergon-data's
+    ``UNIVERSE_CHUNK_SIZE`` after the 2026-05-11 daily_append OOM. Each
+    chunk's ``read_batch`` result is dropped, and ``gc.collect()`` runs,
+    before the next chunk is requested. The normalized frames accumulate
+    in the returned dict; what must not accumulate is the raw batch payload.
+    A universe smaller than one chunk is still a single ``read_batch``.
     """
     import pandas as pd  # lazy: only needed with the [arcticdb] extra
 
@@ -669,32 +749,60 @@ def _load_arctic_frames(
     # matched explicitly or a failed symbol would be treated as a frame.
     # A failure of the batch CALL itself still raises and is not caught:
     # that is the whole store being unreachable, not a partial load.
-    results = lib.read_batch(requests)
+    # Chunks keep that contract and release each raw result before the
+    # next read_batch, so a full universe cannot pin every payload at once.
     data_error = getattr(adb, "DataError", ())
 
     out: dict[str, pd.DataFrame] = {}
     errors = 0
-    for sym, res in zip(symbols, results):
-        if isinstance(res, data_error):
-            log.warning(
-                "ArcticDB %s read failed for %s: %s",
-                label,
-                sym,
-                getattr(res, "exception_string", None) or res,
-            )
-            errors += 1
-            continue
-        try:
-            df = _normalize(getattr(res, "data", None))
-        except Exception as exc:  # noqa: BLE001 - partial-load contract
-            log.warning("ArcticDB %s normalize failed for %s: %s", label, sym, exc)
-            errors += 1
-            continue
-        if df is None:
-            log.warning("ArcticDB %s returned empty frame for %s", label, sym)
-            errors += 1
-            continue
-        out[sym] = df
+    if READ_BATCH_CHUNK_SIZE < 1:
+        raise ValueError(
+            f"READ_BATCH_CHUNK_SIZE must be >= 1, got {READ_BATCH_CHUNK_SIZE}"
+        )
+    start = 0
+    total = len(requests)
+    while start < total:
+        chunk_reqs = requests[start : start + READ_BATCH_CHUNK_SIZE]
+        # ``symbols`` and ``lib`` are the untyped ArcticDB boundary. The cast
+        # keeps the rest of the chunk loop on known types; the ignores are the
+        # same unknown-member gap the single read_batch call already had.
+        chunk_syms = cast(
+            "list[str]",
+            symbols[start : start + READ_BATCH_CHUNK_SIZE],
+        )
+        results = cast(
+            "list[object]",
+            lib.read_batch(chunk_reqs),  # pyright: ignore[reportUnknownMemberType]
+        )
+        res: object | None = None
+        for sym, res in zip(chunk_syms, results):
+            if isinstance(res, data_error):
+                log.warning(
+                    "ArcticDB %s read failed for %s: %s",
+                    label,
+                    sym,
+                    getattr(res, "exception_string", None) or res,
+                )
+                errors += 1
+                continue
+            try:
+                df = _normalize(getattr(res, "data", None))
+            except Exception as exc:  # noqa: BLE001 - partial-load contract
+                log.warning("ArcticDB %s normalize failed for %s: %s", label, sym, exc)
+                errors += 1
+                continue
+            if df is None:
+                log.warning("ArcticDB %s returned empty frame for %s", label, sym)
+                errors += 1
+                continue
+            out[sym] = df
+        # The next ``results = read_batch(...)`` evaluates the call while the
+        # previous name is still bound. Drop it first, then collect, so the
+        # chunk's BlockManager cycles are gone before the next payload lands.
+        del res, results, chunk_reqs
+        start += READ_BATCH_CHUNK_SIZE
+        if start < total:
+            gc.collect()
 
     log.info(
         "%s: %d symbols OK, %d errors (window %s..%s)",

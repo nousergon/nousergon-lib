@@ -130,6 +130,9 @@ class BasePreflight:
         Requires the ``arcticdb`` optional extra
         (``nousergon-lib[arcticdb]``).
         """
+        from nousergon_lib.arcticdb import configure_arcticdb_io_threads
+
+        configure_arcticdb_io_threads()
         try:
             import arcticdb as adb
             import pandas as pd
@@ -265,6 +268,9 @@ class BasePreflight:
         from concurrent.futures import ThreadPoolExecutor
         from datetime import date, timedelta
 
+        from nousergon_lib.arcticdb import configure_arcticdb_io_threads
+
+        configure_arcticdb_io_threads()
         try:
             import arcticdb as adb
             import pandas as pd
