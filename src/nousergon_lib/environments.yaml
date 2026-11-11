@@ -49,9 +49,9 @@ environments:
       data_collection: nousergon-data-collection
       cloudtrail: fleet-cloudtrail
 
-    # Postgres state (plan section 5). null = not provisioned yet (S-10, I12498).
+    # Postgres state (plan section 5). Neon project crucible-state, created 2026-11-06 (S-10, I12498).
     state_store:
-      neon_branch: null
+      neon_branch: main
 
     # Role -> SNS topic NAME; `env.topic_arn(role)` builds the ARN.
     topics:
@@ -134,9 +134,9 @@ environments:
       crucible: crucible-v2
       data_collection: nousergon-data-collection
 
-    # Neon staging branch: not provisioned yet (S-10, I12498).
+    # Neon staging branch of crucible-state, created 2026-11-06 (S-10, I12498).
     state_store:
-      neon_branch: null
+      neon_branch: staging
 
     # Muted pages: every page role resolves to the stack's zero-subscriber
     # PagesMutedTopic, so nothing in staging can page (plan: "Alerts: no

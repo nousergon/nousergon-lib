@@ -37,8 +37,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Protocol, SupportsFloat, cast, runtime_checkable
 
 from .retrieval import RetrievalResult
 
@@ -125,6 +126,10 @@ class Reranker(Protocol):
 # ── Cross-encoder (local model) ─────────────────────────────────────────────
 
 
+class _CrossEncoderModel(Protocol):
+    def predict(self, sentences: list[list[str]]) -> Iterable[SupportsFloat]: ...
+
+
 @dataclass
 class CrossEncoderReranker:
     """Local cross-encoder reranker.
@@ -162,7 +167,9 @@ class CrossEncoderReranker:
             # torch+transformers dep), matches test.yml's install-skip
             # precedent (sentence-transformers / flow-doctor are both
             # deferred until first call / mocked in tests).
-            from sentence_transformers import CrossEncoder  # pyright: ignore[reportMissingImports]
+            from sentence_transformers import (  # pyright: ignore[reportMissingImports]
+                CrossEncoder,  # pyright: ignore[reportUnknownVariableType]  # Optional dependency has no typed factory.
+            )
         except ImportError as exc:
             raise ImportError(
                 "CrossEncoderReranker requires sentence-transformers. "
@@ -170,7 +177,9 @@ class CrossEncoderReranker:
                 "(Python >=3.11 only; no patched dependency set supports 3.10)"
             ) from exc
         logger.info("Loading cross-encoder model: %s", self.model_name)
-        self._model = CrossEncoder(self.model_name)
+        # The optional model exposes predict(), but its factory is untyped.
+        factory = cast(Callable[[str], _CrossEncoderModel], CrossEncoder)
+        self._model = factory(self.model_name)
         return self._model
 
     def rerank(
@@ -193,13 +202,14 @@ class CrossEncoderReranker:
                 uncached_pairs.append((idx, cand.content))
 
         if uncached_pairs:
-            model = self._ensure_model()
+            # Tests and the optional library supply the same predict interface.
+            model = cast(_CrossEncoderModel, self._ensure_model())
             pair_inputs = [[query, content] for _, content in uncached_pairs]
             # ``predict`` returns one logit per pair; higher = more relevant.
             # Type cast through ``list(map(float, ...))`` keeps tests
             # happy when a numpy array is returned by the real model and
             # when a plain list is returned by the test fake.
-            raw = model.predict(pair_inputs)  # type: ignore[attr-defined]
+            raw = model.predict(pair_inputs)
             fresh_scores = list(map(float, raw))
             for (idx, _content), score in zip(uncached_pairs, fresh_scores):
                 scores[idx] = score
