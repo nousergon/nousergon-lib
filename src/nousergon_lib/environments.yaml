@@ -106,9 +106,10 @@ environments:
       alerts_sweep: {days: DAILY, time_et: "21:00"}
       heartbeat: {days: SAT, time_et: "17:00"}
       # Not a stack schedule: prod's trader session is crucible-executor's
-      # alpha-engine-trader-session.timer (Mon..Fri 10:45 America/New_York).
+      # alpha-engine-trader-session.timer (Mon..Fri 09:30 America/New_York,
+      # the open, since crucible-executor#659 on 2026-11-10).
       # Declared so staging's trader_session has its prod counterpart (S-21).
-      trader_session: {days: MON-FRI, time_et: "10:45"}
+      trader_session: {days: MON-FRI, time_et: "09:30"}
 
   # Staging (epic alpha-engine-config-I12488; plan section 3 "What runs in
   # staging"). Same role names as prod, so code resolves the same role in
@@ -190,4 +191,8 @@ environments:
       # The staging trader session (S-21, I12509): simulated fills, never
       # routes. Prod's runs from the executor box's timer, not the stack, so
       # nous-ergon-ops crucible_v2_staging_schedules.py declares this schedule.
-      trader_session: {days: MON-FRI, time_et: "11:00"}
+      # Same time as prod, the open (Brian 2026-11-11): the session must trade
+      # the day prod trades. It runs on staging's own spot box, while prod's
+      # runs on the executor box, so the two never compete for capacity and
+      # the after-prod offset of the stack jobs does not apply.
+      trader_session: {days: MON-FRI, time_et: "09:30"}

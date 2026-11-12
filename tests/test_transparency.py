@@ -1262,3 +1262,25 @@ def test_every_row_declares_a_producer():
         f"rows with no `producer:` field: {missing} — every row must name "
         "its producer so a retired one is documented, not rediscovered"
     )
+
+
+def test_predictor_decisions_is_gated_on_the_retired_v1_saturday_schedule():
+    """alpha-engine-config-I13597: `predictor/metrics/latest.json` was written
+    only by the v1 weekly pass (trigger `alpha-engine-saturday`, DISABLED since
+    2026-10-28; v1 retired 2026-11-10). With the rule DISABLED the row is
+    GATED and costs no S3 call; if it were re-enabled the real freshness check
+    runs again."""
+    inv = transparency.load_inventory()
+    row = next(r for r in inv["inventory"] if r["id"] == "predictor_decisions")
+    assert row["gated_on_events_rule"] == "alpha-engine-saturday"
+    assert row["gate_reason"]
+    s3 = MagicMock()
+    gated = transparency._check_row(
+        dict(row), date(2026, 11, 12), s3, MagicMock(), _events("DISABLED"),
+    )
+    assert gated.status == "gated"
+    s3.get_object.assert_not_called()
+    live = transparency._check_row(
+        dict(row), date(2026, 11, 12), MagicMock(), MagicMock(), _events("ENABLED"),
+    )
+    assert live.status != "gated"
