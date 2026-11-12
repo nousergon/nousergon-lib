@@ -323,11 +323,17 @@ def run(
     # Without the profile there is no owner NAME to judge by, so an agent
     # commit whose author or committer resolved to no login (an email linked
     # to no account) was judged by nothing at all (codex 2774b7ac6e9626fe).
+    # Any unread owner leaves that owner's name unknown, whatever names the
+    # readable profiles supplied (codex a834056337675e84). A GitHub-synthesised
+    # commit is exempt from the author/committer check in findings(), so it is
+    # not left unjudged by a missing name either (codex bd60ea81f11500a9).
     unjudged = [
         c for c in commits
-        if is_agent_commit(c.message) and (c.author_login is None or c.committer_login is None)
+        if is_agent_commit(c.message)
+        and not is_github_synthesised(c)
+        and (c.author_login is None or c.committer_login is None)
     ]
-    if unread and not found and not owner.names and unjudged:
+    if unread and not found and unjudged:
         raise VerifyError(
             f"could not read the owner profile for {', '.join(unread)}, and agent-session "
             f"commit(s) {', '.join(c.sha[:12] for c in unjudged)} carry an author or committer "
