@@ -196,9 +196,13 @@ def configure_arcticdb_io_threads(n: int = DEFAULT_IO_THREADS) -> str:
 
     Does not import arcticdb when nothing has imported it yet. Call this
     before the first ``import arcticdb`` so the import-time env scan picks
-    the value up. When arcticdb is already
-    loaded, the same winning value is applied with ``set_config_int`` —
-    libraries opened after this call read the pool size at construction.
+    the value up. When arcticdb is already loaded, the same winning value
+    is applied with ``set_config_int``. ArcticDB reads that value when a
+    Library is constructed and does not resize a Library that already
+    exists, so a handle opened before this call keeps the pool it was
+    built with. :func:`load_universe_ohlcv` and :func:`load_macro_series`
+    call this before they construct their own handle, including when the
+    caller imported arcticdb earlier in the process.
     An explicit ``ARCTICDB_VersionStore_NumIOThreads_int`` is returned
     unchanged and is what gets pushed; ``n`` is only the fallback.
 
@@ -727,10 +731,12 @@ def _load_arctic_frames(
 
     Chunks of :data:`READ_BATCH_CHUNK_SIZE` (150) match nousergon-data's
     ``UNIVERSE_CHUNK_SIZE`` after the 2026-05-11 daily_append OOM. Each
-    chunk's ``read_batch`` result is dropped, and ``gc.collect()`` runs,
-    before the next chunk is requested. The normalized frames accumulate
-    in the returned dict; what must not accumulate is the raw batch payload.
-    A universe smaller than one chunk is still a single ``read_batch``.
+    normalized frame is copied into the result, the raw ``read_batch``
+    result is dropped, and ``gc.collect()`` runs before the next chunk.
+    That bounds the live raw payload to one chunk. It does not bound the
+    returned dict (every frame is retained), ArcticDB's decompression
+    buffers, or the library's storage connections. A universe smaller
+    than one chunk is still a single ``read_batch`` and does not collect.
     """
     import pandas as pd  # lazy: only needed with the [arcticdb] extra
 
@@ -821,7 +827,10 @@ def _load_arctic_frames(
                 log.warning("ArcticDB %s returned empty frame for %s", label, sym)
                 errors += 1
                 continue
-            out[sym] = df
+            # Copy detaches the frame from the VersionedItem so dropping the
+            # raw result can release that chunk's payload. The copy is the
+            # object the caller keeps.
+            out[sym] = df.copy()
         # The next ``results = read_batch(...)`` evaluates the call while the
         # previous name is still bound. Drop it first, then collect, so the
         # chunk's BlockManager cycles are gone before the next payload lands.

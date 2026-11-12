@@ -134,6 +134,38 @@ def test_fresh_interpreter_default_is_visible_to_arcticdb():
     assert proc.stdout.strip().splitlines()[-2:] == ["32", "32"]
 
 
+def test_configure_after_an_earlier_import_and_library_updates_the_next_pool():
+    """A Library already constructed keeps its pool. The process config changes.
+
+    ArcticDB reads ``VersionStore.NumIOThreads`` when the Library is created.
+    Importing arcticdb and opening a library first must not stop
+    ``configure_arcticdb_io_threads`` from publishing 32 for the next one.
+    """
+    pytest.importorskip("arcticdb")
+    code = (
+        "import os\n"
+        "import tempfile\n"
+        "from pathlib import Path\n"
+        f"os.environ.pop({_IO_ENV!r}, None)\n"
+        "import arcticdb as adb\n"
+        "from arcticdb.config import get_config_int\n"
+        "before = get_config_int('VersionStore.NumIOThreads')\n"
+        "with tempfile.TemporaryDirectory() as tmp:\n"
+        "    uri = 'lmdb://' + str(Path(tmp) / 'store')\n"
+        "    adb.Arctic(uri).get_library('universe', create_if_missing=True)\n"
+        "from nousergon_lib.arcticdb import configure_arcticdb_io_threads\n"
+        "chosen = configure_arcticdb_io_threads(32)\n"
+        "after = get_config_int('VersionStore.NumIOThreads')\n"
+        "print(f'{before}|{chosen}|{after}')\n"
+    )
+    proc = _fresh(code, _child_env())
+    assert proc.returncode == 0, proc.stderr
+    _before, chosen, after = proc.stdout.strip().splitlines()[-1].split("|")
+    assert chosen == "32"
+    assert after == "32"
+    assert _before != ""  # the pre-configure pool was readable
+
+
 def test_fresh_interpreter_explicit_env_beats_the_default():
     pytest.importorskip("arcticdb")
     code = (
@@ -232,8 +264,11 @@ class _BatchReads:
 def test_read_batch_is_chunked_at_150_and_frames_stay_with_their_symbols(monkeypatch):
     pd = pytest.importorskip("pandas")
     idx = pd.date_range("2025-01-01", periods=2, freq="D")
-    n = ae_arctic.READ_BATCH_CHUNK_SIZE + 1
-    symbols = [f"S{i:04d}" for i in range(n)]
+    # 150 and 151 are literals. Deriving both the fixture and the expected
+    # batch sizes from READ_BATCH_CHUNK_SIZE would stay green if that
+    # constant and the chunk loop drifted together.
+    assert ae_arctic.READ_BATCH_CHUNK_SIZE == 150
+    symbols = [f"S{i:04d}" for i in range(151)]
     frames = {
         sym: pd.DataFrame({"Close": [float(i), float(i) + 0.5]}, index=idx)
         for i, sym in enumerate(symbols)
@@ -260,11 +295,14 @@ def test_read_batch_is_chunked_at_150_and_frames_stay_with_their_symbols(monkeyp
     mod.ReadRequest = lambda **kw: types.SimpleNamespace(**kw)
     mod.DataError = type("DataError", (), {})
     monkeypatch.setitem(sys.modules, "arcticdb", mod)
+    collects = {"n": 0}
+    monkeypatch.setattr(ae_arctic.gc, "collect", lambda: collects.__setitem__("n", collects["n"] + 1))
 
     out = ae_arctic.load_universe_ohlcv(
         "b", symbols=symbols, lookback_days=3650, end="2025-12-31",
     )
-    assert sizes == [ae_arctic.READ_BATCH_CHUNK_SIZE, 1]
+    assert sizes == [150, 1]
+    assert collects["n"] == 1
     assert set(out) == set(symbols)
     for sym, frame in frames.items():
         assert out[sym]["Close"].tolist() == frame["Close"].tolist()
@@ -390,8 +428,8 @@ def test_lmdb_chunked_universe_matches_the_old_read(tmp_path, monkeypatch):
     in_window = pd.bdate_range("2024-06-03", periods=4)
     dup_index = pd.DatetimeIndex(["2024-06-04", "2024-06-04", "2024-06-05"])
     stale = pd.bdate_range("2020-01-02", periods=3)
-    n = ae_arctic.READ_BATCH_CHUNK_SIZE
-    symbols = [f"S{i:04d}" for i in range(n)]
+    assert ae_arctic.READ_BATCH_CHUNK_SIZE == 150
+    symbols = [f"S{i:04d}" for i in range(150)]
     for i, sym in enumerate(symbols):
         close = float(i + 1)
         lib.write(
@@ -416,12 +454,12 @@ def test_lmdb_chunked_universe_matches_the_old_read(tmp_path, monkeypatch):
     assert wrappers["universe"].sizes == [len(requested)]
 
     wrappers["universe"].sizes.clear()
-    monkeypatch.setattr(ae_arctic, "READ_BATCH_CHUNK_SIZE", n)
+    monkeypatch.setattr(ae_arctic, "READ_BATCH_CHUNK_SIZE", 150)
     chunked = ae_arctic.load_universe_ohlcv(
         "local", symbols=requested, lookback_days=lookback, end=end,
     )
-    # sorted: DUP, MISSING, S0000.., STALE. One full chunk, then the tail.
-    assert wrappers["universe"].sizes == [n, len(requested) - n]
+    # sorted: DUP, MISSING, S0000.., STALE. 150 is the literal chunk width.
+    assert wrappers["universe"].sizes == [150, len(requested) - 150]
     _assert_same_frames(pd, chunked, single)
 
     legacy = _legacy_per_symbol(
