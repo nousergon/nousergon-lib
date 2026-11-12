@@ -138,7 +138,29 @@ inventory:
   - id: predictor_decisions
     cadence: daily
     effective_date: 2026-04-01
-    producer: "crucible-predictor — live, daily weekday-SF inference"
+    # GATED on the v1 Saturday schedule, 2026-11-12 (alpha-engine-config-I13597).
+    # `predictor/metrics/latest.json` (l1_ic / l2_ic / confidence_calibration)
+    # was written only by the v1 weekly training/eval pass under
+    # `ne-weekly-freshness-pipeline`, triggered by the EventBridge rule
+    # `alpha-engine-saturday`. That rule has been DISABLED since 2026-10-28
+    # and v1 was retired at the 2026-11-10 v2 cutover; the object was last
+    # written 2026-11-02, so the 8-day freshness assertion failed from
+    # 2026-11-10 and kept `alpha-engine-substrate-aggregate-failures` in ALARM.
+    # Same declared-off treatment as the v1-weekly artifact rows in
+    # alpha-engine-config-I12991: the gate renders GATED (own section, not a
+    # fault), not a silent pass, and clears itself if the rule is re-enabled.
+    #
+    # NOT repointed: measured read-only 2026-11-12, v2 has no equivalent
+    # artifact. `s3://alpha-engine-crucible-v2/crucible/predictions/{date}.json`
+    # is fresh daily (2026-11-11) but carries per-ticker `predicted_alpha`, not
+    # IC or calibration; `scores/{slot}/` and `champions/{slot}/current.json`
+    # are per-arm records with a different shape. Pointing the row there would
+    # either fail its `assert_keys_present` or have to drop the assertions
+    # that define the row. A v2 IC/calibration row is a new row with its own
+    # producer, not this one.
+    producer: "RETIRED v1 weekly (alpha-engine-saturday DISABLED 2026-10-28; v1 retired at the 2026-11-10 v2 cutover) — crucible-predictor weekly training/eval metrics. No v2 equivalent (see above)."
+    gated_on_events_rule: alpha-engine-saturday
+    gate_reason: "the v1 weekly producer's schedule (alpha-engine-saturday) is DISABLED; v1 retired at the 2026-11-10 v2 cutover (alpha-engine-config-I13597)"
     description: >-
       Per-L1-component IC + L2 IC + confidence calibration + feature
       contributions.
