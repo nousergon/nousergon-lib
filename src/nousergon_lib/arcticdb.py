@@ -770,14 +770,16 @@ def _load_arctic_frames(
             df[~df.index.duplicated(keep="last")].sort_index(),  # pyright: ignore[reportUnknownMemberType]
         )
 
-    requests = [
-        adb.ReadRequest(
-            symbol=sym,
-            date_range=(start_ts, end_ts),
-            columns=list(columns) if columns is not None else None,
+    # list is invariant, so a list[ReadRequest] is not a list[str | ReadRequest].
+    requests: list[str | ReadRequest] = []
+    for sym in symbols:
+        requests.append(
+            adb.ReadRequest(
+                symbol=sym,
+                date_range=(start_ts, end_ts),
+                columns=list(columns) if columns is not None else None,
+            )
         )
-        for sym in symbols
-    ]
     # read_batch returns one result per request, IN REQUEST ORDER, each
     # either a VersionedItem or a DataError describing that symbol's
     # failure. A DataError is returned, never raised — so it must be
@@ -802,9 +804,12 @@ def _load_arctic_frames(
         # lazy=False (the default) returns a list. The union also includes
         # LazyDataFrameCollection, which this call never requests.
         # list is invariant, so list[ReadRequest] is not list[str | ReadRequest].
+        # DataError comes from the untyped extension, so the declared return
+        # is partially unknown. The cast drops the lazy-collection arm this
+        # call never requests.
         results = cast(
             "list[object]",
-            lib.read_batch(chunk_reqs),  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
+            lib.read_batch(chunk_reqs),  # pyright: ignore[reportUnknownMemberType]
         )
         res: object | None = None
         for sym, res in zip(chunk_syms, results):
