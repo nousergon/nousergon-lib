@@ -42,9 +42,9 @@ for REPORTING and for bootstrap selection only. Retirement never consults it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import cast
 
 from .confseq import ConfSeqBound, confidence_sequence
 from .window import ArmSeries, PairedWindow, pair_on_common_window
@@ -83,7 +83,7 @@ class PairVerdict:
     def measurable(self) -> bool:
         return self.window.measurable
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         payload = self.window.to_dict()
         payload["winner"] = self.winner
         payload["loser"] = self.loser
@@ -92,7 +92,7 @@ class PairVerdict:
         return payload
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> PairVerdict:
+    def from_dict(cls, data: Mapping[str, object]) -> PairVerdict:
         """The inverse of :meth:`to_dict`.
 
         ``window`` is reconstructed from the SAME dict — ``to_dict`` starts
@@ -107,9 +107,13 @@ class PairVerdict:
             arm_a=str(data["arm_a"]),
             arm_b=str(data["arm_b"]),
             window=PairedWindow.from_dict(data),
-            bound=ConfSeqBound.from_dict(bound) if bound is not None else None,
-            winner=data.get("winner"),
-            loser=data.get("loser"),
+            bound=(
+                ConfSeqBound.from_dict(cast("Mapping[str, object]", bound))
+                if bound is not None
+                else None
+            ),
+            winner=cast("str | None", data.get("winner")),
+            loser=cast("str | None", data.get("loser")),
             reason=str(data.get("reason") or ""),
         )
 
@@ -130,7 +134,7 @@ class ArmStanding:
     def copeland(self) -> int:
         return self.wins - self.losses
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "arm_id": self.arm_id,
             "wins": self.wins,
@@ -143,18 +147,18 @@ class ArmStanding:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ArmStanding:
+    def from_dict(cls, data: Mapping[str, object]) -> ArmStanding:
         """The inverse of :meth:`to_dict`. ``copeland`` is not a constructor
         argument — it is the ``wins - losses`` property — so it is dropped
         rather than read back; a caller that hand-edited it without touching
         ``wins``/``losses`` cannot smuggle a disagreement into the result."""
         return cls(
             arm_id=str(data["arm_id"]),
-            wins=int(data["wins"]),
-            losses=int(data["losses"]),
-            ties=int(data["ties"]),
-            unmeasurable=int(data["unmeasurable"]),
-            mean_margin=float(data["mean_margin"]),
+            wins=int(cast("int | float | str", data["wins"])),
+            losses=int(cast("int | float | str", data["losses"])),
+            ties=int(cast("int | float | str", data["ties"])),
+            unmeasurable=int(cast("int | float | str", data["unmeasurable"])),
+            mean_margin=float(cast("int | float | str", data["mean_margin"])),
             created_date=str(data["created_date"]),
         )
 
@@ -173,7 +177,7 @@ class PairwiseRanking:
     def losses(self, arm_id: str) -> int:
         return self.standings[arm_id].losses
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "as_of": self.as_of,
             "evidence_mode": self.evidence_mode,
@@ -184,7 +188,7 @@ class PairwiseRanking:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> PairwiseRanking:
+    def from_dict(cls, data: Mapping[str, object]) -> PairwiseRanking:
         """The inverse of :meth:`to_dict`.
 
         ``standings`` is serialised as a LIST ordered by ``ordering``, not a
@@ -193,14 +197,19 @@ class PairwiseRanking:
         ``ordering`` again, so the round trip is exact regardless of dict
         ordering.
         """
-        ordering = tuple(str(a) for a in data.get("ordering") or ())
+        # These container shapes are established at the untyped JSON boundary.
+        ordering = tuple(str(a) for a in cast("Iterable[object]", data.get("ordering") or ()))
         standings = {
-            (s := ArmStanding.from_dict(row)).arm_id: s for row in data.get("standings") or ()
+            (s := ArmStanding.from_dict(row)).arm_id: s
+            for row in cast("Iterable[Mapping[str, object]]", data.get("standings") or ())
         }
         return cls(
             as_of=str(data["as_of"]),
             evidence_mode=str(data["evidence_mode"]),
-            verdicts=tuple(PairVerdict.from_dict(v) for v in data.get("verdicts") or ()),
+            verdicts=tuple(
+                PairVerdict.from_dict(v)
+                for v in cast("Iterable[Mapping[str, object]]", data.get("verdicts") or ())
+            ),
             standings=standings,
             ordering=ordering,
             cycles_present=bool(data["cycles_present"]),
@@ -302,7 +311,7 @@ def rank_pairwise(
     unmeasurable = dict.fromkeys(arms, 0)
     margin_sum = dict.fromkeys(arms, 0.0)
     margin_n = dict.fromkeys(arms, 0)
-    beats: dict[str, set] = {a: set() for a in arms}
+    beats: dict[str, set[str]] = {a: set() for a in arms}
 
     for i, arm_a in enumerate(arms):
         for arm_b in arms[i + 1 :]:
@@ -370,7 +379,7 @@ def rank_pairwise(
     )
 
 
-def _has_cycle(beats: Mapping[str, Any]) -> bool:
+def _has_cycle(beats: Mapping[str, set[str]]) -> bool:
     """True when the beats-relation contains a directed cycle (Condorcet cycle)."""
     WHITE, GREY, BLACK = 0, 1, 2
     colour = dict.fromkeys(beats, WHITE)
