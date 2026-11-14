@@ -84,14 +84,34 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import cache, lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Literal, TypedDict, cast
 
 import yaml
 
 from nousergon_lib.cost_gate import resource_map as resource_map_mod
+from nousergon_lib.cost_gate.resource_map import ActionValue, PolicyStatement, ResourceMapDoc
+
+#: ``(class, subject, path)`` — what one finding is keyed on, so a repeat of the
+#: same finding collapses to one line.
+FindingKey = tuple[str, str, str]
+
+
+class Counts(TypedDict):
+    """What :func:`findings` observed alongside its findings."""
+
+    lines: int
+    schedules: int
+    resources: int
+    clients: int
+    actions: int
+    ungraded_schedules: int
+    ungraded_targets: int
+    actions_context_fallback: int
+    ungraded: list[str]
+    fallback: list[str]
 
 #: Where the packaged, derived SSoT lives.
 BUDGET_PREFIXES_PATH = resource_map_mod.DATA_DIR / "budget_prefixes.yaml"
@@ -271,7 +291,7 @@ class SdkScheduleParseError(RuntimeError):
     same reason."""
 
 
-def parse_sdk_schedule_calls(text: str) -> list:
+def parse_sdk_schedule_calls(text: str) -> list[tuple[int, int]]:
     """Every ``(first_line, last_line)`` span in ``text`` occupied by a REAL
     SDK schedule call site, resolved from Python SYNTAX rather than from text.
 
@@ -298,24 +318,29 @@ def parse_sdk_schedule_calls(text: str) -> list:
     except (SyntaxError, ValueError) as exc:  # ValueError: NUL bytes
         raise SdkScheduleParseError(f"could not parse as Python: {exc}") from exc
 
-    spans: list = []
+    spans: list[tuple[int, int]] = []
 
-    def span(node: ast.AST) -> tuple:
-        first = getattr(node, "lineno", 0)
-        return (first, getattr(node, "end_lineno", None) or first)
+    def span(node: ast.AST) -> tuple[int, int]:
+        first: int = getattr(node, "lineno", 0)
+        last: int | None = getattr(node, "end_lineno", None)
+        return (first, last or first)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            name: str | None = (
+                func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            )
             if name in _SDK_SCHEDULE_METHODS or any(
                 kw.arg == _SDK_SCHEDULE_KWARG for kw in node.keywords
             ):
                 spans.append(span(node))
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            targets: list[ast.expr] = (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
             for target in targets:
-                tname = (
+                tname: str | None = (
                     target.attr if isinstance(target, ast.Attribute)
                     else getattr(target, "id", None)
                 )
@@ -345,7 +370,25 @@ class SsotError(ValueError):
     reads as the gate being broken rather than as the document being wrong."""
 
 
-def load_ssot(path: Path | str | None = None) -> dict:
+def _mapping(value: object, what: str) -> dict[str, object]:
+    """``value`` as a mapping; ``None`` and other empty values read as ``{}``."""
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return cast("dict[str, object]", value)
+    raise SsotError(f"the SSoT's {what} is not a mapping")
+
+
+def _items(value: object, what: str) -> list[object]:
+    """The members of a list, or the keys of a mapping, in the SSoT."""
+    if not value:
+        return []
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        return list(cast("Iterable[object]", value))
+    raise SsotError(f"the SSoT's {what} is neither a list nor a mapping")
+
+
+def load_ssot(path: Path | str | None = None) -> dict[str, object]:
     """The budget-prefix document. Defaults to the one packaged here.
 
     Raises :class:`SsotError` rather than falling back to the packaged copy
@@ -356,9 +399,10 @@ def load_ssot(path: Path | str | None = None) -> dict:
     p = Path(path) if path is not None else BUDGET_PREFIXES_PATH
     if not p.is_file():
         raise SsotError(f"{p} does not exist")
-    doc = yaml.safe_load(p.read_text())
-    if not isinstance(doc, dict):
+    loaded: object = yaml.safe_load(p.read_text())
+    if not isinstance(loaded, dict):
         raise SsotError(f"{p} is not a mapping")
+    doc = cast("dict[str, object]", loaded)
     budgeted, free = approved_prefixes(doc)
     if not budgeted or not free:
         raise SsotError(
@@ -369,7 +413,7 @@ def load_ssot(path: Path | str | None = None) -> dict:
     return doc
 
 
-def approved_prefixes(doc: dict) -> tuple:
+def approved_prefixes(doc: dict[str, object]) -> tuple[dict[str, str], set[str]]:
     """``(prefix -> the budgeted service that covers it, free prefixes)``.
 
     Both come from the SSoT. A prefix in neither map is unbudgeted capability.
@@ -378,40 +422,51 @@ def approved_prefixes(doc: dict) -> tuple:
     see :func:`unapproved_prefixes`. A row without the field is approved, which
     is how every row read before the field was published.
     """
-    budgeted: dict = {}
-    for provider in (doc.get("providers") or {}).values():
-        for svc, row in (provider.get("services") or {}).items():
-            if (row or {}).get("approved", True) is False:
+    budgeted: dict[str, str] = {}
+    for provider in _mapping(doc.get("providers"), "providers").values():
+        services = _mapping(_mapping(provider, "provider").get("services"), "services")
+        for svc, row in services.items():
+            fields = _mapping(row, "service row")
+            if fields.get("approved", True) is False:
                 continue
-            for prefix in ((row or {}).get("iam_prefixes") or []):
+            for prefix in _items(fields.get("iam_prefixes"), "iam_prefixes"):
                 budgeted[str(prefix).lower()] = svc
-    free = {str(p).lower()
-            for p in ((doc.get("capability_gate") or {}).get("free_prefixes") or {})}
+    gate = _mapping(doc.get("capability_gate"), "capability_gate")
+    free = {str(p).lower() for p in _items(gate.get("free_prefixes"), "free_prefixes")}
     return budgeted, free
 
 
-def unapproved_prefixes(doc: dict) -> dict:
+def unapproved_prefixes(doc: dict[str, object]) -> dict[str, str]:
     """``prefix -> service`` for rows published with ``approved: false`` and not
     also covered by an approved row."""
     budgeted, _ = approved_prefixes(doc)
-    out: dict = {}
-    for provider in (doc.get("providers") or {}).values():
-        for svc, row in (provider.get("services") or {}).items():
-            if (row or {}).get("approved", True) is False:
-                for prefix in ((row or {}).get("iam_prefixes") or []):
+    out: dict[str, str] = {}
+    for provider in _mapping(doc.get("providers"), "providers").values():
+        services = _mapping(_mapping(provider, "provider").get("services"), "services")
+        for svc, row in services.items():
+            fields = _mapping(row, "service row")
+            if fields.get("approved", True) is False:
+                for prefix in _items(fields.get("iam_prefixes"), "iam_prefixes"):
                     if str(prefix).lower() not in budgeted:
                         out[str(prefix).lower()] = svc
     return out
 
 
-def free_actions(doc: dict) -> dict:
+def free_actions(doc: dict[str, object]) -> dict[str, list[str]]:
     """``capability_gate.free_actions``: a free prefix listed here is free ONLY
     for these action patterns. Any other action under it is graded against the
     prefix's service line, like any prefix that is not free. Same semantics as
     the private resolver (alpha-engine-config-I11674)."""
-    gate = (doc.get("capability_gate") or {}).get("free_actions") or {}
-    return {str(k).lower(): [str(a) for a in (v if isinstance(v, list) else [v])]
-            for k, v in gate.items()}
+    gate = _mapping(
+        _mapping(doc.get("capability_gate"), "capability_gate").get("free_actions"),
+        "free_actions",
+    )
+    return {str(k).lower(): [str(a) for a in _listed(v)] for k, v in gate.items()}
+
+
+def _listed(value: object) -> list[object]:
+    """``value`` if it is a list, else a one-element list holding it."""
+    return cast("list[object]", value) if isinstance(value, list) else [value]
 
 
 class Approval:
@@ -419,13 +474,13 @@ class Approval:
 
     __slots__ = ("budgeted", "free", "free_actions", "unapproved")
 
-    def __init__(self, doc: dict) -> None:
+    def __init__(self, doc: dict[str, object]) -> None:
         self.budgeted, self.free = approved_prefixes(doc)
         self.free_actions = free_actions(doc)
         self.unapproved = unapproved_prefixes(doc)
 
     @property
-    def wholesale(self) -> set:
+    def wholesale(self) -> set[str]:
         """Prefixes approved for EVERY action — what a client construction, a
         resource or a schedule target may bill to. A free prefix narrowed by
         ``free_actions`` is not in it: a CodeBuild client can call StartBuild."""
@@ -442,8 +497,8 @@ class Approval:
 
 
 @lru_cache(maxsize=4096)
-def _glob_regex(pattern: str) -> re.Pattern:
-    out = []
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    out: list[str] = []
     for ch in pattern:
         if ch == "*":
             out.append(".*")
@@ -504,7 +559,7 @@ def is_wildcard_pattern(pattern: str) -> bool:
     return "*" in svc or "?" in svc
 
 
-def grade_action_pattern(pattern: str, approval: Approval) -> tuple:
+def grade_action_pattern(pattern: str, approval: Approval) -> tuple[str | None, str]:
     """``(issue, service prefix)`` for one granted action pattern; ``issue`` is
     ``None`` when approved, else ``"wildcard"``, ``"unapproved"``,
     ``"narrowed-free"`` or ``"no-line"``."""
@@ -528,7 +583,7 @@ def grade_action_pattern(pattern: str, approval: Approval) -> tuple:
 
 
 def _action_finding(path: str, pattern: str, issue: str, svc: str,
-                    approval: Approval) -> tuple:
+                    approval: Approval) -> tuple[FindingKey, str]:
     if issue == "wildcard":
         return ("action", "*", path), (
             f"{path}: grants `{pattern}` — a wildcard across services, which "
@@ -553,7 +608,7 @@ def _action_finding(path: str, pattern: str, issue: str, svc: str,
     )
 
 
-def _not_action_finding(path: str, excluded: list) -> tuple:
+def _not_action_finding(path: str, excluded: list[str]) -> tuple[FindingKey, str]:
     return ("action", "*", path), (
         f"{path}: grants every action EXCEPT {sorted(excluded)} (Allow + "
         f"NotAction) — that is a wildcard, and it covers every per-request-"
@@ -566,7 +621,7 @@ def _not_action_finding(path: str, excluded: list) -> tuple:
 _HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
 
 
-def added_with_lines(diff: str) -> list:
+def added_with_lines(diff: str) -> list[tuple[str, int, str]]:
     """``[(path, 1-based new-file line number, added line)]`` — additions only.
 
     ``+++ b/path`` is itself a line starting with ``+``; dropping it by prefix
@@ -578,7 +633,7 @@ def added_with_lines(diff: str) -> list:
     are tracked across context lines too, so the caller may pass a diff taken
     at any ``--unified`` width.
     """
-    out: list = []
+    out: list[tuple[str, int, str]] = []
     path = "?"
     lineno = 0
     for raw in diff.splitlines():
@@ -599,7 +654,7 @@ def added_with_lines(diff: str) -> list:
     return out
 
 
-def added_lines(diff: str) -> list:
+def added_lines(diff: str) -> list[tuple[str, str]]:
     """:func:`added_with_lines` without the line numbers."""
     return [(path, text) for path, _, text in added_with_lines(diff)]
 
@@ -644,7 +699,9 @@ def cron_interval_minutes(expr: str) -> int | None:
     return 1440  # a fixed minute AND a fixed hour: at most once a day
 
 
-def _note_ungraded(counts: dict, key: str, detail: str) -> None:
+def _note_ungraded(
+    counts: Counts, key: Literal["ungraded_schedules", "ungraded_targets"], detail: str
+) -> None:
     """Increment ``counts[key]`` (``ungraded_schedules``/``ungraded_targets``)
     and record WHAT could not be read, so the "NOT GRADED" line in the CLI
     output can name it instead of only counting it. A could-not-grade that
@@ -656,7 +713,7 @@ def _note_ungraded(counts: dict, key: str, detail: str) -> None:
     counts["ungraded"].append(detail)
 
 
-def _note_fallback(counts: dict, path: str, reason: str) -> None:
+def _note_fallback(counts: Counts, path: str, reason: str) -> None:
     """Increment ``actions_context_fallback`` and record WHICH file fell back
     and why. The count alone told a caller that some file in the diff was
     graded by the weaker line-level scan without saying which, so the one
@@ -668,7 +725,7 @@ def _note_fallback(counts: dict, path: str, reason: str) -> None:
 
 def _sdk_schedule_is_real(
     path: str,
-    touched: set,
+    touched: set[int],
     root_path: Path | None,
     read_file: Callable[[str], str | None] | None,
 ) -> bool:
@@ -695,10 +752,10 @@ def _sdk_schedule_is_real(
 
 def _grade_gha_crons(
     path: str,
-    lines: list,
+    lines: list[str],
     min_interval: int,
-    found: dict,
-    counts: dict,
+    found: dict[FindingKey, str],
+    counts: Counts,
 ) -> None:
     for line in lines:
         m = _GHA_CRON.match(line)
@@ -740,7 +797,11 @@ def _is_keyed_by_non_action(line: str, match_start: int) -> bool:
 
 
 def _grade_actions_by_line(
-    path: str, lines: list, approval: Approval, found: dict, counts: dict
+    path: str,
+    lines: list[str],
+    approval: Approval,
+    found: dict[FindingKey, str],
+    counts: Counts,
 ) -> None:
     """The pre-context-aware behaviour: every quoted ``prefix:Word`` token on
     an added line is graded, with no regard for whether it sits in an
@@ -753,7 +814,7 @@ def _grade_actions_by_line(
     ``actions_context_fallback`` in :func:`findings`)."""
     for line in lines:
         deny = _DENY_ON_LINE.search(line) is not None
-        keyed_spans = []
+        keyed_spans: list[tuple[int, int]] = []
         for m in _KEYED_ACTION.finditer(line):
             keyed_spans.append(m.span("value"))
             counts["actions"] += 1
@@ -781,7 +842,7 @@ def _grade_actions_by_line(
                 found[k] = msg
 
 
-def _denied_by(pattern: str, denies: list) -> bool:
+def _denied_by(pattern: str, denies: list[PolicyStatement]) -> bool:
     """Is every action *pattern* can match refused by a STANDING Deny in the
     same policy document? Only a standing Deny subtracts (no Condition, no
     NotResource, ``Resource: "*"``) — the private resolver's rule."""
@@ -796,7 +857,12 @@ def _denied_by(pattern: str, denies: list) -> bool:
 
 
 def _grade_actions_structurally(
-    path: str, touched: set, values: list, approval: Approval, found: dict, counts: dict
+    path: str,
+    touched: set[int],
+    values: list[ActionValue],
+    approval: Approval,
+    found: dict[FindingKey, str],
+    counts: Counts,
 ) -> None:
     """Only an ``Action``/``NotAction`` value the diff actually added is
     graded — resolved from the head file's real structure, not from any
@@ -809,13 +875,13 @@ def _grade_actions_structurally(
       * a standing Deny in the same policy document subtracts what it fully
         covers, and nothing narrower subtracts.
     """
-    denies_by_doc: dict = {}
+    denies_by_doc: dict[int, list[PolicyStatement]] = {}
     for av in values:
         st = av.statement
         if st is not None and st.is_standing_deny and st not in denies_by_doc.get(st.document, []):
             denies_by_doc.setdefault(st.document, []).append(st)
 
-    not_action_done: set = set()
+    not_action_done: set[int] = set()
     for av in values:
         if not av.touches(touched):
             continue
@@ -840,13 +906,13 @@ def _grade_actions_structurally(
 
 def _grade_cfn_schedules(
     path: str,
-    touched: set,
+    touched: set[int],
     text: str,
-    known: set,
-    resource_types: dict,
+    known: set[str],
+    resource_types: dict[str, str],
     max_retries: int,
-    found: dict,
-    counts: dict,
+    found: dict[FindingKey, str],
+    counts: Counts,
 ) -> None:
     resources = resource_map_mod.parse_cfn_resources(text)
     if not resources:
@@ -866,8 +932,11 @@ def _grade_cfn_schedules(
         if not props.get("ScheduleExpression"):
             continue
 
-        targets = props.get("Targets")
-        if not isinstance(targets, list):
+        targets_raw = props.get("Targets")
+        targets: list[object]
+        if isinstance(targets_raw, list):
+            targets = cast("list[object]", targets_raw)
+        else:
             single = props.get("Target")
             targets = [single] if isinstance(single, dict) else []
         if not targets:
@@ -887,8 +956,13 @@ def _grade_cfn_schedules(
                 )
                 continue
 
-            retry = target.get("RetryPolicy")
-            attempts = retry.get("MaximumRetryAttempts") if isinstance(retry, dict) else None
+            fields = cast("dict[str, object]", target)
+            retry = fields.get("RetryPolicy")
+            attempts = (
+                cast("dict[str, object]", retry).get("MaximumRetryAttempts")
+                if isinstance(retry, dict)
+                else None
+            )
             if not isinstance(attempts, int) or isinstance(attempts, bool):
                 found[("retry", res.logical_id, path)] = (
                     f"{path}: schedule `{res.logical_id}` declares no "
@@ -905,7 +979,7 @@ def _grade_cfn_schedules(
                 )
 
             prefix = resource_map_mod.resolve_target_service(
-                target.get("Arn"), by_lid, resource_types
+                fields.get("Arn"), by_lid, resource_types
             )
             if prefix is None:
                 _note_ungraded(
@@ -940,13 +1014,13 @@ def _read_head(
 
 def findings(
     diff: str,
-    doc: dict,
+    doc: dict[str, object],
     *,
-    resource_map: dict | None = None,
+    resource_map: ResourceMapDoc | None = None,
     root: Path | str | None = None,
     read_file: Callable[[str], str | None] | None = None,
     repo_visibility: str = "private",
-) -> tuple:
+) -> tuple[list[str], Counts]:
     """Unbudgeted capability the diff ADDS, plus the counts it only observed.
 
     ``root`` is the head checkout. The schedule class reads files from it, and
@@ -961,7 +1035,7 @@ def findings(
     known = approval.wholesale
     rmap = resource_map if resource_map is not None else resource_map_mod.load()
     resource_types = rmap["resource_types"]
-    rules = rmap.get("schedule_rules") or {}
+    rules: dict[str, int] = rmap.get("schedule_rules") or {}
     max_retries = rules.get(
         "max_retry_attempts", resource_map_mod.DEFAULT_MAX_RETRY_ATTEMPTS
     )
@@ -971,8 +1045,8 @@ def findings(
     )
     root_path = Path(root) if root is not None else None
 
-    found: dict = {}
-    counts = {
+    found: dict[FindingKey, str] = {}
+    counts: Counts = {
         "lines": 0, "schedules": 0, "resources": 0, "clients": 0, "actions": 0,
         "ungraded_schedules": 0, "ungraded_targets": 0, "actions_context_fallback": 0,
         # Named detail for every ungraded_schedules/ungraded_targets increment
@@ -987,7 +1061,7 @@ def findings(
     }
     # Per-file, because a schedule is a BLOCK and the resources it names live
     # elsewhere in the same template.
-    by_file: dict = {}
+    by_file: dict[str, tuple[set[int], list[str]]] = {}
 
     for path, lineno, line in added_with_lines(diff):
         counts["lines"] += 1
@@ -1182,8 +1256,8 @@ def resolve_root(root: Path | str) -> Path:
 
 
 def _git(
-    args: list, *, cwd: Path | str | None = None, check: bool = True
-) -> subprocess.CompletedProcess:
+    args: list[str], *, cwd: Path | str | None = None, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     """Run git. ``cwd`` — always ``--root``, resolved by :func:`resolve_root` —
     is the ONLY thing that decides which repo's history this reads.
     ``subprocess.run(cwd=...)`` is used rather than a bare process launch plus
@@ -1252,11 +1326,11 @@ def git_diff(base: str, head: str, root: Path | str | None = None) -> str:
     return _git(["diff", "--unified=0", f"{mb}..{head}"], cwd=root).stdout
 
 
-def load_yaml_doc(path: Path | str, what: str) -> dict:
+def load_yaml_doc(path: Path | str, what: str) -> dict[str, object]:
     """Read an alternate document. Raises rather than falling back to a packaged
     copy: a caller silently graded against a document it did not name would be
     both wrong and impossible to debug from the output."""
-    doc: Any = yaml.safe_load(Path(path).read_text())
+    doc: object = yaml.safe_load(Path(path).read_text())
     if not isinstance(doc, dict):
         raise SsotError(f"--{what} {path} is not a mapping")
-    return doc
+    return cast("dict[str, object]", doc)

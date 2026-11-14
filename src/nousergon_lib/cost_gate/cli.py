@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv: list | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     doc = grade.load_ssot(args.ssot) if args.ssot else grade.load_ssot()
