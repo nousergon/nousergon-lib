@@ -108,6 +108,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 __all__ = [
     "OUTCOME_TOLERANCE",
@@ -596,9 +597,13 @@ def recompute_spread(published: Mapping[str, object]) -> float | None:
     ``insufficient_data`` status. Raises ``ValueError`` on a malformed record
     — a record that cannot be checked must not read as a record that passed.
     """
-    rows = published.get("per_date")
-    if rows is None:
+    raw_rows = published.get("per_date")
+    if raw_rows is None:
         raise ValueError("published seam record has no 'per_date' rows to recompute from")
+    # `published` may be a JSON round-trip of SeamSpread.to_dict() (see the
+    # docstring), so its interior arrives with no static type. The cast names
+    # the shape; the guards below still enforce it at runtime.
+    rows = cast("Sequence[object]", raw_rows)
     if not isinstance(rows, (list, tuple)):
         raise ValueError("published 'per_date' must be a list of rows")
     if not rows:
@@ -606,13 +611,18 @@ def recompute_spread(published: Mapping[str, object]) -> float | None:
 
     spreads: list[float] = []
     for i, row in enumerate(rows):
+        # Same JSON boundary: `row` is still `object` here, so the cast names
+        # the shape while the guard below rejects a non-object row. to_dict
+        # publishes both means as floats, and float(...) below still converts
+        # and validates whatever actually arrived.
+        values = cast("Mapping[str, float]", row)
         if not isinstance(row, Mapping):
             raise ValueError(f"published per_date[{i}] is not an object")
         for field in ("input_mean", "output_mean"):
-            if field not in row:
+            if field not in values:
                 raise ValueError(
                     f"published per_date[{i}] is missing {field!r}; the record does "
                     "not carry enough to be recomputed"
                 )
-        spreads.append(float(row["output_mean"]) - float(row["input_mean"]))
+        spreads.append(float(values["output_mean"]) - float(values["input_mean"]))
     return sum(spreads) / len(spreads)
