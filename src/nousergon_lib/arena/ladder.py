@@ -30,11 +30,11 @@ the answer is no; take it to Brian as a policy amendment.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date as _date
 from datetime import timedelta
-from typing import Any
+from typing import cast
 
 from .window import ArmSeries, span_weeks
 
@@ -57,7 +57,7 @@ class LadderRung:
     end_date: str
     mean_score: float
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "weeks": self.weeks,
             "n_dates": self.n_dates,
@@ -68,16 +68,17 @@ class LadderRung:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> LadderRung:
+    def from_dict(cls, data: Mapping[str, object]) -> LadderRung:
         """The inverse of :meth:`to_dict`. Every field is stored directly —
         none is a computed property — so this is a plain, exact reconstruction."""
+        # The casts recover the known field types at this untyped artifact boundary.
         return cls(
-            weeks=int(data["weeks"]),
-            n_dates=int(data["n_dates"]),
-            n_misses=int(data["n_misses"]),
+            weeks=int(cast(str | int | float, data["weeks"])),
+            n_dates=int(cast(str | int | float, data["n_dates"])),
+            n_misses=int(cast(str | int | float, data["n_misses"])),
             start_date=str(data["start_date"]),
             end_date=str(data["end_date"]),
-            mean_score=float(data["mean_score"]),
+            mean_score=float(cast(str | int | float, data["mean_score"])),
         )
 
 
@@ -102,14 +103,16 @@ class ScoreLadder:
     #: Slot-supplied provenance, dimension -> distinct values. Empty for any
     #: slot that declares none, and ABSENT from documents written before the
     #: field existed — the two are deliberately distinguishable.
-    lineage: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    lineage: Mapping[str, tuple[str, ...]] = field(
+        default_factory=dict[str, tuple[str, ...]]
+    )
 
     @property
     def longest(self) -> LadderRung | None:
         """The full-history rung — the one Brian's ruling calls "the score"."""
         return self.rungs[-1] if self.rungs else None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "arm_id": self.arm_id,
             "as_of": self.as_of,
@@ -121,18 +124,24 @@ class ScoreLadder:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> ScoreLadder:
+    def from_dict(cls, data: Mapping[str, object]) -> ScoreLadder:
         """The inverse of :meth:`to_dict`. Exact: nothing here is lossy."""
+        # The casts recover the known nested shapes at this untyped artifact boundary.
         return cls(
             arm_id=str(data["arm_id"]),
             as_of=str(data["as_of"]),
-            rungs=tuple(LadderRung.from_dict(r) for r in data.get("rungs") or ()),
-            total_weeks=int(data["total_weeks"]),
-            total_dates=int(data["total_dates"]),
-            total_misses=int(data["total_misses"]),
+            rungs=tuple(
+                LadderRung.from_dict(cast(Mapping[str, object], rung))
+                for rung in cast(Iterable[object], data.get("rungs") or ())
+            ),
+            total_weeks=int(cast(str | int | float, data["total_weeks"])),
+            total_dates=int(cast(str | int | float, data["total_dates"])),
+            total_misses=int(cast(str | int | float, data["total_misses"])),
             lineage={
                 str(k): tuple(str(v) for v in values)
-                for k, values in (data.get("lineage") or {}).items()
+                for k, values in cast(
+                    Mapping[object, Iterable[object]], data.get("lineage") or {}
+                ).items()
             },
         )
 
