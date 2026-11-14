@@ -30,12 +30,20 @@ import urllib.request
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
 
 log = logging.getLogger(__name__)
+
+
+class _HTTPResponse(Protocol):
+    def read(self) -> bytes: ...
+
+    def __enter__(self) -> _HTTPResponse: ...
+
+    def __exit__(self, *exc: object) -> None: ...
 
 # Default location for the deploy-time GIT_SHA stamp inside a Lambda
 # image. Stamped by deploy.sh via ``--build-arg GIT_SHA=…`` then COPYed
@@ -53,7 +61,7 @@ class BasePreflight:
     and what went wrong.
     """
 
-    def __init__(self, bucket: str, region: str | None = None):
+    def __init__(self, bucket: str, region: str | None = None) -> None:
         if not bucket:
             raise ValueError("BasePreflight: bucket is required")
         self.bucket = bucket
@@ -130,6 +138,9 @@ class BasePreflight:
         Requires the ``arcticdb`` optional extra
         (``nousergon-lib[arcticdb]``).
         """
+        from nousergon_lib.arcticdb import configure_arcticdb_io_threads
+
+        configure_arcticdb_io_threads()
         try:
             import arcticdb as adb
             import pandas as pd
@@ -265,6 +276,9 @@ class BasePreflight:
         from concurrent.futures import ThreadPoolExecutor
         from datetime import date, timedelta
 
+        from nousergon_lib.arcticdb import configure_arcticdb_io_threads
+
+        configure_arcticdb_io_threads()
         try:
             import arcticdb as adb
             import pandas as pd
@@ -483,7 +497,7 @@ def _read_baked_git_sha(sha_file: Path) -> str | None:
     return sha
 
 
-def _safe_urlopen(req, **kwargs):
+def _safe_urlopen(req: urllib.request.Request | str, **kwargs: Any) -> _HTTPResponse:  # pyright: ignore[reportExplicitAny]
     """urlopen wrapper that fails loudly on any non-https scheme (S310: bandit
     cannot statically prove the URL's scheme, but every call site here builds
     it from a hardcoded https:// base -- this makes that guarantee explicit
@@ -491,7 +505,8 @@ def _safe_urlopen(req, **kwargs):
     url = req.full_url if isinstance(req, urllib.request.Request) else req
     if not url.startswith("https://"):
         raise ValueError(f"refusing non-https URL: {url!r}")
-    return urllib.request.urlopen(req, **kwargs)  # noqa: S310 -- scheme validated above
+    # kwargs are the urlopen options the caller already passed (timeout).
+    return cast("_HTTPResponse", urllib.request.urlopen(req, **kwargs))  # noqa: S310 -- scheme validated above
 
 
 def _fetch_origin_main_sha(
