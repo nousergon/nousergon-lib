@@ -14,13 +14,24 @@ Requires: VOYAGE_API_KEY environment variable.
 from __future__ import annotations
 
 import logging
+from typing import Protocol, cast
+
+
+class _EmbeddingResult(Protocol):
+    embeddings: list[list[float]]
+
+
+class _EmbeddingClient(Protocol):
+    def embed(
+        self, texts: list[str], *, model: str, input_type: str
+    ) -> _EmbeddingResult: ...
 
 logger = logging.getLogger(__name__)
 
-_client = None
+_client: _EmbeddingClient | None = None
 
 
-def _get_client():
+def _get_client() -> _EmbeddingClient:
     global _client
     if _client is None:
         # voyageai is not declared under any pyproject.toml extra (a
@@ -36,7 +47,13 @@ def _get_client():
         # resolve through the sanctioned SSM-with-env-fallback path rather
         # than a literal os.environ.get, which consumer repos' CI forbids
         # in-repo but could not see inside this installed library.
-        _client = voyageai.Client(api_key=get_secret("VOYAGE_API_KEY", required=False))
+        # The ignored optional import has no usable type information at this boundary.
+        _client = cast(
+            _EmbeddingClient,
+            voyageai.Client(  # pyright: ignore[reportUnknownMemberType] - optional dependency is untyped
+                api_key=get_secret("VOYAGE_API_KEY", required=False)
+            ),
+        )
     return _client
 
 
@@ -58,7 +75,7 @@ def embed_texts(
         List of embedding vectors (each 512 floats for voyage-3-lite).
     """
     client = _get_client()
-    all_embeddings = []
+    all_embeddings: list[list[float]] = []
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i : i + batch_size]
