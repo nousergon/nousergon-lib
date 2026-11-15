@@ -40,18 +40,42 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Generator, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Protocol, TypeAlias, cast
 
-import boto3
+import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
 import yaml
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError  # pyright: ignore[reportMissingTypeStubs]  # botocore ships no stubs
 
 logger = logging.getLogger(__name__)
+
+#: A JSON object as read from / written to S3 (markers, phase ``detail``).
+#: Values are whatever the JSON holds; callers index them freely.
+_JsonDict: TypeAlias = "dict[str, Any]"  # pyright: ignore[reportExplicitAny]  # raw JSON payload
+
+
+class _S3MarkerClient(Protocol):
+    """The S3 calls the registry makes (a boto3 S3 client satisfies it)."""
+
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object: ...
+
+    def head_object(self, *, Bucket: str, Key: str) -> object: ...
+
+
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
+def _client_error_code(exc: ClientError) -> str:
+    """``exc.response["Error"]["Code"]`` with ``""`` defaults (botocore ships no stubs)."""
+    response = cast("dict[str, dict[str, str]]", exc.response)
+    return response.get("Error", {}).get("Code", "")
 
 #: Default logger name for the structured PHASE_START/PHASE_END marker lines.
 #: A consumer can override per-call / per-registry to preserve its own logging
@@ -101,7 +125,7 @@ class PhaseOutcome:
     n_admissible: int | None = None
     degeneracy_reason: str | None = None
     artifacts_written: list[str] = field(default_factory=list)
-    detail: dict = field(default_factory=dict)
+    detail: _JsonDict = field(default_factory=dict)
 
     @property
     def is_success(self) -> bool:
@@ -115,7 +139,7 @@ class PhaseOutcome:
     def is_failure(self) -> bool:
         return self.status is PhaseStatus.FAILURE
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> _JsonDict:
         """JSON-serializable record for structured logging / markers."""
         return {
             "status": self.status.value,
@@ -143,7 +167,7 @@ def _phase_logger(name: str = DEFAULT_PHASE_LOGGER) -> logging.Logger:
 
 
 @contextmanager
-def phase(name: str, *, logger_name: str = DEFAULT_PHASE_LOGGER, **context):
+def phase(name: str, *, logger_name: str = DEFAULT_PHASE_LOGGER, **context: object) -> Generator[None, None, None]:
     """Emit ``PHASE_START name=X ...`` / ``PHASE_END name=X duration_s=Y status=ok|error ...``.
 
     Duration is measured with monotonic time so clock adjustments don't lie.
@@ -232,17 +256,17 @@ def _start_watchdog(
     name: str,
     cap_s: float,
     on_trip: Callable[[str, float], None] | None = None,
-) -> tuple[threading.Timer, dict]:
+) -> tuple[threading.Timer, dict[str, object]]:
     """Start a watchdog Timer; return ``(timer, state-dict)``.
 
     State dict has ``tripped: bool`` so the phase context manager can
     distinguish "KeyboardInterrupt from watchdog" vs "KeyboardInterrupt from
     operator Ctrl+C" and raise PhaseTimeoutError only in the former.
     """
-    state = {"tripped": False, "name": name, "cap_s": cap_s}
+    state: dict[str, object] = {"tripped": False, "name": name, "cap_s": cap_s}
     handler = on_trip or _default_watchdog_trip
 
-    def _fire():
+    def _fire() -> None:
         state["tripped"] = True
         try:
             handler(name, cap_s)
@@ -292,11 +316,11 @@ class PhaseRegistry:
         force: bool = False,
         force_phases: Iterable[str] | None = None,
         hard_caps: dict[str, float] | None = None,
-        s3_client=None,
+        s3_client: Any = None,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
         phase_logger_name: str = DEFAULT_PHASE_LOGGER,
         run_token: str | None = None,
         require_attributed_markers: bool = False,
-    ):
+    ) -> None:
         self.date = date
         # The SF execution name. The spot launchers export it as RUN_TOKEN
         # (krepis.ssm_log_capture --correlation-id). It is only read to tell
@@ -313,12 +337,12 @@ class PhaseRegistry:
         self._force_all = bool(force)
         self._force_phases = set(force_phases or [])
         self._hard_caps = dict(hard_caps or {})
-        self._markers: dict[str, dict | None] = {}
+        self._markers: dict[str, _JsonDict | None] = {}
         # Per-phase cache of artifact-validation results (L4524) so a marker
         # whose declared artifacts were head_object'd once isn't re-checked on
         # the second should_run call. Value is the first-missing key, or None.
         self._artifact_checks: dict[str, str | None] = {}
-        self._s3 = s3_client  # lazy-init if None
+        self._s3: object = s3_client  # lazy-init if None
         self._phase_logger_name = phase_logger_name
         # Names of phases that wrote a marker with status=error during THIS
         # invocation — lets a smoke/budget check catch a false-PASS where the
@@ -327,13 +351,13 @@ class PhaseRegistry:
 
     # ── S3 helpers ───────────────────────────────────────────────────────
 
-    def _client(self):
+    def _client(self) -> _S3MarkerClient:
         if self._s3 is None:
             self._s3 = boto3.client("s3")
-        return self._s3
+        return cast(_S3MarkerClient, self._s3)
 
     @property
-    def s3_client(self):
+    def s3_client(self) -> Any:  # pyright: ignore[reportExplicitAny]  # the boto3 client itself (no stubs); callers use any S3 method
         """Public accessor so artifact save/load helpers can use the same
         client the registry writes markers with."""
         return self._client()
@@ -341,7 +365,7 @@ class PhaseRegistry:
     def _marker_key(self, phase_name: str) -> str:
         return _marker_key(self.marker_prefix, self.date, phase_name, self.run_token)
 
-    def _read_marker(self, phase_name: str) -> dict | None:
+    def _read_marker(self, phase_name: str) -> _JsonDict | None:
         """Return the marker dict for (date, phase), or None if absent/corrupt.
 
         Result is cached. A corrupt marker (unparseable JSON, missing required
@@ -353,12 +377,13 @@ class PhaseRegistry:
         key = self._marker_key(phase_name)
         try:
             obj = self._client().get_object(Bucket=self.bucket, Key=key)
-            body = obj["Body"].read()
+            body = cast(_Readable, obj["Body"]).read()
             try:
-                marker = json.loads(body)
+                parsed: object = json.loads(body)
             except (json.JSONDecodeError, ValueError):
-                marker = None
-            if not isinstance(marker, dict) or marker.get("status") not in ("ok", "error"):
+                parsed = None
+            marker = cast("_JsonDict", parsed) if isinstance(parsed, dict) else None
+            if marker is None or marker.get("status") not in ("ok", "error"):
                 logger.warning(
                     "phase_registry: marker at s3://%s/%s malformed — ignoring "
                     "and recomputing phase %s. Body: %s",
@@ -368,7 +393,7 @@ class PhaseRegistry:
             self._markers[phase_name] = marker
             return marker
         except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
+            code = _client_error_code(e)
             if code in ("NoSuchKey", "404"):
                 self._markers[phase_name] = None
                 return None
@@ -377,7 +402,7 @@ class PhaseRegistry:
             # a long pipeline to silently redo work it already did.
             raise
 
-    def _write_marker(self, marker: dict) -> None:
+    def _write_marker(self, marker: _JsonDict) -> None:
         key = self._marker_key(marker["phase"])
         self._client().put_object(
             Bucket=self.bucket,
@@ -410,13 +435,13 @@ class PhaseRegistry:
             try:
                 client.head_object(Bucket=self.bucket, Key=key)
             except ClientError as e:
-                code = e.response.get("Error", {}).get("Code", "")
+                code = _client_error_code(e)
                 if code in ("NoSuchKey", "NoSuchBucket", "NotFound", "404"):
                     return key
                 raise
         return None
 
-    def _marker_provenance_refusal(self, marker: dict) -> str | None:
+    def _marker_provenance_refusal(self, marker: _JsonDict) -> str | None:
         """Why ``marker`` may not earn this run an auto-skip, or None.
 
         alpha-engine-config-I12351 (C30). A marker's key says which run it is
@@ -448,7 +473,7 @@ class PhaseRegistry:
             return "marker_unattributed"
         return None
 
-    def _marker_artifact_missing(self, phase_name: str, marker: dict) -> str | None:
+    def _marker_artifact_missing(self, phase_name: str, marker: _JsonDict) -> str | None:
         """Validate a phase's marker against its declared artifacts (cached)."""
         if phase_name not in self._artifact_checks:
             self._artifact_checks[phase_name] = self._first_missing_artifact(
@@ -508,14 +533,20 @@ class PhaseRegistry:
             return False, "auto_skip_marker_ok"
         return True, "default_run"
 
-    def load_marker(self, phase_name: str) -> dict | None:
+    def load_marker(self, phase_name: str) -> _JsonDict | None:
         """Public accessor for a phase's marker — used by loaders."""
         return self._read_marker(phase_name)
 
     # ── Phase context manager ────────────────────────────────────────────
 
     @contextmanager
-    def phase(self, name: str, *, supports_auto_skip: bool = False, **log_ctx):
+    def phase(
+        self,
+        name: str,
+        *,
+        supports_auto_skip: bool = False,
+        **log_ctx: Any,  # pyright: ignore[reportExplicitAny]  # Any keeps callers' untyped kwargs unflagged
+    ) -> Generator[PhaseContext, None, None]:
         """Phase context manager — writes a START/END marker to S3 around the block.
 
         Yields a :class:`PhaseContext`:
@@ -551,7 +582,7 @@ class PhaseRegistry:
         status = "ok"
         err_msg: str | None = None
         watchdog_timer: threading.Timer | None = None
-        watchdog_state: dict | None = None
+        watchdog_state: dict[str, object] | None = None
         if cap_s is not None and cap_s > 0:
             watchdog_timer, watchdog_state = _start_watchdog(name, cap_s)
         try:
@@ -593,7 +624,7 @@ class PhaseRegistry:
                     "started_at": started_at,
                     "completed_at": completed_at,
                     "duration_s": round(dur, 2),
-                    "artifact_keys": sorted(ctx._artifact_keys),
+                    "artifact_keys": sorted(ctx.recorded_artifacts),
                     "error": err_msg,
                 })
             except Exception as marker_exc:
@@ -609,11 +640,16 @@ class PhaseContext:
     """Yielded by ``PhaseRegistry.phase()`` so callers can query skip state and
     register artifact keys before the phase ends."""
 
-    def __init__(self, *, name: str, skipped: bool, skip_reason: str):
+    def __init__(self, *, name: str, skipped: bool, skip_reason: str) -> None:
         self.name = name
         self.skipped = skipped
         self.skip_reason = skip_reason
         self._artifact_keys: set[str] = set()
+
+    @property
+    def recorded_artifacts(self) -> frozenset[str]:
+        """The S3 keys attached so far via :meth:`record_artifact`."""
+        return frozenset(self._artifact_keys)
 
     def record_artifact(self, s3_key: str) -> None:
         """Attach an S3 key to the phase's END marker (recorded on exit).
@@ -621,7 +657,7 @@ class PhaseContext:
         Downstream phases / loaders read ``load_marker(name)["artifact_keys"]``
         to find the outputs; the L4524 validation re-checks they still exist.
         """
-        if not isinstance(s3_key, str) or not s3_key:
+        if not isinstance(s3_key, str) or not s3_key:  # pyright: ignore[reportUnnecessaryIsInstance]  # runtime guard: untyped callers pass anything
             raise ValueError(f"record_artifact: expected non-empty str, got {s3_key!r}")
         self._artifact_keys.add(s3_key)
 
@@ -646,24 +682,27 @@ def load_phase_hard_caps(
         return {}
     try:
         with open(p) as f:
-            data = yaml.safe_load(f) or {}
+            # Not shape-checked: a non-mapping top level raises at ``.get`` below, as before.
+            data = cast("dict[str, object]", yaml.safe_load(f) or {})
     except Exception as exc:
         logger.warning(
             "phase hard-caps file at %s failed to parse: %s — no phase watchdogs",
             p, exc,
         )
         return {}
-    caps = data.get(caps_key) or {}
-    if not isinstance(caps, dict):
+    caps_raw: object = data.get(caps_key) or {}
+    if not isinstance(caps_raw, dict):
         logger.warning(
             "phase hard-caps: %s is not a dict (got %s) — no phase watchdogs",
-            caps_key, type(caps).__name__,
+            caps_key, type(caps_raw).__name__,
         )
         return {}
+    caps = cast("dict[object, object]", caps_raw)
     out: dict[str, float] = {}
     for name, cap in caps.items():
         try:
-            out[str(name)] = float(cap)
+            # float() raising TypeError/ValueError on a non-numeric cap is the check.
+            out[str(name)] = float(cast("str | float", cap))
         except (TypeError, ValueError):
             logger.warning(
                 "phase hard-caps: phase %r has non-numeric cap %r — skipping",

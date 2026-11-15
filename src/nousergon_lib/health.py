@@ -47,13 +47,18 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol, TypeAlias, cast
 
 from nousergon_lib import rehearsal
 
 logger = logging.getLogger(__name__)
+
+#: A health JSON object (payload, deliverable row, or one read back from S3).
+#: Values are whatever the JSON holds; callers index them freely.
+_JsonDict: TypeAlias = "dict[str, Any]"  # pyright: ignore[reportExplicitAny]  # raw JSON payload
 
 #: Grace window subtracted from the verification cutoff (``now -
 #: duration_seconds``) to absorb clock skew between the writer and S3, and
@@ -172,7 +177,7 @@ class Deliverable:
     detail: str = ""
     artifact_key: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> _JsonDict:
         """Serialise for the ``deliverables`` array in the health payload."""
         return {
             "name": self.name,
@@ -183,11 +188,25 @@ class Deliverable:
         }
 
 
+class _S3HealthClient(Protocol):
+    """The S3 calls this module makes (a boto3 S3 client satisfies it)."""
+
+    def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object: ...
+
+
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
 def verify_fresh_s3(
     deliverable: Deliverable,
     *,
     bucket: str = DEFAULT_HEALTH_BUCKET,
-    s3_client: Any = None,
+    s3_client: Any = None,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
     since: datetime | None = None,
 ) -> Deliverable:
     """Re-derive ``produced`` by checking ``artifact_key`` against live S3.
@@ -221,17 +240,20 @@ def verify_fresh_s3(
         return deliverable
 
     if s3_client is None:
-        import boto3
+        import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
 
         s3_client = boto3.client("s3")
+    client = cast(_S3HealthClient, s3_client)
 
     try:
-        head = s3_client.head_object(Bucket=bucket, Key=deliverable.artifact_key)
+        head = client.head_object(Bucket=bucket, Key=deliverable.artifact_key)
     except Exception as exc:
         code = ""
-        response = getattr(exc, "response", None)
+        response: object = getattr(exc, "response", None)
         if isinstance(response, dict):
-            code = response.get("Error", {}).get("Code", "")
+            # botocore's parsed error payload; shape not checked, as before.
+            error_payload = cast("dict[str, dict[str, str]]", response)
+            code = error_payload.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NoSuchBucket", "NotFound"):
             logger.warning(
                 "verify_fresh_s3: deliverable %r claims produced=True but "
@@ -256,7 +278,7 @@ def verify_fresh_s3(
         return deliverable
 
     if since is not None:
-        last_modified = head.get("LastModified")
+        last_modified = cast("datetime | None", head.get("LastModified"))
         cutoff = since - timedelta(seconds=_ARTIFACT_FRESHNESS_BUFFER_SECONDS)
         if last_modified is not None and last_modified < cutoff:
             logger.warning(
@@ -356,7 +378,7 @@ def build_health_payload(
     summary: dict | None = None,
     warnings: list[str] | None = None,
     error: str | None = None,
-) -> dict[str, Any]:
+) -> _JsonDict:
     """Build the canonical health payload without touching S3.
 
     Returns the eight legacy keys the five copies write —
@@ -394,8 +416,8 @@ def write_health(
     warnings: list[str] | None = None,
     error: str | None = None,
     bucket: str = DEFAULT_HEALTH_BUCKET,
-    s3_client: Any = None,
-) -> dict[str, Any]:
+    s3_client: Any = None,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
+) -> _JsonDict:
     """Derive status, build the payload, and PUT it to ``health/{module}.json``.
 
     The status is *derived* from ``deliverables`` / ``error`` / ``warnings``
@@ -426,17 +448,17 @@ def write_health(
         try:
             verify_client = s3_client
             if verify_client is None:
-                import boto3
+                import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
 
                 verify_client = boto3.client("s3")
             verified_deliverables = [
                 verify_fresh_s3(
-                    d, bucket=bucket, s3_client=verify_client, since=run_started_at,
+                    d, bucket=bucket, s3_client=cast(object, verify_client), since=run_started_at,
                 )
                 for d in deliverables
             ]
             if s3_client is None:
-                s3_client = verify_client  # reuse for the put_object below
+                s3_client = cast(object, verify_client)  # reuse for the put_object below
         except Exception as exc:  # pragma: no cover - defensive; enrichment only
             logger.warning(
                 "Failed to verify deliverable artifacts for %s: %s", module_name, exc,
@@ -458,10 +480,10 @@ def write_health(
     key = rehearsal.namespaced_key(health_key(module_name), rehearsal.rehearsal_token())
     try:
         if s3_client is None:
-            import boto3
+            import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
 
             s3_client = boto3.client("s3")
-        s3_client.put_object(
+        cast(_S3HealthClient, s3_client).put_object(
             Bucket=bucket,
             Key=key,
             Body=json.dumps(payload, indent=2).encode("utf-8"),
@@ -480,8 +502,8 @@ def read_health(
     module_name: str,
     *,
     bucket: str = DEFAULT_HEALTH_BUCKET,
-    s3_client: Any = None,
-) -> dict | None:
+    s3_client: Any = None,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
+) -> _JsonDict | None:
     """Read the health JSON for ``module_name``. Returns ``None`` if absent.
 
     Ported from the copies' ``read_health``: any read failure (missing key,
@@ -491,11 +513,12 @@ def read_health(
     """
     try:
         if s3_client is None:
-            import boto3
+            import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
 
             s3_client = boto3.client("s3")
-        obj = s3_client.get_object(Bucket=bucket, Key=health_key(module_name))
-        return json.loads(obj["Body"].read())
+        obj = cast(_S3HealthClient, s3_client).get_object(Bucket=bucket, Key=health_key(module_name))
+        body = cast(_Readable, obj["Body"])
+        return json.loads(body.read())  # raw JSON; shape not checked, as before
     except Exception:
         return None
 
@@ -505,8 +528,8 @@ def check_upstream_health(
     *,
     bucket: str = DEFAULT_HEALTH_BUCKET,
     max_age_hours: float = 48,
-    s3_client: Any = None,
-) -> dict[str, dict]:
+    s3_client: Any = None,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
+) -> dict[str, _JsonDict]:
     """Check the health of multiple upstream modules.
 
     Returns ``{module: {"status": str, "age_hours": float, "stale": bool}}``.
@@ -515,7 +538,7 @@ def check_upstream_health(
     on failed runs → treated as ``-1`` / stale). Ported from the copies'
     ``check_upstream_health`` with the S3 client made injectable.
     """
-    results: dict[str, dict] = {}
+    results: dict[str, _JsonDict] = {}
     now = datetime.now(timezone.utc)
     for mod in modules:
         health = read_health(mod, bucket=bucket, s3_client=s3_client)

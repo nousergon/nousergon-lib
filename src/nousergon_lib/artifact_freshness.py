@@ -90,24 +90,22 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dt_time
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, Protocol, TypeAlias, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-# trading_calendar.py is a sys.modules rebind shim to
-# krepis.trading_calendar; pyright can't see through the dynamic rebind,
-# verified correct at runtime — the per-symbol ignores below are needed
-# because pyright anchors reportAttributeAccessIssue to each imported
-# name's own line on a multi-line from-import.
-from nousergon_lib.trading_calendar import (
-    is_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
-    last_closed_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
-    previous_trading_day,  # pyright: ignore[reportAttributeAccessIssue]
-    subtract_trading_days,  # pyright: ignore[reportAttributeAccessIssue]
+# Imported from krepis directly: ``nousergon_lib.trading_calendar`` is a
+# sys.modules rebind shim to this same module object (so runtime is
+# unchanged), and pyright cannot see through the rebind.
+from krepis.trading_calendar import (
+    is_trading_day,
+    last_closed_trading_day,
+    previous_trading_day,
+    subtract_trading_days,
 )
 
 # ── Cadence symbols ──────────────────────────────────────────────────────────
@@ -289,7 +287,7 @@ def parse_deadline_local(value: str) -> tuple[dt_time, ZoneInfo]:
     Raises :class:`DeadlineLocalError` for any malformed shape. See the
     class docstring for why this raises rather than degrading.
     """
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip():  # pyright: ignore[reportUnnecessaryIsInstance]  # runtime guard: YAML hands us anything
         raise DeadlineLocalError(
             f"deadline_local={value!r} — {_DEADLINE_LOCAL_HELP}"
         )
@@ -750,7 +748,7 @@ class ArtifactSpec:
         spec cannot see its siblings.
         """
         if self.cadence == "event_driven":
-            if not self.liveness_via or not isinstance(self.liveness_via, str):
+            if not self.liveness_via or not isinstance(self.liveness_via, str):  # pyright: ignore[reportUnnecessaryIsInstance]  # runtime guard: YAML hands us anything
                 raise ValueError(
                     f"ArtifactSpec.cadence='event_driven' ({self.artifact_id!r}) "
                     "requires liveness_via=<anchor artifact_id> — an "
@@ -783,7 +781,7 @@ class ArtifactSpec:
         spec cannot see its siblings.
         """
         for attr in ("produces", "depends_on"):
-            raw = getattr(self, attr)
+            raw: object = getattr(self, attr)
             if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
                 raise ValueError(
                     f"ArtifactSpec.{attr} must be a list/tuple of artifact_id "
@@ -791,7 +789,7 @@ class ArtifactSpec:
                 )
             seen: set[str] = set()
             edges: list[str] = []
-            for item in raw:
+            for item in cast("list[object] | tuple[object, ...]", raw):
                 if not isinstance(item, str) or not item:
                     raise ValueError(
                         f"ArtifactSpec.{attr} entries must be non-empty "
@@ -844,13 +842,13 @@ class ArtifactSpec:
                 "ArtifactSpec.active_hours_utc is only valid for "
                 f"cadence='continuous' (got cadence={self.cadence!r})"
             )
-        if not isinstance(self.active_hours_utc, (list, tuple)):
+        if not isinstance(self.active_hours_utc, (list, tuple)):  # pyright: ignore[reportUnnecessaryIsInstance]  # runtime guard: YAML hands us anything
             raise ValueError(
                 "ArtifactSpec.active_hours_utc must be a (start, end) pair, "
                 f"got {self.active_hours_utc!r}"
             )
         hours = tuple(self.active_hours_utc)
-        if len(hours) != 2 or not all(isinstance(h, int) for h in hours):
+        if len(hours) != 2 or not all(isinstance(h, int) for h in hours):  # pyright: ignore[reportUnnecessaryIsInstance]  # runtime guard: YAML hands us anything
             raise ValueError(
                 "ArtifactSpec.active_hours_utc must be a 2-tuple of ints, "
                 f"got {self.active_hours_utc!r}"
@@ -1120,7 +1118,47 @@ def resolve_dedup_key(spec: ArtifactSpec, now: datetime) -> str:
 # ── Probe helpers ───────────────────────────────────────────────────────────
 
 
-def _classify_client_error(err: Any) -> tuple[str, str]:
+class _ClientErrorLike(Protocol):
+    """The duck-typed shape of a boto3 ``ClientError`` (``.response`` payload)."""
+
+    response: Mapping[str, Mapping[str, object]]
+
+
+class _Paginator(Protocol):
+    def paginate(self, *, Bucket: str, Prefix: str) -> Iterable[Mapping[str, object]]: ...
+
+
+class _S3Probe(Protocol):
+    """The S3 calls this module makes (a boto3 S3 client satisfies it)."""
+
+    def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def get_paginator(self, operation_name: str, /) -> _Paginator: ...
+
+
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
+class _ParquetMetadata(Protocol):
+    @property
+    def num_rows(self) -> int: ...
+
+
+class _ParquetFileLike(Protocol):
+    @property
+    def metadata(self) -> _ParquetMetadata: ...
+
+
+#: One ``_list_prefix`` outcome: ``(objects, probe_error)``.
+_ListEntry: TypeAlias = "tuple[list[tuple[str, datetime]], str | None]"
+#: The per-sweep LIST cache, keyed by ``(bucket, prefix, cap_pages)``.
+_ListCache: TypeAlias = "dict[tuple[str, str, int], _ListEntry]"
+
+
+def _classify_client_error(err: object) -> tuple[str, str]:
     """Classify a boto3 ClientError into ``(state, reason)``.
 
     Returns either ``("missing", ...)`` for the 404 / NoSuchKey path
@@ -1131,11 +1169,13 @@ def _classify_client_error(err: Any) -> tuple[str, str]:
     # and the canonical error code under ``err.response["Error"]["Code"]``.
     # We avoid importing botocore here to keep the module dep-light;
     # duck-type the shape instead.
-    code = ""
+    code: object = ""
     status = 0
     try:
-        code = err.response.get("Error", {}).get("Code", "") or ""
-        status = int(err.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0))
+        # cast() is a no-op: a non-ClientError still raises AttributeError here.
+        response = cast(_ClientErrorLike, err).response
+        code = response.get("Error", {}).get("Code", "") or ""
+        status = int(cast("int | str", response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)))
     except (AttributeError, TypeError, ValueError):
         # Non-ClientError exception (network, malformed response).
         return ("probe_failed", f"probe error: {err!r}")
@@ -1152,18 +1192,18 @@ def _classify_client_error(err: Any) -> tuple[str, str]:
 
 
 def _head_object(
-    s3_client: Any, bucket: str, key: str
+    s3_client: object, bucket: str, key: str
 ) -> tuple[str, datetime | None, str]:
     """HEAD an S3 object. Return ``(state, last_modified, reason)``
     where state is one of ``"present"`` / ``"missing"`` / ``"probe_failed"``.
     """
     try:
-        resp = s3_client.head_object(Bucket=bucket, Key=key)
+        resp = cast(_S3Probe, s3_client).head_object(Bucket=bucket, Key=key)
     except Exception as err:  # noqa: BLE001 — duck-typed boto error classification
         state, reason = _classify_client_error(err)
         return state, None, reason
 
-    last_modified = resp.get("LastModified")
+    last_modified = cast("datetime | None", resp.get("LastModified"))
     if last_modified is not None and last_modified.tzinfo is None:
         last_modified = last_modified.replace(tzinfo=timezone.utc)
     return "present", last_modified, "HEAD ok"
@@ -1352,7 +1392,7 @@ def listable_prefix(template: str) -> str:
     return re.split(r"[{*]", template, maxsplit=1)[0]
 
 
-def _listable_prefix(template: str) -> str:
+def _listable_prefix(template: str) -> str:  # pyright: ignore[reportUnusedFunction]  # kept importable for back-compat
     """Backwards-compatible private alias for :func:`listable_prefix`."""
     return listable_prefix(template)
 
@@ -1378,13 +1418,13 @@ def key_suffix(template: str) -> str:
     return template
 
 
-def _key_suffix(template: str) -> str:
+def _key_suffix(template: str) -> str:  # pyright: ignore[reportUnusedFunction]  # kept importable for back-compat
     """Backwards-compatible private alias for :func:`key_suffix`."""
     return key_suffix(template)
 
 
 def _list_prefix(
-    s3_client: Any,
+    s3_client: object,
     bucket: str,
     prefix: str,
     cap_pages: int,
@@ -1405,7 +1445,7 @@ def _list_prefix(
     """
     objects: list[tuple[str, datetime]] = []
     try:
-        paginator = s3_client.get_paginator("list_objects_v2")
+        paginator = cast(_S3Probe, s3_client).get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
         truncated = False
         for page_idx, page in enumerate(pages):
@@ -1436,9 +1476,10 @@ def _list_prefix(
                 # the whole prefix has to say so.
                 truncated = True
                 break
-            for obj in page.get("Contents", []) or []:
-                key = obj.get("Key", "")
-                lm = obj.get("LastModified")
+            contents = cast("list[Mapping[str, object]]", page.get("Contents", []) or [])
+            for obj in contents:
+                key = cast(str, obj.get("Key", ""))
+                lm = cast("datetime | None", obj.get("LastModified"))
                 if lm is None:
                     continue
                 if lm.tzinfo is None:
@@ -1464,13 +1505,13 @@ def _list_prefix(
 
 
 def _newest_under_prefix(
-    s3_client: Any,
+    s3_client: object,
     bucket: str,
     prefix: str,
     suffix: str,
     *,
     cap_pages: int = 64,
-    cache: dict | None = None,
+    cache: _ListCache | None = None,
     pattern: re.Pattern[str] | None = None,
 ) -> tuple[str, datetime | None, str | None]:
     """Return ``(newest_key, newest_last_modified, probe_error)`` for the
@@ -1539,7 +1580,7 @@ def _newest_under_prefix(
     filter, unchanged.
     """
     key_ = (bucket, prefix, cap_pages)
-    entry = None if cache is None else cache.get(key_)
+    entry: _ListEntry | None = None if cache is None else cache.get(key_)
     if entry is None:
         entry = _list_prefix(s3_client, bucket, prefix, cap_pages)
         if cache is not None:
@@ -1814,7 +1855,7 @@ def _window_leading_edge_reason(
 
 
 def check_freshness(
-    s3_client: Any,
+    s3_client: Any,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
     spec: ArtifactSpec,
     now: datetime,
     *,
@@ -1834,16 +1875,18 @@ def check_freshness(
 
     See :func:`_check_freshness_impl` for the substrate probe this wraps.
     """
-    result = _check_freshness_impl(s3_client, spec, now, list_cache=list_cache)
+    result = _check_freshness_impl(
+        s3_client, spec, now, list_cache=cast("_ListCache | None", list_cache),
+    )
     return apply_local_deadline(spec, result, now)
 
 
 def _check_freshness_impl(
-    s3_client: Any,
+    s3_client: object,
     spec: ArtifactSpec,
     now: datetime,
     *,
-    list_cache: dict | None = None,
+    list_cache: _ListCache | None = None,
 ) -> CheckResult:
     """The freshness substrate probe — see :func:`check_freshness` (the
     public entry point, which additionally applies ``spec.deadline_local``)
@@ -2101,7 +2144,9 @@ def _check_freshness_impl(
 
 
 def check_completeness(
-    s3_client: Any, spec: ArtifactSpec, canonical_key: str
+    s3_client: Any,  # pyright: ignore[reportExplicitAny]  # boto3 client (no stubs); Any keeps callers' untyped clients unflagged
+    spec: ArtifactSpec,
+    canonical_key: str,
 ) -> CompletenessResult:
     """Evaluate ``spec.completeness`` against the object at ``canonical_key``.
 
@@ -2137,9 +2182,10 @@ def check_completeness(
         )
     check = spec.completeness
     try:
-        body = s3_client.get_object(Bucket=spec.s3_bucket, Key=canonical_key)[
-            "Body"
-        ].read()
+        body = cast(
+            _Readable,
+            cast(_S3Probe, s3_client).get_object(Bucket=spec.s3_bucket, Key=canonical_key)["Body"],
+        ).read()
     except Exception as err:  # noqa: BLE001 — duck-typed boto error classification
         return CompletenessResult(
             state="probe_failed",
@@ -2186,10 +2232,11 @@ def _observed_count(check: CompletenessCheck, body: bytes) -> int:
         import json as _json
 
         data = _json.loads(body)
-        value = data[check.field]  # KeyError -> probe_failed, by design
+        value: object = data[check.field]  # KeyError -> probe_failed, by design
         if isinstance(value, list):
-            return len(value)
-        return int(value)
+            return len(cast("list[object]", value))
+        # int() raising on a non-numeric value is the probe_failed path.
+        return int(cast("int | str", value))
 
     if check.kind == "csv_row_count":
         import csv as _csv
@@ -2202,9 +2249,9 @@ def _observed_count(check: CompletenessCheck, body: bytes) -> int:
     if check.kind == "parquet_row_count":
         import io as _io
 
-        import pyarrow.parquet as _pq
+        import pyarrow.parquet as _pq  # pyright: ignore[reportMissingTypeStubs]  # pyarrow ships no stubs
 
-        return _pq.ParquetFile(_io.BytesIO(body)).metadata.num_rows
+        return cast(_ParquetFileLike, _pq.ParquetFile(_io.BytesIO(body))).metadata.num_rows
 
     raise ValueError(f"unhandled CompletenessCheck.kind={check.kind!r}")
 
@@ -2337,7 +2384,7 @@ def cycle_completion(
     n_required = len(required)
 
     if missing or stale:
-        gaps = []
+        gaps: list[str] = []
         if missing:
             gaps.append(f"missing={missing}")
         if stale:
@@ -2724,7 +2771,7 @@ def leaf_alert_decisions(
 def _root_causes(
     artifact_id: str,
     graph: DependencyGraph,
-    is_confirmed_gap,
+    is_confirmed_gap: Callable[[str], bool],
 ) -> tuple[str, ...]:
     """Walk ``depends_on`` up from ``artifact_id`` to the confirmed-gap root(s).
 
