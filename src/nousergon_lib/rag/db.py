@@ -9,8 +9,9 @@ Requires: RAG_DATABASE_URL environment variable (Neon pooled connection string).
 from __future__ import annotations
 
 import logging
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
 import psycopg2
@@ -19,11 +20,26 @@ from pgvector.psycopg2 import register_vector
 
 if TYPE_CHECKING:  # pragma: no cover
     from numpy.typing import NDArray
+    from psycopg2.extensions import connection, cursor
 
 logger = logging.getLogger(__name__)
 
 
-def coerce_embedding(value) -> NDArray[np.float32]:
+class _ToNumpy(Protocol):
+    """A ``pgvector.Vector`` (or anything else exposing ``to_numpy``)."""
+
+    def to_numpy(self) -> object: ...
+
+
+class _ExecuteBatch(Protocol):
+    """``psycopg2.extras.execute_batch``, whose bundled stub leaves every parameter untyped."""
+
+    def __call__(
+        self, cur: cursor, sql: str, argslist: Sequence[Sequence[object]], page_size: int = 100
+    ) -> None: ...
+
+
+def coerce_embedding(value: object) -> NDArray[np.float32]:
     """Normalize a pgvector ``vector`` column read to a float32 ndarray.
 
     THE chokepoint for the representation-fragile guarantee that
@@ -63,29 +79,29 @@ def coerce_embedding(value) -> NDArray[np.float32]:
             "pgvector installed. This is fail-loud on purpose (config#2221)."
         )
     if hasattr(value, "to_numpy"):  # pgvector.Vector — not numpy-coercible
-        value = value.to_numpy()
+        value = cast(_ToNumpy, value).to_numpy()
     return np.asarray(value, dtype=np.float32)
 
-_DATABASE_URL: str | None = None
+_database_url: str | None = None
 
 
 def _get_url() -> str:
-    global _DATABASE_URL
-    if _DATABASE_URL is None:
+    global _database_url
+    if _database_url is None:
         from krepis.secrets import get_secret
 
         # RAG_DATABASE_URL is a pinned secret (alpha-engine-config-I7925) —
         # resolve through the sanctioned SSM-with-env-fallback path rather
         # than a literal os.environ.get, which consumer repos' CI forbids
         # in-repo but could not see inside this installed library.
-        _DATABASE_URL = get_secret("RAG_DATABASE_URL", required=False)
-        if not _DATABASE_URL:
+        _database_url = get_secret("RAG_DATABASE_URL", required=False)
+        if not _database_url:
             raise RuntimeError("RAG_DATABASE_URL not set — cannot connect to vector DB")
-    return _DATABASE_URL
+    return _database_url
 
 
 @contextmanager
-def get_connection():
+def get_connection() -> Generator[connection, None, None]:
     """Context manager for a database connection.
 
     Opens a new connection per call (Neon pooler handles connection reuse
@@ -117,7 +133,7 @@ def get_connection():
         conn.close()
 
 
-def execute_query(sql: str, params: tuple | list = ()) -> list[dict]:
+def execute_query(sql: str, params: Sequence[object] = ()) -> list[dict[str, object]]:
     """Execute a SELECT query and return results as list of dicts."""
     with get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -125,18 +141,18 @@ def execute_query(sql: str, params: tuple | list = ()) -> list[dict]:
             return [dict(row) for row in cur.fetchall()]
 
 
-def execute_insert(sql: str, params: tuple | list = ()) -> None:
+def execute_insert(sql: str, params: Sequence[object] = ()) -> None:
     """Execute an INSERT/UPDATE statement."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
 
 
-def execute_batch(sql: str, params_list: list[tuple]) -> None:
+def execute_batch(sql: str, params_list: Sequence[Sequence[object]]) -> None:
     """Execute a batch of INSERT statements efficiently."""
     with get_connection() as conn:
         with conn.cursor() as cur:
-            psycopg2.extras.execute_batch(cur, sql, params_list, page_size=100)
+            cast(_ExecuteBatch, psycopg2.extras.execute_batch)(cur, sql, params_list, page_size=100)
 
 
 def is_available() -> bool:

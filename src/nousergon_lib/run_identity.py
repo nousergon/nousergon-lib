@@ -24,6 +24,7 @@ import subprocess
 
 __all__ = [
     "CODE_SHA_ENV",
+    "REAL_SHA_RE",
     "CodeShaError",
     "new_run_id",
     "resolve_code_sha",
@@ -36,6 +37,9 @@ CODE_SHA_ENV = "NE_DATA_CODE_SHA"
 #: A real, non-placeholder git sha: forty lowercase hex characters, explicitly
 #: NOT the all-zero placeholder. Mirrors crucible's ``_REAL_SHA_RE``.
 _REAL_SHA_RE = re.compile(r"^(?!0{40}$)[0-9a-f]{40}$")
+#: Public name for :data:`_REAL_SHA_RE`, for modules that refuse the same shape
+#: (``run_manifest``) without re-deriving it.
+REAL_SHA_RE = _REAL_SHA_RE
 
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 

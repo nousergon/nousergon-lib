@@ -82,10 +82,89 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Literal, cast
+from typing import Literal, Protocol, SupportsFloat, SupportsInt, cast
 
-import pandas as pd
+import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # pandas ships no stubs and pandas-stubs is not a dependency
 from krepis.trading_calendar import is_trading_day, previous_trading_day
+
+
+class _ToNumeric(Protocol):
+    """``pd.to_numeric`` as this module calls it: on one column, a Series.
+
+    pandas ships no stubs, so pyright infers ``to_numeric``'s signature from
+    the un-annotated implementation (a partially unknown union over every
+    input kind it accepts). A Series input always returns a Series.
+    """
+
+    def __call__(self, arg: pd.Series, errors: Literal["raise", "coerce"]) -> pd.Series: ...
+
+
+class _IndexMax(Protocol):
+    """``Index.max`` — the newest label; un-stubbed, so its type is partially unknown."""
+
+    def max(self) -> object: ...
+
+
+class _Rolling(Protocol):
+    """``Series.rolling(...)``'s window object, as far as the outlier gate uses it."""
+
+    def std(self) -> pd.Series: ...
+
+
+class _NumericSeries(Protocol):
+    """The ``pd.Series`` methods the outlier gate calls that pyright cannot type.
+
+    pandas ships no stubs, so these are inferred from the un-annotated
+    implementation as partially unknown. Each returns a Series for a Series
+    receiver; ``rolling`` returns a window whose ``std`` is a Series.
+    """
+
+    def sort_index(self) -> pd.Series: ...
+
+    def pct_change(self) -> pd.Series: ...
+
+    def rolling(self, window: int, min_periods: int) -> _Rolling: ...
+
+    def shift(self, periods: int) -> pd.Series: ...
+
+
+class _TimestampCtor(Protocol):
+    """``pd.Timestamp(value)`` as :func:`_to_date` relies on it behaving.
+
+    pandas' stub declares the constructor as always returning a
+    ``Timestamp`` over a closed set of input types, but at runtime it accepts
+    any index value and returns ``NaT`` (a ``NaTType``) for None/NaT/
+    unparseable input — the case :func:`_to_date` checks for and refuses.
+    """
+
+    def __call__(self, ts_input: object, /) -> object: ...
+
+
+class _BoolMask(Protocol):
+    """A boolean Series, as far as the outlier gate reduces it.
+
+    ``any`` is a numpy bool and ``sum`` a numpy integer; pandas' un-stubbed
+    reductions are otherwise partially unknown to pyright.
+    """
+
+    def any(self) -> object: ...
+
+    def sum(self) -> SupportsInt: ...
+
+
+def _column(df: pd.DataFrame, name: str) -> pd.Series:
+    """``df[name]`` — a ``str`` key selects one column, a Series.
+
+    pyright reads pandas' un-stubbed ``DataFrame.__getitem__`` as a union
+    with ``Unknown``; this narrows it back to the type a str key yields.
+    """
+    return cast(pd.Series, df[name])
+
+
+def _to_numeric(values: pd.Series, errors: Literal["raise", "coerce"]) -> pd.Series:
+    """``pd.to_numeric(values, errors=errors)``, typed (see :class:`_ToNumeric`)."""
+    return cast(_ToNumeric, pd.to_numeric)(values, errors=errors)
+
 
 GateName = Literal[
     "schema",
@@ -198,7 +277,7 @@ class GateResult:
     ok: bool
     severity: Severity = "warn"
     reason: str = ""
-    detail: Mapping[str, Any] = field(default_factory=dict)
+    detail: Mapping[str, object] = field(default_factory=dict[str, object])
 
 
 @dataclass
@@ -326,7 +405,7 @@ def check_schema(
         if col not in df.columns:
             continue
         try:
-            pd.to_numeric(df[col], errors="raise")
+            _to_numeric(_column(df, col), errors="raise")
         except (ValueError, TypeError):
             non_numeric.append(col)
 
@@ -367,17 +446,16 @@ def check_sanity(
 
     # `price_field` is a str, so `df[price_field]` always selects a single
     # column (a Series, never a DataFrame/scalar) — `to_numeric` on a
-    # Series input always returns a Series. pyright's inferred return type
-    # is the union of every overload `to_numeric` supports (scalar/array/
-    # ExtensionArray/...) because pandas ships without return-type stubs
-    # for this un-stubbed function; narrow it back to the true runtime type.
-    prices = cast(pd.Series, pd.to_numeric(df[price_field], errors="coerce"))
+    # Series input always returns a Series. `_column` / `_to_numeric` narrow
+    # pandas' un-stubbed inferred unions back to that runtime type.
+    prices = _to_numeric(_column(df, price_field), errors="coerce")
     bad_mask = prices.notna() & (prices <= 0)
     if not bad_mask.any():
         return GateResult(gate="sanity", ok=True)
 
-    bad_idx = df.index[bad_mask]
-    bad_dates = [_fmt_date(d) for d in bad_idx[:5]]
+    # Boolean-mask indexing always returns an Index (see check_outlier).
+    bad_idx = cast("pd.Index", df.index[bad_mask])
+    bad_dates = [_fmt_date(d) for d in cast("Iterable[object]", bad_idx[:5])]
     return GateResult(
         gate="sanity",
         ok=False,
@@ -424,7 +502,7 @@ def check_staleness(
             reason="series has zero observations",
         )
 
-    newest = _to_date(df.index.max())
+    newest = _to_date(cast(_IndexMax, df.index).max())
     floor = as_of
     for _ in range(max_age_trading_days):
         floor = previous_trading_day(floor)
@@ -488,7 +566,7 @@ def check_continuity(
     if len(df) < 2:
         return GateResult(gate="continuity", ok=True, reason="fewer than 2 rows; nothing to span")
 
-    dates = sorted({_to_date(d) for d in df.index})
+    dates = sorted({_to_date(d) for d in cast("Iterable[object]", df.index)})
     start, end = dates[0], dates[-1]
     present = set(dates)
 
@@ -560,9 +638,9 @@ def check_outlier(
             reason="insufficient history for a trailing-vol estimate",
         )
 
-    # See check_sanity's comment above `cast` for why this is safe: a str
-    # column selection always yields a Series, so `to_numeric` returns one.
-    prices = cast(pd.Series, pd.to_numeric(df[price_field], errors="coerce"))
+    # See check_sanity's comment above `_to_numeric` for why this is safe: a
+    # str column selection always yields a Series, so `to_numeric` returns one.
+    prices = _to_numeric(_column(df, price_field), errors="coerce")
     prices = cast(pd.Series, prices[prices.notna() & (prices > 0)])
     if len(prices) < min_observations + 2:
         return GateResult(
@@ -570,18 +648,20 @@ def check_outlier(
             reason="insufficient positive-price history for a trailing-vol estimate",
         )
 
-    prices = prices.sort_index()
-    returns = prices.pct_change()
+    prices = cast(_NumericSeries, prices).sort_index()
+    returns = cast(_NumericSeries, prices).pct_change()
 
     # Causal trailing vol: shift(1) so day t's threshold uses only
     # returns strictly before t.
-    trailing_vol = returns.rolling(window=vol_window, min_periods=min_observations).std()
-    trailing_vol = trailing_vol.shift(1)
+    trailing_vol = cast(_NumericSeries, returns).rolling(window=vol_window, min_periods=min_observations).std()
+    trailing_vol = cast(_NumericSeries, trailing_vol).shift(1)
 
     threshold = n_sigma * trailing_vol
-    violation_mask = (
+    # Comparisons and `&` over aligned Series are a boolean Series; pandas'
+    # un-stubbed operators leave pyright with an unknown, so name it.
+    violation_mask = cast(_BoolMask, (
         returns.abs() > threshold
-    ) & threshold.notna() & (threshold > 0)
+    ) & threshold.notna() & (threshold > 0))
 
     if not violation_mask.any():
         return GateResult(gate="outlier", ok=True)
@@ -592,12 +672,14 @@ def check_outlier(
     # union — pandas has no return-type stub here, so pyright falls back to
     # its broadest reading of the un-stubbed implementation).
     bad_idx = cast("pd.Index", returns.index[violation_mask])
-    samples = []
-    for d in bad_idx[:5]:
+    samples: list[dict[str, object]] = []
+    for d in cast("Iterable[object]", bad_idx[:5]):
+        # A label lookup on a uniquely-indexed Series is a scalar; pandas'
+        # un-stubbed `.loc` is untyped, so name what `float()` is given.
         samples.append({
             "date": _fmt_date(d),
-            "move": round(float(returns.loc[d]), 6),
-            "threshold": round(float(threshold.loc[d]), 6),
+            "move": round(float(cast(SupportsFloat, returns.loc[d])), 6),
+            "threshold": round(float(cast(SupportsFloat, threshold.loc[d])), 6),
         })
     return GateResult(
         gate="outlier",
@@ -624,7 +706,7 @@ def check_calendar_monotonic(df: pd.DataFrame, series_id: str) -> GateResult:
     but appears after a LATER date in index order fails even if no
     value repeats.
     """
-    idx = list(df.index)
+    idx = list(cast("Iterable[object]", df.index))
     dates = [_to_date(d) for d in idx]
 
     seen: dict[date, int] = {}
@@ -643,7 +725,7 @@ def check_calendar_monotonic(df: pd.DataFrame, series_id: str) -> GateResult:
     if not duplicates and not out_of_order:
         return GateResult(gate="calendar_monotonic", ok=True)
 
-    reasons = []
+    reasons: list[str] = []
     if duplicates:
         reasons.append(f"{len(duplicates)} duplicate date(s): {duplicates[:5]}")
     if out_of_order:
@@ -745,7 +827,7 @@ def validate_series(
 # ── Small helpers ──────────────────────────────────────────────────────────
 
 
-def _to_date(value: Any) -> date:
+def _to_date(value: object) -> date:
     """Coerce a pandas Timestamp / datetime / date / str index value to date.
 
     Raises ``ValueError`` if ``value`` is NaT/unparseable — every caller
@@ -757,7 +839,7 @@ def _to_date(value: Any) -> date:
     """
     if isinstance(value, date) and not hasattr(value, "hour"):
         return value
-    ts = pd.Timestamp(value)
+    ts = cast(_TimestampCtor, pd.Timestamp)(value)
     if not isinstance(ts, pd.Timestamp):
         # `pd.Timestamp(value)` constructs NaT (a NaTType, not a Timestamp)
         # for None/NaT/unparseable input; NaTType.date() returns NaT again
@@ -768,7 +850,7 @@ def _to_date(value: Any) -> date:
     return ts.date()
 
 
-def _fmt_date(value: Any) -> str:
+def _fmt_date(value: object) -> str:
     return _to_date(value).isoformat()
 
 
