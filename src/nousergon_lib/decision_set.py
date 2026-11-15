@@ -55,7 +55,8 @@ reads that field rather than asserting a value.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import cast
 
 __all__ = [
     "ATTRACTIVENESS_FEED_TOP_N",
@@ -109,7 +110,7 @@ def attractiveness_cut_name(n: int) -> str:
     return f"attractiveness_top_{int(n)}"
 
 
-def predictor_cut_name(membership: dict[str, Any]) -> str:
+def predictor_cut_name(membership: Mapping[str, object]) -> str:
     """The cut the predictor scores, as published by the producer.
 
     Reads ``predictor_universe_cut`` from the artifact. Raises rather than
@@ -128,7 +129,7 @@ def predictor_cut_name(membership: dict[str, Any]) -> str:
     return name
 
 
-def cut_tickers(membership: dict[str, Any], cut_name: str) -> list[str]:
+def cut_tickers(membership: Mapping[str, object], cut_name: str) -> list[str]:
     """Uppercased, whitespace-stripped tickers of ``cut_name``.
 
     Raises :class:`DecisionSetContractError` when the cut is absent or empty —
@@ -136,11 +137,14 @@ def cut_tickers(membership: dict[str, Any], cut_name: str) -> list[str]:
     in the message, because the failure this replaces ("it returned nothing
     and the pipeline carried on") is diagnosable only with them.
     """
-    cuts = membership.get("cuts") or {}
-    entry = cuts.get(cut_name) or {}
+    # The membership artifact is parsed JSON; its nested object types are not
+    # expressible by the public Mapping[str, object] boundary.
+    cuts = cast("Mapping[str, object]", membership.get("cuts") or {})
+    entry = cast("Mapping[str, object]", cuts.get(cut_name) or {})
     # Normalise BEFORE filtering: a whitespace-only entry is truthy, so
     # filtering first lets "  " through and it lands downstream as "".
-    normalised = (str(t).strip().upper() for t in (entry.get("tickers") or []))
+    tickers_value = cast("Iterable[object]", entry.get("tickers") or [])
+    normalised = (str(t).strip().upper() for t in tickers_value)
     tickers = [t for t in normalised if t]
     if not tickers:
         raise DecisionSetContractError(
@@ -151,7 +155,7 @@ def cut_tickers(membership: dict[str, Any], cut_name: str) -> list[str]:
 
 
 def assert_cut_nests(
-    membership: dict[str, Any],
+    membership: Mapping[str, object],
     *,
     inner: str,
     outer: str,
