@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -162,7 +162,7 @@ class StanceLoadings(BaseModel):
     catalyst: float = Field(ge=0.0, le=1.0, description="Event-driven factor loading")
 
     @model_validator(mode="after")
-    def _check_sum_to_one(self):
+    def _check_sum_to_one(self) -> StanceLoadings:
         """Loadings must form a proper probability distribution. 1e-3
         tolerance accommodates float roundoff in softmax + the producer's
         rounding-to-6-decimals on serialization."""
@@ -177,13 +177,13 @@ class StanceLoadings(BaseModel):
         """Convenience: return the dominant stance label (highest
         loading). Ties broken in canonical ``STANCE_NAMES`` order. Used
         by executor v1 + dashboards for single-label routing."""
-        pairs = (
+        pairs: tuple[tuple[StanceLiteral, float], ...] = (
             ("momentum", self.momentum),
             ("value", self.value),
             ("quality", self.quality),
             ("catalyst", self.catalyst),
         )
-        return max(pairs, key=lambda p: p[1])[0]  # type: ignore[return-value]
+        return max(pairs, key=lambda p: p[1])[0]
 
 
 CIORuleTagLiteral = Literal[
@@ -230,7 +230,7 @@ class QuantPick(BaseModel):
     ticker: str
     quant_score: float = Field(ge=0, le=100)
     rationale: str = ""
-    key_metrics: dict = Field(default_factory=dict)
+    key_metrics: dict[str, object] = Field(default_factory=dict)
 
 
 class QuantAnalystOutput(BaseModel):
@@ -381,7 +381,7 @@ class JointFinalizationOutput(BaseModel):
 
     @field_validator("selected_decisions", mode="before")
     @classmethod
-    def _parse_string_as_list(cls, v):
+    def _parse_string_as_list(cls, v: object) -> object:
         """Defense for an observed Sonnet failure mode: the model
         occasionally returns ``selected_decisions`` as a JSON-encoded
         string instead of a structured array, even though the tool
@@ -400,7 +400,7 @@ class JointFinalizationOutput(BaseModel):
         """
         if isinstance(v, str):
             try:
-                parsed = json.loads(v)
+                parsed = cast(object, json.loads(v))
                 if isinstance(parsed, list):
                     logging.getLogger(__name__).warning(
                         "[joint_finalization_schema] LLM returned "
@@ -409,7 +409,7 @@ class JointFinalizationOutput(BaseModel):
                         "(see schema-vs-LLM drift class).",
                         len(v),
                     )
-                    return parsed
+                    return cast(list[object], parsed)
             except json.JSONDecodeError:
                 pass
         return v
@@ -428,7 +428,7 @@ class MacroEconomistRawOutput(BaseModel):
     report_md: str = ""
     market_regime: RegimeLiteral = "neutral"
     sector_modifiers: dict[str, float] = Field(default_factory=dict)
-    sector_ratings: dict[str, dict] = Field(default_factory=dict)
+    sector_ratings: dict[str, dict[str, object]] = Field(default_factory=dict)
     key_theme: str = ""
     material_changes: list[str] = Field(default_factory=list)
 
@@ -598,7 +598,7 @@ class RubricEvalLLMOutput(BaseModel):
 
     @field_validator("dimension_scores", mode="before")
     @classmethod
-    def _parse_string_as_list(cls, v):
+    def _parse_string_as_list(cls, v: object) -> object:
         """Defense for an observed Haiku failure mode (first surfaced
         2026-05-03 in judge_only smoke against new-format Sat 5/3
         captures): the model occasionally returns ``dimension_scores``
@@ -616,7 +616,7 @@ class RubricEvalLLMOutput(BaseModel):
         """
         if isinstance(v, str):
             try:
-                parsed = json.loads(v)
+                parsed = cast(object, json.loads(v))
                 if isinstance(parsed, list):
                     logging.getLogger(__name__).warning(
                         "[rubric_eval_schema] LLM returned "
@@ -625,7 +625,7 @@ class RubricEvalLLMOutput(BaseModel):
                         "(see schema-vs-LLM drift class).",
                         len(v),
                     )
-                    return parsed
+                    return cast(list[object], parsed)
             except json.JSONDecodeError:
                 pass
         return v
