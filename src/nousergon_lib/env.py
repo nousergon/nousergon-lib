@@ -45,10 +45,10 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal, TypeVar, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 __all__ = [
     "ALERT_ROUTING_DIGEST",
@@ -185,7 +185,7 @@ class _Environment(_Strict):
 
     @model_validator(mode="after")
     def _check(self) -> _Environment:
-        checks: list[tuple[str, dict[str, Any], str | None]] = [
+        checks: list[tuple[str, Mapping[str, object], str | None]] = [
             ("buckets", self.buckets, _BUCKET_NAME),
             ("stores", self.stores, None),
             ("stacks", self.stacks, r"^[A-Za-z][A-Za-z0-9\-]{0,127}$"),
@@ -198,7 +198,7 @@ class _Environment(_Strict):
             for role, value in mapping.items():
                 if not _ROLE_RE.match(role):
                     raise ValueError(f"{section}: role {role!r} must match {_ROLE}")
-                if value_re is not None and not re.match(value_re, value):
+                if value_re is not None and (not isinstance(value, str) or not re.match(value_re, value)):
                     raise ValueError(f"{section}.{role}: {value!r} must match {value_re}")
         for role, store in self.stores.items():
             if store.bucket not in self.buckets:
@@ -236,12 +236,12 @@ class _Registry(_Strict):
         return self
 
 
-def validate_registry(doc: Any) -> _Registry:
+def validate_registry(doc: object) -> _Registry:
     """Validate a parsed registry document; raise :class:`RegistrySchemaError`."""
     if not isinstance(doc, Mapping):
         raise RegistrySchemaError(f"registry must be a mapping, got {type(doc).__name__}")
     try:
-        return _Registry.model_validate(dict(doc))
+        return _Registry.model_validate(dict(cast(Mapping[object, object], doc)))
     except ValidationError as exc:
         raise RegistrySchemaError(f"environment registry does not match the schema:\n{exc}") from exc
 
@@ -256,7 +256,7 @@ def _registry_path(path: str | os.PathLike[str] | None) -> Path:
     return Path(override) if override else PACKAGED_REGISTRY
 
 
-def _read(path: Path) -> Any:
+def _read(path: Path) -> object:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -286,7 +286,10 @@ def current_name(path: str | os.PathLike[str] | None = None) -> str:
 # ------------------------------------------------------------------ resolving
 
 
-def _lookup(section: str, mapping: Mapping[str, Any], role: str, env: str) -> Any:
+_T = TypeVar("_T")
+
+
+def _lookup(section: str, mapping: Mapping[str, _T], role: str, env: str) -> _T:
     try:
         return mapping[role]
     except KeyError:
@@ -363,10 +366,10 @@ class Environment:
         mapping = getattr(self._spec, section, None)
         if not isinstance(mapping, dict):
             raise UnknownRoleError(f"{section!r} is not a role section of the registry")
-        return sorted(mapping)
+        return sorted(cast(dict[str, object], mapping))
 
-    def as_dict(self) -> dict[str, Any]:
-        return {"name": self.name, **self._spec.model_dump()}
+    def as_dict(self) -> dict[str, JsonValue]:
+        return {"name": self.name, **cast(dict[str, JsonValue], self._spec.model_dump())}
 
 
 def resolve(name: str | None = None, *, registry: str | os.PathLike[str] | None = None) -> Environment:
@@ -401,11 +404,11 @@ def diff_against_packaged(path: str | os.PathLike[str]) -> list[str]:
     Compared after parsing, so comments and formatting never count; both
     sides must also pass the schema. Empty list means in sync.
     """
-    theirs = load_registry(path).model_dump()
-    ours = load_registry(PACKAGED_REGISTRY).model_dump()
+    theirs = cast(dict[str, JsonValue], load_registry(path).model_dump())
+    ours = cast(dict[str, JsonValue], load_registry(PACKAGED_REGISTRY).model_dump())
     out: list[str] = []
 
-    def walk(a: Any, b: Any, where: str) -> None:
+    def walk(a: JsonValue, b: JsonValue, where: str) -> None:
         if isinstance(a, dict) and isinstance(b, dict):
             for k in sorted(set(a) | set(b)):
                 here = f"{where}.{k}" if where else str(k)

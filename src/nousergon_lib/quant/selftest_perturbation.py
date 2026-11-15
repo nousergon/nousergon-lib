@@ -50,10 +50,23 @@ USAGE
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar, cast
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
+
+
+class _CaseResult(TypedDict):
+    case: str
+    verdict: str
+
+
+class _SelfTestResult(TypedDict):
+    verdict: str
+    cases: list[_CaseResult]
+
+
+_Result = TypeVar("_Result")
 
 
 def assert_perturbation_caught(
@@ -61,11 +74,11 @@ def assert_perturbation_caught(
     *,
     module_path: str,
     attr: str,
-    perturbed: Any,
-    run: Callable[[], dict],
+    perturbed: object,
+    run: Callable[[], _Result],
     case_name: str | None = None,
     expect_verdict: str = "FAIL",
-) -> dict:
+) -> _Result:
     """Monkeypatch one production attribute, rerun the battery, and assert it
     goes ``FAIL`` (or ``expect_verdict``) — proving the battery is SENSITIVE to
     that value rather than merely asserted correct.
@@ -100,13 +113,14 @@ def assert_perturbation_caught(
     monkeypatch.setattr(module, attr, perturbed)
 
     out = run()
-    assert out["verdict"] == expect_verdict, (
+    result = cast(_SelfTestResult, out)  # The callback boundary supplies the self-test artifact schema.
+    assert result["verdict"] == expect_verdict, (
         f"perturbing {module_path}.{attr} to {perturbed!r} did not move the "
-        f"battery to {expect_verdict} (got {out['verdict']!r}) — the self-test "
+        f"battery to {expect_verdict} (got {result['verdict']!r}) — the self-test "
         f"cannot detect the thing it exists to detect"
     )
     if case_name is not None:
-        matching = {c["verdict"] for c in out["cases"] if c["case"] == case_name}
+        matching = {c["verdict"] for c in result["cases"] if c["case"] == case_name}
         assert matching, f"no case named {case_name!r} in this battery's cases"
         assert expect_verdict in matching, (
             f"perturbing {module_path}.{attr} moved the battery to "
