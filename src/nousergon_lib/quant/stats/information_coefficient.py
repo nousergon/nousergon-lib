@@ -17,12 +17,33 @@ numpy rank-then-Pearson fallback gives the identical IC with no p-value.
 from __future__ import annotations
 
 import logging
-from typing import Any, TypedDict, cast
+from collections.abc import Iterable
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # pandas ships no stubs and pandas-stubs is not a dependency
+from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+
+
+class _SpearmanResult(Protocol):
+    """The two fields read off scipy's ``SignificanceResult``."""
+
+    @property
+    def statistic(self) -> float: ...
+    @property
+    def pvalue(self) -> float: ...
+
+
+class _RankedSeries(Protocol):
+    """``Series.rank()`` output; pandas ships no stubs, so name the one call used."""
+
+    def to_numpy(self) -> NDArray[np.float64]: ...
+
+
+class _GroupableFrame(Protocol):
+    def groupby(self, by: str) -> Iterable[tuple[object, pd.DataFrame]]: ...
 
 
 class ICResult(TypedDict, total=False):
@@ -34,8 +55,8 @@ class ICResult(TypedDict, total=False):
 
 
 def compute_ic(
-    conviction: pd.Series | np.ndarray,
-    forward_return: pd.Series | np.ndarray,
+    conviction: pd.Series | NDArray[np.generic],
+    forward_return: pd.Series | NDArray[np.generic],
     min_samples: int = 20,
 ) -> ICResult:
     """Compute Spearman rank correlation between conviction + forward return.
@@ -103,18 +124,18 @@ def compute_ic(
         }
 
     try:
-        from scipy.stats import spearmanr  # type: ignore[import-not-found]
+        from scipy.stats import spearmanr  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
 
         # scipy ships no py.typed marker, so spearmanr's return type is
         # opaque to pyright; it actually returns a SignificanceResult
         # (statistic + pvalue attributes) at runtime.
-        result = cast(Any, spearmanr(c, r))
+        result = cast(_SpearmanResult, spearmanr(c, r))
         ic = float(result.statistic)
         p_value = float(result.pvalue)
     except Exception:
         # Fallback: rank-then-pearson. Identical IC value; no p-value.
-        c_rank = pd.Series(c).rank().to_numpy()
-        r_rank = pd.Series(r).rank().to_numpy()
+        c_rank = cast(_RankedSeries, pd.Series(c).rank()).to_numpy()
+        r_rank = cast(_RankedSeries, pd.Series(r).rank()).to_numpy()
         ic = float(np.corrcoef(c_rank, r_rank)[0, 1])
         p_value = float("nan")
 
@@ -145,7 +166,7 @@ def compute_ic_by_bucket(
         if col not in df.columns:
             raise KeyError(f"column {col!r} not in dataframe")
     out: dict[str, ICResult] = {}
-    for bucket_value, sub in df.groupby(bucket_col):
+    for bucket_value, sub in cast(_GroupableFrame, df).groupby(bucket_col):
         # conviction_col / return_col are plain str (not literals), so
         # pyright can't statically rule out DataFrame.__getitem__'s
         # duplicate-column-label overload; both were confirmed present in

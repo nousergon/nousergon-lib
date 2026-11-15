@@ -59,10 +59,13 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Protocol, cast
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import (  # pyright: ignore[reportMissingTypeStubs]  # botocore ships no stubs; botocore-stubs is not a dependency
+    ClientError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +111,30 @@ class ResolvedArtifact:
         return self.key is not None
 
 
+class _S3Head(Protocol):
+    """The S3 HEAD call used for existence checks (a boto3 S3 client satisfies it)."""
+
+    def head_object(self, *, Bucket: str, Key: str) -> object: ...
+
+
+class _S3Get(Protocol):
+    """The S3 GET call used for JSON reads (a boto3 S3 client satisfies it)."""
+
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
 def _is_not_found(err: ClientError) -> bool:
-    code = err.response.get("Error", {}).get("Code")
+    # botocore ships no stubs; ``response`` is the parsed error payload dict.
+    response = cast("dict[str, dict[str, object]]", err.response)
+    code = response.get("Error", {}).get("Code")
     return code in _NOT_FOUND_CODES
 
 
-def _head_exists(s3: Any, bucket: str, key: str) -> bool:
+def _head_exists(s3: _S3Head, bucket: str, key: str) -> bool:
     """True iff ``key`` exists. Raises on any non-404 ClientError."""
     try:
         s3.head_object(Bucket=bucket, Key=key)
@@ -125,7 +146,7 @@ def _head_exists(s3: Any, bucket: str, key: str) -> bool:
     return True
 
 
-def get_json(s3: Any, bucket: str, key: str) -> dict | None:
+def get_json(s3: _S3Get, bucket: str, key: str) -> dict[str, object] | None:
     """Read one JSON object from S3.
 
     Returns the parsed dict, or ``None`` if the key does not exist
@@ -141,10 +162,12 @@ def get_json(s3: Any, bucket: str, key: str) -> dict | None:
             return None
         logger.error("S3 read failed for s3://%s/%s: %s", bucket, key, e)
         raise
-    return json.loads(resp["Body"].read())
+    # The body is a botocore StreamingBody and the payload is untyped JSON.
+    body = cast(_Readable, resp["Body"])
+    return cast("dict[str, object]", json.loads(body.read()))
 
 
-def _walk_back_dates(run_date: str, max_age_days: int):
+def _walk_back_dates(run_date: str, max_age_days: int) -> Iterator[tuple[str, int]]:
     """Yield ``(iso_date, age_days)`` from ``run_date`` backward, inclusive.
 
     Raises ``ValueError`` if ``run_date`` is not an ISO date — callers handle
@@ -156,7 +179,7 @@ def _walk_back_dates(run_date: str, max_age_days: int):
 
 
 def resolve_windowed_artifact(
-    s3: Any,
+    s3: _S3Head,
     bucket: str,
     key_template: str,
     run_date: str,
@@ -202,13 +225,13 @@ def resolve_windowed_artifact(
 
 
 def get_json_windowed(
-    s3: Any,
+    s3: _S3Get,
     bucket: str,
     key_template: str,
     run_date: str,
     *,
     max_age_days: int = DEFAULT_ARTIFACT_MAX_AGE_DAYS,
-) -> tuple[dict | None, str | None, int | None, str | None]:
+) -> tuple[dict[str, object] | None, str | None, int | None, str | None]:
     """Resolve a dated JSON artifact to the FRESHEST instance at/before
     ``run_date`` within ``max_age_days``, walking back one calendar day at a time.
 

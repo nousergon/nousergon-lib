@@ -30,7 +30,8 @@ import math
 from typing import TypedDict
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # pandas ships no stubs and pandas-stubs is not a dependency
+from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def _annualized_sharpe(returns: np.ndarray, periods_per_year: float = _TRADING_DAYS_PER_YEAR) -> float:
+def _annualized_sharpe(returns: NDArray[np.float64], periods_per_year: float = _TRADING_DAYS_PER_YEAR) -> float:
     """Annualized Sharpe (risk-free = 0), sample-std (ddof=1)."""
     if returns.size < 2:
         return 0.0
@@ -87,7 +88,7 @@ def _annualized_sharpe(returns: np.ndarray, periods_per_year: float = _TRADING_D
     return mean / std * math.sqrt(periods_per_year)
 
 
-def _sample_skew_kurtosis(returns: np.ndarray) -> tuple[float, float]:
+def _sample_skew_kurtosis(returns: NDArray[np.float64]) -> tuple[float, float]:
     """Sample skewness and excess kurtosis. Pearson-style; scipy-equivalent.
 
     Excess kurtosis = K - 3 (so a normal has 0 excess kurtosis).
@@ -108,7 +109,7 @@ def _sample_skew_kurtosis(returns: np.ndarray) -> tuple[float, float]:
 
 
 def compute_psr(
-    daily_returns: pd.Series | np.ndarray,
+    daily_returns: pd.Series | NDArray[np.generic],
     sharpe_benchmark: float = 0.0,
     periods_per_year: float = _TRADING_DAYS_PER_YEAR,
 ) -> PSRResult:
@@ -196,7 +197,7 @@ _EULER_MASCHERONI = 0.5772156649015329
 
 
 def compute_dsr(
-    daily_returns: pd.Series | np.ndarray,
+    daily_returns: pd.Series | NDArray[np.generic],
     n_trials: int,
 ) -> DSRResult:
     """Deflated Sharpe Ratio.

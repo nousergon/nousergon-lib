@@ -30,10 +30,23 @@ from __future__ import annotations
 
 import io
 import logging
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
-from typing import Any
+from typing import IO, Protocol, SupportsFloat, cast
 
 logger = logging.getLogger(__name__)
+
+
+class _S3PutClient(Protocol):
+    """The one S3 call the mirror makes (a boto3 S3 client satisfies it)."""
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object: ...
+
+
+class _ParquetWritable(Protocol):
+    """The one ``DataFrame`` call the mirror makes; pandas ships no stubs."""
+
+    def to_parquet(self, path: IO[bytes], *, engine: str, index: bool) -> object: ...
 
 DEFAULT_BUCKET = "alpha-engine-research"
 DEFAULT_PREFIX = "rag/parquet"
@@ -67,9 +80,9 @@ def mirror_document_to_parquet(
     filed_date: date,
     title: str | None,
     url: str | None,
-    chunks: list[dict],
+    chunks: Sequence[Mapping[str, object]],
     *,
-    s3_client: Any = None,
+    s3_client: _S3PutClient | None = None,
     bucket: str = DEFAULT_BUCKET,
     prefix: str = DEFAULT_PREFIX,
 ) -> str | None:
@@ -87,8 +100,8 @@ def mirror_document_to_parquet(
         return None
 
     try:
-        import boto3
-        import pandas as pd
+        import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs; boto3-stubs is not a dependency
+        import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # pandas ships no stubs and pandas-stubs is not a dependency
 
         client = s3_client if s3_client is not None else boto3.client("s3")
 
@@ -105,17 +118,19 @@ def mirror_document_to_parquet(
                 "chunk_index": i,
                 "content": chunk["content"],
                 "section_label": chunk.get("section_label"),
-                "embedding": [float(x) for x in chunk["embedding"]],
+                # caller-supplied loose dict: the embedding is any float sequence
+                "embedding": [float(x) for x in cast("Iterable[SupportsFloat]", chunk["embedding"])],
             }
             for i, chunk in enumerate(chunks)
         ]
-        df = pd.DataFrame(rows)
+        df = cast(_ParquetWritable, pd.DataFrame(rows))
 
         buf = io.BytesIO()
         df.to_parquet(buf, engine="pyarrow", index=False)
 
         key = parquet_mirror_key(doc_type, filed_date, document_id, prefix=prefix)
-        client.put_object(
+        # boto3 ships no stubs, so the default client is untyped; name its one call.
+        cast(_S3PutClient, client).put_object(
             Bucket=bucket,
             Key=key,
             Body=buf.getvalue(),
