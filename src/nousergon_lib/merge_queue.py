@@ -61,10 +61,12 @@ __all__ = [
 #: `alpha-engine-config` emits: `guard / merge-group required-check guard`.
 GUARD_CONTEXT_MARKER = "merge-group-required-check-guard"
 
-ApiFn = Callable[[str], Any]
+# Any, not object: callers inject recorded-state fakes and the result is
+# untyped GitHub JSON that each reader narrows with isinstance/cast.
+ApiFn = Callable[[str], Any]  # pyright: ignore[reportExplicitAny]  # untyped JSON boundary, see above
 
 
-class MergeQueueConfig(dict):
+class MergeQueueConfig(dict[str, object]):
     """The `merge_queue` rule's parameters, plus the ruleset that carried it.
 
     A dict subclass rather than a dataclass so callers can serialise it straight
@@ -73,14 +75,14 @@ class MergeQueueConfig(dict):
 
     @property
     def ruleset_id(self) -> int:
-        return self["_ruleset_id"]
+        return cast(int, self["_ruleset_id"])
 
     @property
     def response_timeout_minutes(self) -> int | None:
-        return self.get("check_response_timeout_minutes")
+        return cast("int | None", self.get("check_response_timeout_minutes"))
 
 
-def gh_api(path: str) -> Any:
+def gh_api(path: str) -> Any:  # pyright: ignore[reportExplicitAny]  # the ApiFn default: parsed GitHub JSON, untyped by design
     """Default `api` implementation: shell out to `gh api`.
 
     Raises on failure rather than returning a sentinel. A sweep that cannot read
@@ -97,7 +99,7 @@ def gh_api(path: str) -> Any:
     return json.loads(result.stdout)
 
 
-def _api_or_none(api: ApiFn, path: str) -> Any:
+def _api_or_none(api: ApiFn, path: str) -> object:
     """Read a path whose failure is a legitimate answer ONLY because the caller
     has a fallback for it. `gh_api` raises the same way for a 404 (ruleset-only
     repo) and a 403 (token lacks admin), so a None here means "not read", never
@@ -119,7 +121,7 @@ def required_contexts(repo: str, *, api: ApiFn = gh_api) -> list[str]:
     """
     contexts: list[str] = []
 
-    for rs in api(f"/repos/{repo}/rulesets") or []:
+    for rs in cast("list[dict[str, object]]", api(f"/repos/{repo}/rulesets") or []):
         if rs.get("enforcement") != "active":
             continue
         full = api(f"/repos/{repo}/rulesets/{rs['id']}")
@@ -212,7 +214,7 @@ def active_merge_queue(repo: str, *, api: ApiFn = gh_api) -> MergeQueueConfig | 
     every one of them as a live queue, which is exactly backwards from what an
     auditor needs.
     """
-    for rs in api(f"/repos/{repo}/rulesets") or []:
+    for rs in cast("list[dict[str, object]]", api(f"/repos/{repo}/rulesets") or []):
         if rs.get("enforcement") != "active":
             continue
         full = api(f"/repos/{repo}/rulesets/{rs['id']}")
@@ -244,22 +246,25 @@ def parse_workflow(text: str) -> tuple[str | None, set[str]]:
     doc = yaml.safe_load(text)
     if not isinstance(doc, dict):
         return None, set()
+    wf = cast("dict[object, object]", doc)
 
     # `on:` is parsed by PyYAML as the boolean True under YAML 1.1, so both keys
     # must be tried. A workflow whose trigger block silently vanished would read
     # as "no merge_group" — a false gap on every check it produces.
-    on_block = doc.get("on", doc.get(True, {}))
+    on_block = wf.get("on", wf.get(True, {}))
     has_mg: str | None = None
     if isinstance(on_block, dict):
-        mg = on_block.get("merge_group")
-        if isinstance(mg, dict) and isinstance(mg.get("types"), list):
-            has_mg = str(mg["types"])
+        mg = cast("dict[object, object]", on_block).get("merge_group")
+        if isinstance(mg, dict):
+            mg_block = cast("dict[object, object]", mg)
+            if isinstance(mg_block.get("types"), list):
+                has_mg = str(mg_block["types"])
 
     job_names: set[str] = set()
-    for jid, job_def in (doc.get("jobs") or {}).items():
+    for jid, job_def in cast("dict[object, object]", wf.get("jobs") or {}).items():
         if not isinstance(job_def, dict):
             continue
-        name = job_def.get("name")
+        name = cast("dict[object, object]", job_def).get("name")
         job_names.add(name if isinstance(name, str) else str(jid))
 
     return has_mg, job_names
@@ -299,13 +304,15 @@ def reusable_calls(text: str) -> list[tuple[str, str]]:
     if not isinstance(doc, dict):
         return []
     calls: list[tuple[str, str]] = []
-    for jid, job_def in (doc.get("jobs") or {}).items():
+    jobs = cast("dict[object, object]", cast("dict[object, object]", doc).get("jobs") or {})
+    for jid, job_def in jobs.items():
         if not isinstance(job_def, dict):
             continue
-        uses = job_def.get("uses")
+        job = cast("dict[object, object]", job_def)
+        uses = job.get("uses")
         if not isinstance(uses, str) or not uses.strip():
             continue
-        name = job_def.get("name")
+        name = job.get("name")
         calls.append((name if isinstance(name, str) else str(jid), uses.strip()))
     return calls
 
