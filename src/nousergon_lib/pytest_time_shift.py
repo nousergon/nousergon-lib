@@ -50,39 +50,41 @@ from __future__ import annotations
 import datetime as _datetime_module
 from datetime import date as _RealDate
 from datetime import datetime as _RealDateTime
-from datetime import timedelta
+from datetime import timedelta, tzinfo
+
+from pytest import Config, Parser
 
 __all__ = ["pytest_addoption", "pytest_configure", "shifted_types", "SHIFT_OPTION"]
 
 SHIFT_OPTION = "--time-shift-days"
 
 
-def shifted_types(days: int):
+def shifted_types(days: int) -> tuple[type[_RealDate], type[_RealDateTime]]:
     """(date_subclass, datetime_subclass) whose clock readers are shifted."""
     delta = timedelta(days=days)
 
     class ShiftedDate(_RealDate):
         @classmethod
-        def today(cls):
+        def today(cls) -> _RealDate:
             return _RealDate.today() + delta
 
     class ShiftedDateTime(_RealDateTime):
         @classmethod
-        def now(cls, tz=None):
+        def now(cls, tz: tzinfo | None = None) -> _RealDateTime:
             return _RealDateTime.now(tz) + delta
 
         @classmethod
-        def utcnow(cls):
-            return _RealDateTime.utcnow() + delta
+        def utcnow(cls) -> _RealDateTime:
+            return _RealDateTime.utcnow() + delta  # pyright: ignore[reportDeprecated] -- exact compatibility requires the deprecated naive-UTC API
 
         @classmethod
-        def today(cls):
+        def today(cls) -> _RealDateTime:
             return _RealDateTime.today() + delta
 
     return ShiftedDate, ShiftedDateTime
 
 
-def pytest_addoption(parser):  # pragma: no cover - pytest hook wiring
+def pytest_addoption(parser: Parser) -> None:  # pragma: no cover - pytest hook wiring
     parser.addoption(
         SHIFT_OPTION,
         action="store",
@@ -96,7 +98,7 @@ def pytest_addoption(parser):  # pragma: no cover - pytest hook wiring
     )
 
 
-def pytest_configure(config):  # pragma: no cover - pytest hook wiring
+def pytest_configure(config: Config) -> None:  # pragma: no cover - pytest hook wiring
     days = config.getoption(SHIFT_OPTION.lstrip("-").replace("-", "_"), 0)
     if not days:
         return
