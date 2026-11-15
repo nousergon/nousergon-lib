@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
@@ -559,7 +560,7 @@ def ingest_document(
     filed_date: date,
     title: str | None,
     url: str | None,
-    chunks: list[dict],
+    chunks: Sequence[Mapping[str, object]],
     external_id: str | None = None,
     mirror_to_parquet: bool = True,
 ) -> str | None:
