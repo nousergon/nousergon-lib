@@ -41,12 +41,24 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TypedDict
 
 # Institutional defaults — large-cap US equities / IBKR-paper calibration.
 _DEFAULT_HALF_SPREAD_BPS = 2.5
 _DEFAULT_IMPACT_COEF_BPS = 10.0
 _DEFAULT_COMMISSION_BPS = 0.5
 _DEFAULT_MIN_COST_BPS = 0.0
+
+
+class _TransactionCostConfig(TypedDict, total=False):
+    half_spread_bps: float
+    impact_coef_bps: float
+    commission_bps: float
+    min_cost_bps: float
+
+
+class _Config(TypedDict, total=False):
+    transaction_cost: _TransactionCostConfig
 
 
 def _sigma_scale(sigma: float | None, ref_sigma: float | None) -> float:
@@ -74,10 +86,12 @@ class TransactionCostModel:
     min_cost_bps: float = _DEFAULT_MIN_COST_BPS
 
     @classmethod
-    def from_config(cls, config: dict | None) -> TransactionCostModel:
+    def from_config(cls, config: _Config | None) -> TransactionCostModel:
         """Build from the optional ``transaction_cost`` block of the config;
         absent keys fall back to the institutional defaults."""
-        cfg = ((config or {}).get("transaction_cost") or {}) if config else {}
+        cfg: _TransactionCostConfig = (
+            ((config or {}).get("transaction_cost") or {}) if config else {}
+        )
         return cls(
             half_spread_bps=float(cfg.get("half_spread_bps", _DEFAULT_HALF_SPREAD_BPS)),
             impact_coef_bps=float(cfg.get("impact_coef_bps", _DEFAULT_IMPACT_COEF_BPS)),
