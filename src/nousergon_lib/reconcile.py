@@ -27,10 +27,30 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, SupportsInt, cast
 
 if TYPE_CHECKING:  # pragma: no cover
-    import pandas as pd
+    import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # pandas ships no stubs and pandas-stubs is not a dependency
+
+
+class _DateIndex(Protocol):
+    """The one ``pd.Index`` method used here; pandas ships no stubs."""
+
+    def intersection(self, other: _DateIndex) -> _DateIndex: ...
+
+    def __len__(self) -> int: ...
+
+
+class _BoolMask(Protocol):
+    """A boolean Series reduced to its True count."""
+
+    def sum(self) -> SupportsInt: ...
+
+
+class _ToNumeric(Protocol):
+    """``pd.to_numeric`` as called here: one column in, one Series out."""
+
+    def __call__(self, arg: object, errors: str = ...) -> pd.Series: ...
 
 
 @dataclass(frozen=True)
@@ -41,9 +61,9 @@ class ParityReport:
     observation window. ``summary()`` is the one-line operator string.
     """
 
-    only_in_a: frozenset
-    only_in_b: frozenset
-    common: frozenset
+    only_in_a: frozenset[str]
+    only_in_b: frozenset[str]
+    common: frozenset[str]
     rowcount_deltas: Mapping[str, int]  # ticker -> len(a)-len(b), nonzero only
     max_abs_value_delta: float
     worst_cell: tuple[str, str, str] | None  # (ticker, column, iso-date)
@@ -88,7 +108,7 @@ class ParityReport:
             eps=self.epsilon,
         )
 
-    def as_metrics(self) -> dict:
+    def as_metrics(self) -> dict[str, object]:
         """JSON-able metric dict for the observation gate / metrics surface."""
         return {
             "passed": self.passed,
@@ -139,18 +159,19 @@ def reconcile_frame_dicts(
         require_ticker_match: include ticker-set symmetry in ``passed``.
         require_rowcount_match: include row-count equality in ``passed``.
     """
-    import pandas as pd  # lazy: keeps module importable without the extra
+    import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # lazy: keeps module importable without the extra; pandas ships no stubs
 
     keys_a = set(a)
     keys_b = set(b)
     common = keys_a & keys_b
 
-    rowcount_deltas: dict = {}
+    rowcount_deltas: dict[str, int] = {}
     max_abs = 0.0
     worst_cell: tuple[str, str, str] | None = None
     n_over = 0
     n_compared = 0
     cols = tuple(value_cols)
+    to_numeric = cast(_ToNumeric, pd.to_numeric)
 
     for ticker in sorted(common):
         fa = a[ticker]
@@ -160,7 +181,7 @@ def reconcile_frame_dicts(
         if delta != 0:
             rowcount_deltas[ticker] = delta
 
-        idx = fa.index.intersection(fb.index)
+        idx = cast(_DateIndex, fa.index).intersection(cast(_DateIndex, fb.index))
         if len(idx) == 0:
             continue
         for col in cols:
@@ -168,19 +189,19 @@ def reconcile_frame_dicts(
                 continue
             # fa.loc[idx, col] / fb.loc[idx, col] always select a single
             # column across a row index here (col is one column label from
-            # `cols`), so to_numeric always receives/returns a Series; the
-            # cast narrows pyright away from to_numeric's broader
-            # scalar/array-input overload union (its signature has no
+            # `cols`), so to_numeric always receives/returns a Series;
+            # _ToNumeric narrows pyright away from to_numeric's broader
+            # scalar/array-input return union (its signature has no
             # per-input-type overloads to infer from).
-            sa = cast("pd.Series", pd.to_numeric(fa.loc[idx, col], errors="coerce"))
-            sb = cast("pd.Series", pd.to_numeric(fb.loc[idx, col], errors="coerce"))
+            sa = to_numeric(fa.loc[idx, col], errors="coerce")
+            sb = to_numeric(fb.loc[idx, col], errors="coerce")
             diff = (sa - sb).abs()
             # NaN on either side -> treat as comparable only where both
             # present; an asymmetric NaN is a real mismatch.
             both_nan = sa.isna() & sb.isna()
             one_nan = (sa.isna() ^ sb.isna())
             diff = diff.where(~both_nan)
-            n_compared += int((~both_nan).sum())
+            n_compared += int(cast(_BoolMask, ~both_nan).sum())
 
             over = (diff > epsilon) | one_nan
             n_over += int(over.sum())
