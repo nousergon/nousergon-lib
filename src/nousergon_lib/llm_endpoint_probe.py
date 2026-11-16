@@ -81,9 +81,15 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any
+from typing import TypedDict
 
 _ALLOWED_SCHEMES = ("http", "https")
+
+
+class ProbeResult(TypedDict):
+    http_status: int
+    body: str
+    verdict: str
 
 
 def _validate_url(url: str) -> str:
@@ -319,7 +325,7 @@ def probe(
     path: str | None = None,
     headers: dict[str, str] | None = None,
     timeout: float,
-) -> dict[str, Any]:
+) -> ProbeResult:
     """Convenience wrapper: one `request()` + `classify()`, as a result dict.
 
     Neither prior copy called anything named `probe` — each built its own

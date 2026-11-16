@@ -1256,16 +1256,6 @@
                 }
             }
         ],
-        "./src/nousergon_lib/context.py": [
-            {
-                "code": "reportUnusedFunction",
-                "range": {
-                    "startColumn": 4,
-                    "endColumn": 16,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./src/nousergon_lib/cost_gate/resource_map.py": [
             {
                 "code": "reportUnknownMemberType",
@@ -4186,16 +4176,6 @@
                 }
             }
         ],
-        "./src/nousergon_lib/guard_mode.py": [
-            {
-                "code": "reportUnnecessaryIsInstance",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 47,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./src/nousergon_lib/health.py": [
             {
                 "code": "reportUnknownVariableType",
@@ -4290,16 +4270,6 @@
                 "range": {
                     "startColumn": 24,
                     "endColumn": 36,
-                    "lineCount": 1
-                }
-            }
-        ],
-        "./src/nousergon_lib/llm_endpoint_probe.py": [
-            {
-                "code": "reportExplicitAny",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 18,
                     "lineCount": 1
                 }
             }
