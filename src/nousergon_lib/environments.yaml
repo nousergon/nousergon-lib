@@ -102,7 +102,9 @@ environments:
       serve_daily_m: {days: MON-FRI, time_et: "22:15"}
       serve_daily_u: {days: MON-FRI, time_et: "22:15"}
       serve_daily_s: {days: MON-FRI, time_et: "22:30"}
-      weekly: {days: SAT, time_et: "07:00"}
+      # DAILY since alpha-engine-config-I13712: Saturday runs the arc, every
+      # other morning is a resume-or-no-op retry of that week (`--skip-if-ok`).
+      weekly: {days: DAILY, time_et: "07:00"}
       alerts_sweep: {days: DAILY, time_et: "21:00"}
       heartbeat: {days: SAT, time_et: "17:00"}
       # Not a stack schedule: prod's trader session is crucible-executor's
@@ -187,7 +189,7 @@ environments:
       serve_daily_m: {days: MON-FRI, time_et: "23:30"}
       serve_daily_u: {days: MON-FRI, time_et: "23:30"}
       serve_daily_s: {days: MON-FRI, time_et: "23:45"}
-      weekly: {days: SAT, time_et: "15:00"}
+      weekly: {days: DAILY, time_et: "15:00"}
       # The staging trader session (S-21, I12509): simulated fills, never
       # routes. Prod's runs from the executor box's timer, not the stack, so
       # nous-ergon-ops crucible_v2_staging_schedules.py declares this schedule.
