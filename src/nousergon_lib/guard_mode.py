@@ -55,7 +55,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import Callable, cast
 
 __all__ = ["GuardMode", "GuardStaging"]
 
@@ -97,7 +97,7 @@ class GuardStaging:
         # malformed must not reach production and discover it on the one run
         # where the predicate fires.
         for field in ("name", "promotion_criterion", "tracked_issue"):
-            value = getattr(self, field)
+            value: object = getattr(self, field)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(
                     f"GuardStaging.{field} is required and must be non-empty — "
@@ -106,7 +106,9 @@ class GuardStaging:
                     "mode forever, which is the failure this rule exists to "
                     "prevent as much as the one it is named for."
                 )
-        if not isinstance(self.mode, GuardMode):
+        # Widened to `object`: callers can bypass the annotation at runtime.
+        mode = cast(object, self.mode)
+        if not isinstance(mode, GuardMode):
             raise ValueError(f"GuardStaging.mode must be a GuardMode, got {self.mode!r}")
 
     @property
