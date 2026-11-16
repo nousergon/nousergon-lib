@@ -35,9 +35,9 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 __all__ = [
     "API_ROOT",
@@ -285,13 +285,21 @@ class Tracker:
 
     # -- reads --------------------------------------------------------------
 
-    def find_issue_by_title(self, title: str) -> int | None:
+    def find_issue_by_title(self, title: str, *, include_closed: bool = False) -> int | None:
         """The number of the OPEN issue titled exactly ``title``, or ``None``.
 
         RAISES :class:`TrackerError` when MORE than one carries it: a second
         open issue with this title is a loud failure, never a pick — posting
         to whichever one a race or a manual duplicate left behind is a full
         update nobody can find from the headline that links it.
+
+        ``include_closed`` widens the match to CLOSED issues too, for a caller
+        whose title is a one-time record (an incident keyed by its date) rather
+        than a rolling issue: once a human has closed it, filing it again the
+        next morning would reopen a decision somebody already made. An open
+        match still wins, and two open matches still raise; with no open match
+        the OLDEST closed one is returned, because there is nothing to post to
+        and the only question asked is "was this ever filed".
 
         GitHub's search API does PHRASE matching over the whole document, not
         an exact-field match, so every candidate it returns is re-checked
@@ -302,7 +310,8 @@ class Tracker:
         repo = self.config.repo
         doing = f"searching {repo} for an issue titled {title!r}"
         token = self._granted(doing)
-        query = f'repo:{repo} is:issue is:open in:title "{title}"'
+        state_filter = "" if include_closed else " is:open"
+        query = f'repo:{repo} is:issue{state_filter} in:title "{title}"'
         url = f"{SEARCH_API_ROOT}?q={urllib.parse.quote(query)}"
         try:
             status, body = self._send(url, token=token)
@@ -314,16 +323,18 @@ class Tracker:
         items = document.get("items") if isinstance(document, dict) else None
         if not isinstance(items, list):
             raise TrackerError(f"{doing} answered with no `items` list: {document!r}")
-        numbers = sorted(
-            {
-                item["number"]
-                for item in items
-                if isinstance(item, dict)
-                and item.get("title") == title
-                and item.get("state") == "open"
-                and isinstance(item.get("number"), int)
-            }
-        )
+        exact: list[tuple[int, str]] = []
+        for item in cast(list[object], items):
+            if not isinstance(item, dict):
+                continue
+            fields = cast(dict[str, object], item)
+            number = fields.get("number")
+            if fields.get("title") == title and isinstance(number, int):
+                exact.append((number, str(fields.get("state"))))
+        numbers = sorted({number for number, state in exact if state == "open"})
+        if not numbers and include_closed:
+            closed = sorted({number for number, state in exact if state == "closed"})
+            return closed[0] if closed else None
         if not numbers:
             return None
         if len(numbers) > 1:
@@ -426,12 +437,17 @@ class Tracker:
 
     # -- writes -------------------------------------------------------------
 
-    def create_issue(self, *, title: str, body: str) -> int:
+    def create_issue(self, *, title: str, body: str, labels: Sequence[str] = ()) -> int:
         """Create an issue titled ``title``. Returns its number.
 
         One of the three mutating requests this adapter can construct — an
         issue CREATE, never a close, reopen, label or assign. Reached exactly
         once per rolling issue's lifetime.
+
+        ``labels`` are set AT CREATION only, as the create payload's
+        ``labels`` key, and the key is omitted when there are none so a call
+        without them sends exactly what it always sent. There is still no
+        request that labels, relabels or unlabels an existing issue.
         """
         repo = self.config.repo
         doing = f"creating the issue {title!r} in {repo}"
@@ -439,7 +455,10 @@ class Tracker:
         if not title.strip():
             raise TrackerError(f"refusing to create an issue with an empty title in {repo}")
         try:
-            status, raw = self._request("/issues", token=token, method="POST", payload={"title": title, "body": body})
+            payload: dict[str, object] = {"title": title, "body": body}
+            if labels:
+                payload["labels"] = [str(label) for label in labels]
+            status, raw = self._request("/issues", token=token, method="POST", payload=payload)
         except OSError as exc:
             raise TrackerError(f"{doing} failed at the transport: {exc}") from exc
         if status != 201:
@@ -452,18 +471,22 @@ class Tracker:
             )
         return number
 
-    def find_or_create_issue(self, *, title: str, body: str) -> int:
+    def find_or_create_issue(
+        self, *, title: str, body: str, labels: Sequence[str] = (), include_closed: bool = False
+    ) -> int:
         """The rolling issue's number, creating it once if it does not exist.
 
         ``body`` is the issue's INITIAL body only. It is not re-posted on a
         day the issue already exists: every delivery after the first is one
         more comment, and the body is rewritten separately by
-        :meth:`update_issue_body` with a regenerated index.
+        :meth:`update_issue_body` with a regenerated index. ``labels`` apply
+        only to an issue this call creates; an issue found is left as it is.
+        ``include_closed`` is :meth:`find_issue_by_title`'s.
         """
-        number = self.find_issue_by_title(title)
+        number = self.find_issue_by_title(title, include_closed=include_closed)
         if number is not None:
             return number
-        return self.create_issue(title=title, body=body)
+        return self.create_issue(title=title, body=body, labels=labels)
 
     def post_comment(self, issue: int, body: str) -> str:
         """Post ``body`` as a comment on ``issue``. Returns its permalink.
