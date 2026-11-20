@@ -1,17 +1,22 @@
-"""Helpers for reading GitHub Actions cron schedules."""
+"""Helpers for reading and comparing GitHub Actions cron schedules."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
-from datetime import date, timedelta
-from typing import cast
 
-_CRON_LINE = re.compile(r"^\s*(?:-\s*)?cron\s*:\s*(.*)$")
-_FIELD_LIMITS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+_CRON_LINE = re.compile(r"^\s*-?\s*cron\s*:\s*(.*?)\s*$")
+_DAY_NAMES = {
+    "SUN": 0,
+    "MON": 1,
+    "TUE": 2,
+    "WED": 3,
+    "THU": 4,
+    "FRI": 5,
+    "SAT": 6,
+}
 
 
-def _uncomment(value: str) -> str:
+def _without_comment(value: str) -> str:
     quote: str | None = None
     for index, char in enumerate(value):
         if char in "'\"":
@@ -25,13 +30,13 @@ def _uncomment(value: str) -> str:
 
 
 def schedule_crons(text: str) -> list[str]:
-    """Extract cron expressions from the ``schedule`` entries in YAML text."""
+    """Return cron expressions from the ``schedule`` entries in workflow text."""
     crons: list[str] = []
     for line in text.splitlines():
         match = _CRON_LINE.match(line)
         if match is None:
             continue
-        value = _uncomment(match.group(1))
+        value = _without_comment(match.group(1)).strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
             value = value[1:-1]
         if value:
@@ -39,86 +44,124 @@ def schedule_crons(text: str) -> list[str]:
     return crons
 
 
-def _field_values(field: str, low: int, high: int) -> set[int] | None:
+def _number(value: str, names: dict[str, int] | None = None) -> int | None:
+    if names is not None and value.upper() in names:
+        return names[value.upper()]
+    return int(value) if value.isdigit() else None
+
+
+def _field_values(
+    field: str,
+    minimum: int,
+    maximum: int,
+    *,
+    names: dict[str, int] | None = None,
+) -> set[int] | None:
     values: set[int] = set()
     for part in field.split(","):
         base, separator, step_text = part.partition("/")
         if separator:
-            if not step_text.isdigit() or int(step_text) == 0:
+            if not step_text.isdigit() or int(step_text) < 1:
                 return None
             step = int(step_text)
         else:
             step = 1
-
-        if base == "*":
-            start, end = low, high
+        if base in ("*", "?"):
+            start, end = minimum, maximum
         elif "-" in base:
             start_text, end_text = base.split("-", 1)
-            if not start_text.isdigit() or not end_text.isdigit():
+            start = _number(start_text, names)
+            end = _number(end_text, names)
+            if start is None or end is None or start > end:
                 return None
-            start, end = int(start_text), int(end_text)
-        elif base.isdigit() and not separator:
-            start = end = int(base)
         else:
-            return None
-        if start < low or end > high or start > end:
+            value = _number(base, names)
+            if value is None:
+                return None
+            start = end = value
+        if start < minimum or end > maximum:
             return None
         values.update(range(start, end + 1, step))
-    return values
+    return values or None
 
 
-def _parse_cron(cron: str) -> tuple[set[int], set[int], set[int], set[int], set[int]] | None:
-    fields = cron.split()
+def _weekly_fires(expr: str) -> set[int] | None:
+    fields = expr.split()
+    if len(fields) != 5 or fields[2] not in ("*", "?") or fields[3] != "*":
+        return None
+    minutes = _field_values(fields[0], 0, 59)
+    hours = _field_values(fields[1], 0, 23)
+    days = _field_values(fields[4], 0, 7, names=_DAY_NAMES)
+    if minutes is None or hours is None or days is None:
+        return None
+    days = {day % 7 for day in days}
+    return {day * 1440 + hour * 60 + minute for day in days for hour in hours for minute in minutes}
+
+
+def _average_interval(expr: str) -> float | None:
+    fields = expr.split()
     if len(fields) != 5:
         return None
-    parsed = tuple(_field_values(field, *limits) for field, limits in zip(fields, _FIELD_LIMITS))
-    if any(values is None for values in parsed):
+    minutes = _field_values(fields[0], 0, 59)
+    hours = _field_values(fields[1], 0, 23)
+    month_days = _field_values(fields[2], 1, 30)
+    months = _field_values(fields[3], 1, 12)
+    week_days = _field_values(fields[4], 0, 7, names=_DAY_NAMES)
+    if (
+        minutes is None
+        or hours is None
+        or month_days is None
+        or months is None
+        or week_days is None
+    ):
         return None
-    minute, hour, day, month, weekday = cast(tuple[set[int], set[int], set[int], set[int], set[int]], parsed)
-    return minute, hour, day, month, {0 if value == 7 else value for value in weekday}
+    week_days = {day % 7 for day in week_days}
+    fires_per_month = (
+        len(minutes)
+        * len(hours)
+        * len(month_days)
+        * len(months)
+        / 12
+        * len(week_days)
+        / 7
+    )
+    return 43200 / fires_per_month if fires_per_month else None
 
 
-def cron_interval_minutes(crons: Iterable[str]) -> int | None:
-    """Return the shortest interval between firings in a union of crons."""
-    parsed = [_parse_cron(cron) for cron in crons]
-    if not parsed or any(schedule is None for schedule in parsed):
+def cron_interval_minutes(crons: list[str]) -> int | None:
+    """Return the longest interval between firings in a union of schedules.
+
+    Weekly schedules are evaluated together, including the wrap into the next
+    week. Schedules that cannot be represented over a week use their average
+    firing interval instead.
+    """
+    if not crons:
         return None
-    schedules = cast(list[tuple[set[int], set[int], set[int], set[int], set[int]]], parsed)
-
-    previous: int | None = None
-    shortest: int | None = None
-    current = date(2024, 1, 1)
-    end = date(2032, 1, 1)
-    while current < end:
-        midnight = (current - date(1970, 1, 1)).days * 1440
-        times: set[int] = set()
-        for schedule in schedules:
-            minutes, hours, days, months, weekdays = schedule
-            cron_weekday = (current.weekday() + 1) % 7
-            day_matches = current.day in days
-            weekday_matches = cron_weekday in weekdays
-            day_wildcard = len(days) == 31
-            weekday_wildcard = len(weekdays) == 7
-            if current.month not in months:
-                continue
-            if not (
-                day_matches and weekday_matches if day_wildcard or weekday_wildcard else day_matches or weekday_matches
-            ):
-                continue
-            times.update(hour * 60 + minute for hour in hours for minute in minutes)
-        for minute_of_day in sorted(times):
-            firing = midnight + minute_of_day
-            if previous is not None:
-                gap = firing - previous
-                shortest = gap if shortest is None else min(shortest, gap)
-                if shortest == 1:
-                    return 1
-            previous = firing
-        current += timedelta(days=1)
-    return shortest
+    fires: set[int] = set()
+    averages: list[float] = []
+    for expr in crons:
+        weekly = _weekly_fires(expr)
+        if weekly is None:
+            average = _average_interval(expr)
+            if average is None:
+                return None
+            averages.append(average)
+        else:
+            fires.update(weekly)
+    if averages:
+        rates = sum(1 / average for average in averages)
+        if fires:
+            rates += len(fires) / 10080
+        return round(1 / rates)
+    ordered = sorted(fires)
+    if not ordered:
+        return None
+    gaps = [later - earlier for earlier, later in zip(ordered, ordered[1:])]
+    gaps.append(10080 + ordered[0] - ordered[-1])
+    return max(gaps)
 
 
-def cron_interval_hours(crons: Iterable[str]) -> float | None:
-    """Compatibility wrapper returning the shortest interval in hours."""
+def cron_interval_hours(crons: list[str]) -> float | None:
+    """Return :func:`cron_interval_minutes` converted to hours."""
     minutes = cron_interval_minutes(crons)
-    return None if minutes is None else minutes / 60
+    return minutes / 60 if minutes is not None else None
