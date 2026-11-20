@@ -1187,7 +1187,7 @@ wheels = [
 
 [[package]]
 name = "nousergon-lib"
-version = "0.124.222"
+version = "0.124.223"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -1291,9 +1291,9 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'quant-xs'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'rag'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'rag-local-ann'", specifier = ">=1.24" },
-    { name = "pandas", marker = "extra == 'arcticdb'", specifier = ">=2.0" },
+    { name = "pandas", marker = "extra == 'arcticdb'", specifier = ">=2.0,<3" },
     { name = "pandas", marker = "extra == 'quant-stats'", specifier = ">=2.0" },
-    { name = "pandas", marker = "extra == 'quant-xs'", specifier = ">=2.0" },
+    { name = "pandas", marker = "extra == 'quant-xs'", specifier = ">=2.0,<3" },
     { name = "pandas", marker = "extra == 'rag-local-ann'", specifier = ">=2.0" },
     { name = "pandas", marker = "extra == 'rag-parquet'", specifier = ">=2.0" },
     { name = "pandas", marker = "extra == 'series-contract'", specifier = ">=2.0" },
