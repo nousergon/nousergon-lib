@@ -906,7 +906,7 @@ wheels = [
 
 [[package]]
 name = "krepis"
-version = "0.59.62"
+version = "0.59.114"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
@@ -914,9 +914,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/e6/b2c3fc555ac4030c0fae0a0018dcc42a22adde59e74f273285323db09675/krepis-0.59.62.tar.gz", hash = "sha256:137723b83bc39c952f4243831f4210aba8c489a933b13aada57756e99d902d79", size = 708350, upload-time = "2026-09-14T18:12:50.665Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/30/ed8166fd1db0340b206ae798c1f85e3a498e1e820d1183850e4c375594dd/krepis-0.59.114.tar.gz", hash = "sha256:6c08b699264c725ae40c130bf5e05b50ac195b29599f4b0bfa91a8242787430a", size = 856050, upload-time = "2026-11-20T00:01:07.054Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/50/15b1414a2fd60c06759f0c3bd69f0d650bc67bc0668ce29c3341659550ca/krepis-0.59.62-py3-none-any.whl", hash = "sha256:1a93c60d645a843d6cd989bb400ed86d6b5e5cb93b697e15ddd0d57fbec6f66e", size = 449934, upload-time = "2026-09-14T18:12:49.109Z" },
+    { url = "https://files.pythonhosted.org/packages/08/59/a7c9ce48005c1c1742fe65db5d3f5197cfda1407f44f34e8501fd31bace1/krepis-0.59.114-py3-none-any.whl", hash = "sha256:50b231e777d42e0b6b075563eb5b1bd0fe99f13bd6a719c386729ab1e5685988", size = 532481, upload-time = "2026-11-20T00:01:05.467Z" },
 ]
 
 [package.optional-dependencies]
@@ -1282,7 +1282,7 @@ requires-dist = [
     { name = "hnswlib", marker = "extra == 'rag-local-ann'", specifier = ">=0.8" },
     { name = "jsonschema", marker = "extra == 'contracts'", specifier = ">=4.21" },
     { name = "jsonschema", marker = "extra == 'gates'", specifier = ">=4.21" },
-    { name = "krepis", specifier = ">=0.59.52" },
+    { name = "krepis", specifier = ">=0.59.114" },
     { name = "krepis", extras = ["flow-doctor"], marker = "extra == 'flow-doctor'" },
     { name = "moto", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "mypy-boto3-stepfunctions", marker = "extra == 'type-check'", specifier = ">=1.43" },
