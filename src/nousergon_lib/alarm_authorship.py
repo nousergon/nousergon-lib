@@ -1,13 +1,16 @@
-"""Detect imperative CloudWatch alarm creation in source text.
+"""Locate imperative CloudWatch alarm creation in source text.
 
-The detector is deliberately syntax-aware enough to ignore examples in Python
-docstrings and comments.  YAML is restricted to fields that execute shell
-commands; declarative CloudFormation alarm resources are not authorship calls.
+The detector is intentionally syntax-aware: names mentioned in comments,
+docstrings, and explanatory prose are not executions.  It recognises the two
+imperative forms used by fleet guards: boto3 ``put_metric_alarm`` calls and
+AWS CLI ``cloudwatch put-metric-alarm`` commands (including Python subprocess
+argument lists).
 """
 
 from __future__ import annotations
 
 import ast
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Literal, cast
@@ -26,127 +29,142 @@ class AlarmCall:
 
     line: int
     column: int
-    language: SourceLanguage
-    call: str
-
-
-def _is_aws_alarm_command(command: str) -> bool:
-    """Return whether *command* invokes ``aws cloudwatch put-metric-alarm``."""
-    try:
-        words = shlex.split(command, comments=True)
-    except ValueError:
-        return False
-    for index, word in enumerate(words):
-        if word != "aws":
-            continue
-        prefix = words[:index]
-        if prefix and prefix[-1] not in {"&&", "||", ";", "do", "exec", "sudo", "then", "|"}:
-            if not all("=" in part and not part.startswith("=") for part in prefix):
-                continue
-        tail = words[index + 1 :]
-        if any(
-            tail[position : position + 2] == ["cloudwatch", "put-metric-alarm"]
-            for position in range(len(tail) - 1)
-        ):
-            return True
-    return False
+    text: str
 
 
 def _python_calls(source: str) -> list[AlarmCall]:
-    tree = ast.parse(source)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
     calls: list[AlarmCall] = []
+    source_lines = source.splitlines()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "put_metric_alarm":
-            calls.append(AlarmCall(node.lineno, node.col_offset + 1, "python", "put_metric_alarm"))
-            continue
-        is_subprocess = (
+        is_boto3_call = (
             isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "subprocess"
-            and node.func.attr in {"call", "check_call", "check_output", "Popen", "run"}
+            and node.func.attr == "put_metric_alarm"
         )
-        if not is_subprocess or not node.args:
-            continue
-        command_node = node.args[0]
-        command: str | None = None
-        if isinstance(command_node, ast.Constant) and isinstance(command_node.value, str):
-            command = command_node.value
-        elif isinstance(command_node, (ast.List, ast.Tuple)):
-            values: list[str] = []
-            for item in command_node.elts:
-                if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
-                    break
-                values.append(item.value)
-            else:
-                command = shlex.join(values)
-        if command is not None and _is_aws_alarm_command(command):
-            calls.append(AlarmCall(node.lineno, node.col_offset + 1, "python", "aws cloudwatch put-metric-alarm"))
-    return calls
-
-
-def _shell_calls(source: str, *, language: SourceLanguage = "shell", line_offset: int = 0) -> list[AlarmCall]:
-    calls: list[AlarmCall] = []
-    for line_number, line in enumerate(source.splitlines(), start=1):
-        if _is_aws_alarm_command(line):
-            column = line.find("aws") + 1
-            calls.append(AlarmCall(line_number + line_offset, column, language, "aws cloudwatch put-metric-alarm"))
-    return calls
-
-
-_EXECUTABLE_YAML_KEYS = frozenset({"run", "script", "commands", "pre_build", "build", "post_build"})
-
-
-def _yaml_calls(source: str) -> list[AlarmCall]:
-    root = cast(Node | None, yaml.compose(source))  # pyright: ignore[reportUnknownMemberType]
-    if root is None:
-        return []
-    calls: list[AlarmCall] = []
-
-    def visit(node: Node, executable: bool = False) -> None:
-        if isinstance(node, MappingNode):
-            for key, value in node.value:
-                is_executable = (
-                    isinstance(key, ScalarNode) and key.value in _EXECUTABLE_YAML_KEYS
+        is_subprocess_call = False
+        subprocess_names = {"call", "check_call", "check_output", "Popen", "run"}
+        function_name = (
+            node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else node.func.id
+            if isinstance(node.func, ast.Name)
+            else ""
+        )
+        if (
+            function_name in subprocess_names
+            and node.args
+            and isinstance(node.args[0], (ast.List, ast.Tuple))
+        ):
+            values = node.args[0].elts
+            words = [value.value for value in values if isinstance(value, ast.Constant) and isinstance(value.value, str)]
+            is_subprocess_call = _is_alarm_argv(words)
+        if is_boto3_call or is_subprocess_call:
+            calls.append(
+                AlarmCall(
+                    line=node.lineno,
+                    column=node.col_offset + 1,
+                    text=source_lines[node.lineno - 1].strip(),
                 )
-                visit(value, executable or is_executable)
-        elif isinstance(node, SequenceNode):
-            for value in node.value:
-                visit(value, executable)
-        elif executable and isinstance(node, ScalarNode):
-            block_scalar_offset = 1 if node.style in {"|", ">"} else 0
-            calls.extend(_shell_calls(
-                node.value,
-                language="yaml",
-                line_offset=node.start_mark.line + block_scalar_offset,
-            ))
+            )
+    return calls
 
-    visit(root)
-    source_lines = source.splitlines()
+
+def _is_alarm_argv(words: list[str]) -> bool:
+    return (
+        len(words) >= 3
+        and words[0].rsplit("/", 1)[-1] == "aws"
+        and words[1:3] == ["cloudwatch", "put-metric-alarm"]
+    )
+
+
+def _shell_line_call(line: str, line_number: int, column_offset: int = 0) -> AlarmCall | None:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    column = len(line) - len(stripped)
+    # A command may follow a shell control operator.  Quoted prose still does
+    # not match because shlex keeps it in a single token.
+    for segment in re.split(r"(?:^|[;&|]\s*)", stripped):
+        candidate = segment.strip()
+        if not candidate:
+            continue
+        try:
+            words = shlex.split(candidate, comments=True, posix=True)
+        except ValueError:
+            continue
+        while words and ("=" in words[0] and not words[0].startswith("=")):
+            words.pop(0)
+        while words and words[0] in {"command", "env", "exec", "sudo"}:
+            words.pop(0)
+        if _is_alarm_argv(words):
+            start = line.find("aws", column)
+            return AlarmCall(
+                line=line_number,
+                column=column_offset + start + 1,
+                text=line.strip(),
+            )
+    return None
+
+
+def _shell_calls(source: str, *, first_line: int = 1, column_offset: int = 0) -> list[AlarmCall]:
     return [
-        AlarmCall(
-            call.line,
-            source_lines[call.line - 1].find("aws") + 1,
-            call.language,
-            call.call,
-        )
-        for call in calls
+        call
+        for offset, line in enumerate(source.splitlines())
+        if (call := _shell_line_call(line, first_line + offset, column_offset)) is not None
     ]
 
 
-def find_imperative_alarm_calls(source: str, language: SourceLanguage) -> list[AlarmCall]:
-    """Find imperative CloudWatch alarm creation and report its locations.
+def _yaml_calls(source: str) -> list[AlarmCall]:
+    try:
+        root = cast(
+            Node | None,
+            yaml.compose(source),  # pyright: ignore[reportUnknownMemberType]
+        )
+    except yaml.YAMLError:
+        return []
+    if root is None:
+        return []
 
-    ``language`` selects Python parsing, shell command parsing, or executable
-    command fields in YAML.  Malformed source raises its parser's normal error.
-    """
+    calls: list[AlarmCall] = []
+
+    def visit(node: Node) -> None:
+        if isinstance(node, MappingNode):
+            for key, value in node.value:
+                if (
+                    isinstance(key, ScalarNode)
+                    and key.value in {"run", "script", "shell"}
+                    and isinstance(value, ScalarNode)
+                ):
+                    is_block = value.style in {"|", ">"}
+                    calls.extend(
+                        _shell_calls(
+                            value.value,
+                            first_line=value.start_mark.line + (2 if is_block else 1),
+                            column_offset=value.start_mark.column + (1 if is_block else 0),
+                        )
+                    )
+                else:
+                    visit(value)
+        elif isinstance(node, SequenceNode):
+            for child in node.value:
+                visit(child)
+
+    visit(root)
+    return calls
+
+
+def find_imperative_alarm_calls(source: str, language: SourceLanguage) -> list[AlarmCall]:
+    """Return alarm-creation calls in *source*, ordered by source location."""
     if language == "python":
         calls = _python_calls(source)
     elif language == "shell":
         calls = _shell_calls(source)
-    elif language == "yaml":
-        calls = _yaml_calls(source)
     else:
-        raise ValueError(f"unsupported source language: {language}")
+        calls = _yaml_calls(source)
     return sorted(calls, key=lambda call: (call.line, call.column))
