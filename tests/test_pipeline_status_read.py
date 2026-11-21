@@ -17,7 +17,9 @@ code path:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,6 +36,7 @@ from nousergon_lib.pipeline_status import (
     read_pipeline_state,
 )
 from nousergon_lib.pipeline_status.read import (
+    DegradationState,
     PipelineStatusError,
     _extract_pipeline_role,
     _failure_cause_from,
@@ -60,13 +63,13 @@ EXECUTION_ARN = (
 
 def _make_sfn_mock(
     *,
-    list_response=None,
-    describe_response=None,
-    history_response=None,
-    list_exc=None,
-    describe_exc=None,
-    history_exc=None,
-):
+    list_response: Any = None,
+    describe_response: Any = None,
+    history_response: Any = None,
+    list_exc: Any = None,
+    describe_exc: Any = None,
+    history_exc: Any = None,
+) -> MagicMock:
     """Build a boto3 stepfunctions mock with configurable responses + errors."""
     client = MagicMock()
 
@@ -133,23 +136,23 @@ def _failed(error: str, cause: str) -> dict:
 # ── _parse_ts ─────────────────────────────────────────────────────────────
 
 
-def test_parse_ts_handles_none():
+def test_parse_ts_handles_none() -> None:
     assert _parse_ts(None) is None
 
 
-def test_parse_ts_passes_through_utc_aware_datetime():
+def test_parse_ts_passes_through_utc_aware_datetime() -> None:
     dt = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
     assert _parse_ts(dt) == dt
 
 
-def test_parse_ts_coerces_naive_datetime_to_utc():
+def test_parse_ts_coerces_naive_datetime_to_utc() -> None:
     dt = datetime(2026, 5, 24, 9, 0)
     out = _parse_ts(dt)
     assert out is not None
     assert out.tzinfo == timezone.utc
 
 
-def test_parse_ts_rejects_non_datetime():
+def test_parse_ts_rejects_non_datetime() -> None:
     assert _parse_ts("2026-05-24") is None
     assert _parse_ts(12345) is None
 
@@ -157,25 +160,25 @@ def test_parse_ts_rejects_non_datetime():
 # ── _failure_cause_from ───────────────────────────────────────────────────
 
 
-def test_failure_cause_from_concatenates_error_and_cause():
+def test_failure_cause_from_concatenates_error_and_cause() -> None:
     out = _failure_cause_from({"error": "States.TaskFailed", "cause": "exit 1"})
     assert out == "States.TaskFailed: exit 1"
 
 
-def test_failure_cause_from_handles_error_only():
+def test_failure_cause_from_handles_error_only() -> None:
     assert _failure_cause_from({"error": "BOOM", "cause": ""}) == "BOOM"
 
 
-def test_failure_cause_from_handles_cause_only():
+def test_failure_cause_from_handles_cause_only() -> None:
     assert _failure_cause_from({"error": "", "cause": "bad"}) == "bad"
 
 
-def test_failure_cause_from_handles_empty():
+def test_failure_cause_from_handles_empty() -> None:
     assert _failure_cause_from({}) == ""
     assert _failure_cause_from({"error": "", "cause": ""}) == ""
 
 
-def test_failure_cause_from_truncates_at_280():
+def test_failure_cause_from_truncates_at_280() -> None:
     long_cause = "A" * 500
     out = _failure_cause_from({"error": "", "cause": long_cause})
     assert len(out) == 280
@@ -185,7 +188,7 @@ def test_failure_cause_from_truncates_at_280():
 # ── _materialize_tasks: substantive-state filter + Wait-grouping ──────────
 
 
-def test_materialize_tasks_filters_to_registry_entries():
+def test_materialize_tasks_filters_to_registry_entries() -> None:
     """States not in the registry are filtered out entirely (Choice / Pass /
     Succeed control-flow plumbing)."""
     base = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
@@ -201,7 +204,7 @@ def test_materialize_tasks_filters_to_registry_entries():
     assert "Research" in names
 
 
-def test_materialize_tasks_absorbs_wait_companion_into_parent():
+def test_materialize_tasks_absorbs_wait_companion_into_parent() -> None:
     """WaitForDataPhase1 rolls into DataPhase1; duration spans
     parent.entered → wait.exited."""
     t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
@@ -226,7 +229,7 @@ def test_materialize_tasks_absorbs_wait_companion_into_parent():
     assert row.duration_sec == pytest.approx(2400.0, abs=1.0)
 
 
-def test_materialize_tasks_self_mapped_spine_wait_stage_renders_as_one_row():
+def test_materialize_tasks_self_mapped_spine_wait_stage_renders_as_one_row() -> None:
     """alpha-engine-config-I11267: ``WaitForCollectionManifests`` is a spine
     Task re-entered once per poll iteration, mapped to ITSELF in WAIT_GROUPING.
     The roll-up must be the identity: one row, under its own name, spanning
@@ -248,7 +251,7 @@ def test_materialize_tasks_self_mapped_spine_wait_stage_renders_as_one_row():
     assert rows[0].duration_sec == pytest.approx(304.0, abs=1.0)
 
 
-def test_materialize_tasks_running_state_has_no_end():
+def test_materialize_tasks_running_state_has_no_end() -> None:
     """A state with TaskStateEntered but no TaskStateExited renders as
     TaskStatus.RUNNING with no duration."""
     t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
@@ -260,7 +263,7 @@ def test_materialize_tasks_running_state_has_no_end():
     assert rows[0].duration_sec is None
 
 
-def test_materialize_tasks_failed_state_carries_cause():
+def test_materialize_tasks_failed_state_carries_cause() -> None:
     """A TaskFailed event attaches to the most-recent still-open state."""
     t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
     events = [
@@ -273,7 +276,7 @@ def test_materialize_tasks_failed_state_carries_cause():
     assert "ArcticDB E_NO_SUCH_VERSION" in (rows[0].failure_cause or "")
 
 
-def test_materialize_tasks_attaches_registry_entry_to_each_row():
+def test_materialize_tasks_attaches_registry_entry_to_each_row() -> None:
     """Every materialized row carries the registry entry for its state name."""
     t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
     t1 = datetime(2026, 5, 24, 9, 30, tzinfo=timezone.utc)
@@ -292,7 +295,7 @@ def test_materialize_tasks_attaches_registry_entry_to_each_row():
 # ── read_pipeline_state happy path ────────────────────────────────────────
 
 
-def test_read_pipeline_state_succeeded_happy_path():
+def test_read_pipeline_state_succeeded_happy_path() -> None:
     """SUCCEEDED execution with two substantive states materializes
     correctly: top-level fields + tasks list + no failure fields populated."""
     t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
@@ -326,7 +329,7 @@ def test_read_pipeline_state_succeeded_happy_path():
     assert task_names == {"DataPhase1", "Research"}
 
 
-def test_read_pipeline_state_failed_populates_failing_state_and_cause():
+def test_read_pipeline_state_failed_populates_failing_state_and_cause() -> None:
     """FAILED execution populates failing_state + failure_cause from the
     DescribeExecution response + history."""
     t0 = datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc)
@@ -357,7 +360,7 @@ def test_read_pipeline_state_failed_populates_failing_state_and_cause():
     assert run.failure_cause == "States.TaskFailed: Research Lambda exited 1: ArcticDB error"
 
 
-def test_read_pipeline_state_running_execution():
+def test_read_pipeline_state_running_execution() -> None:
     """RUNNING execution has stopDate=None → no end_utc + no duration."""
     t0 = datetime(2026, 5, 24, 13, 0, tzinfo=timezone.utc)
     client = _make_sfn_mock(
@@ -376,13 +379,13 @@ def test_read_pipeline_state_running_execution():
 # ── Exception paths ───────────────────────────────────────────────────────
 
 
-def test_read_pipeline_state_no_executions_raises():
+def test_read_pipeline_state_no_executions_raises() -> None:
     client = _make_sfn_mock(list_response={"executions": []})
     with pytest.raises(SFNNoExecutions):
         read_pipeline_state(SATURDAY_ARN, client=client)
 
 
-def test_read_pipeline_state_list_access_denied_raises_typed():
+def test_read_pipeline_state_list_access_denied_raises_typed() -> None:
     exc = _boto_client_error("AccessDeniedException")
     client = _make_sfn_mock(list_exc=exc)
     with pytest.raises(SFNAccessDenied) as exc_info:
@@ -390,7 +393,7 @@ def test_read_pipeline_state_list_access_denied_raises_typed():
     assert "ListExecutions" in str(exc_info.value)
 
 
-def test_read_pipeline_state_describe_throttled_raises_typed():
+def test_read_pipeline_state_describe_throttled_raises_typed() -> None:
     exc = _boto_client_error("ThrottlingException")
     client = _make_sfn_mock(describe_exc=exc)
     with pytest.raises(SFNThrottled) as exc_info:
@@ -398,7 +401,7 @@ def test_read_pipeline_state_describe_throttled_raises_typed():
     assert "DescribeExecution" in str(exc_info.value)
 
 
-def test_read_pipeline_state_history_access_denied_raises_typed():
+def test_read_pipeline_state_history_access_denied_raises_typed() -> None:
     exc = _boto_client_error("AccessDeniedException")
     client = _make_sfn_mock(history_exc=exc)
     with pytest.raises(SFNAccessDenied) as exc_info:
@@ -406,7 +409,7 @@ def test_read_pipeline_state_history_access_denied_raises_typed():
     assert "GetExecutionHistory" in str(exc_info.value)
 
 
-def test_access_denied_names_the_actual_denied_role_not_a_hardcoded_one():
+def test_access_denied_names_the_actual_denied_role_not_a_hardcoded_one() -> None:
     """alpha-engine-config-I8080: the remedy text used to hardcode "the
     dashboard EC2 role" regardless of which role was actually denied — on
     2026-08-21 the real denied principal was ``alpha-engine-evaluator-role``,
@@ -428,7 +431,7 @@ def test_access_denied_names_the_actual_denied_role_not_a_hardcoded_one():
     assert "dashboard EC2 role" not in text
 
 
-def test_access_denied_falls_back_gracefully_when_role_is_unparseable():
+def test_access_denied_falls_back_gracefully_when_role_is_unparseable() -> None:
     """A synthetic/mocked AccessDenied with no `assumed-role/...` shape must
     not crash the remedy-text builder — it degrades to a role-agnostic
     instruction rather than raising a second, unrelated exception."""
@@ -441,7 +444,7 @@ def test_access_denied_falls_back_gracefully_when_role_is_unparseable():
     assert "the calling role" in text
 
 
-def test_read_pipeline_state_unknown_boto_error_raises_pipeline_status_error():
+def test_read_pipeline_state_unknown_boto_error_raises_pipeline_status_error() -> None:
     """Unknown boto3 error code → re-raised as PipelineStatusError (NOT
     swallowed silently per feedback_no_silent_fails)."""
     exc = _boto_client_error("WeirdNewError")
@@ -453,7 +456,7 @@ def test_read_pipeline_state_unknown_boto_error_raises_pipeline_status_error():
     assert type(exc_info.value) is PipelineStatusError
 
 
-def test_read_pipeline_state_unknown_status_string_raises():
+def test_read_pipeline_state_unknown_status_string_raises() -> None:
     """boto3 returning a status the lib doesn't recognize MUST fail loud
     (forward-compatibility check — would surface if AWS adds a new status)."""
     client = _make_sfn_mock(
@@ -471,7 +474,7 @@ def test_read_pipeline_state_unknown_status_string_raises():
 # ── Pretty-label resolution ───────────────────────────────────────────────
 
 
-def test_pretty_label_for_each_known_pipeline():
+def test_pretty_label_for_each_known_pipeline() -> None:
     for arn, expected in [
         (
             "arn:aws:states:us-east-1:711398986525:stateMachine:ne-weekly-freshness-pipeline",
@@ -491,7 +494,7 @@ def test_pretty_label_for_each_known_pipeline():
         assert run.pretty_label == expected
 
 
-def test_pretty_label_falls_back_to_arn_suffix_for_unknown_sf():
+def test_pretty_label_falls_back_to_arn_suffix_for_unknown_sf() -> None:
     """Unknown SF ARN renders the bare state-machine name (not a generic
     'Unknown SF' string) so an operator can still tell what pipeline they're
     looking at if a new SF appears before the registry is updated."""
@@ -504,16 +507,16 @@ def test_pretty_label_falls_back_to_arn_suffix_for_unknown_sf():
 # ── Region extraction ─────────────────────────────────────────────────────
 
 
-def test_region_from_arn_extracts_us_east_1():
+def test_region_from_arn_extracts_us_east_1() -> None:
     assert _region_from_arn(SATURDAY_ARN) == "us-east-1"
 
 
-def test_region_from_arn_extracts_non_us_east_1():
+def test_region_from_arn_extracts_non_us_east_1() -> None:
     arn = "arn:aws:states:eu-west-2:123456789012:stateMachine:some-pipeline"
     assert _region_from_arn(arn) == "eu-west-2"
 
 
-def test_region_from_arn_returns_none_for_malformed():
+def test_region_from_arn_returns_none_for_malformed() -> None:
     """Permissive on bad input — boto3 will raise NoRegionError downstream,
     which surfaces as a typed PipelineStatusError per _raise_for_boto_error."""
     assert _region_from_arn("") is None
@@ -536,7 +539,7 @@ def _entered_and_succeeded(name: str, t0: datetime, t1: datetime) -> list[dict]:
     ]
 
 
-def test_task_row_archive_round_trips_through_json_for_archive_page_ref():
+def test_task_row_archive_round_trips_through_json_for_archive_page_ref() -> None:
     """The dashboard's st.cache_data wraps read_pipeline_state by doing
     ``model_dump(mode="json")`` → cache → ``model_validate(dict)``. Before
     this regression-guard, ``TaskRow.archive`` was typed ``Optional[Any]``,
@@ -569,7 +572,7 @@ def test_task_row_archive_round_trips_through_json_for_archive_page_ref():
     assert round_tripped_task.archive.page == "host_research_signals?tab=Briefing+Archive"
 
 
-def test_task_row_archive_round_trips_through_json_for_artifact_reason():
+def test_task_row_archive_round_trips_through_json_for_artifact_reason() -> None:
     """Mirrors the ArchivePageRef round-trip but for the ArtifactReason
     variant (substrate-only states like NotifyComplete + Scanner). Both
     variants must reconstruct correctly on JSON round-trip; the
@@ -598,7 +601,7 @@ def test_task_row_archive_round_trips_through_json_for_artifact_reason():
 # ── pipeline_role extraction (Option-D substrate) ─────────────────────────
 
 
-def test_extract_pipeline_role_happy_path():
+def test_extract_pipeline_role_happy_path() -> None:
     """Standard EventBridge cron payload with pipeline_role set."""
     describe = {
         "input": '{"pipeline_role": "weekly", "run_date": "2026-05-30"}',
@@ -606,13 +609,13 @@ def test_extract_pipeline_role_happy_path():
     assert _extract_pipeline_role(describe) == "weekly"
 
 
-def test_extract_pipeline_role_missing_field():
+def test_extract_pipeline_role_missing_field() -> None:
     """Pre-Option-D execution input (no pipeline_role key) returns None."""
     describe = {"input": '{"run_date": "2026-05-30"}'}
     assert _extract_pipeline_role(describe) is None
 
 
-def test_extract_pipeline_role_missing_input_field():
+def test_extract_pipeline_role_missing_input_field() -> None:
     """DescribeExecution may omit the input field entirely on terminal
     states (rare but possible) — degrade to None, not crash."""
     assert _extract_pipeline_role({}) is None
@@ -620,14 +623,14 @@ def test_extract_pipeline_role_missing_input_field():
     assert _extract_pipeline_role({"input": ""}) is None
 
 
-def test_extract_pipeline_role_malformed_json():
+def test_extract_pipeline_role_malformed_json() -> None:
     """Malformed input JSON — WARN-and-return-None per the lib's
     permissive parse policy. Recording surface is the WARN log."""
     describe = {"input": "{not valid json"}
     assert _extract_pipeline_role(describe) is None
 
 
-def test_extract_pipeline_role_input_is_array_not_object():
+def test_extract_pipeline_role_input_is_array_not_object() -> None:
     """SF allows array-shaped input; defensively handle it (return None
     rather than raise) — pipeline_role is a top-level field on object
     inputs only."""
@@ -635,7 +638,7 @@ def test_extract_pipeline_role_input_is_array_not_object():
     assert _extract_pipeline_role(describe) is None
 
 
-def test_extract_pipeline_role_empty_string_returns_none():
+def test_extract_pipeline_role_empty_string_returns_none() -> None:
     """An explicit empty string in pipeline_role is treated as 'not set'
     so the dashboard renders 'role: unknown' instead of '': empty cells
     are operator-noise."""
@@ -646,7 +649,9 @@ def test_extract_pipeline_role_empty_string_returns_none():
 # ── Role filter + execution_arn paths in read_pipeline_state ──────────────
 
 
-def _make_describe_response(*, status="SUCCEEDED", role: str | None = None) -> dict:
+def _make_describe_response(
+    *, status: str = "SUCCEEDED", role: str | None = None
+) -> dict[str, Any]:
     """Build a DescribeExecution response carrying an optional
     pipeline_role on the input JSON. Default times preserved."""
     body: dict = {
@@ -671,7 +676,7 @@ def _make_multi_execution_mock(
     client = MagicMock()
     client.list_executions.return_value = {"executions": executions}
 
-    def _dispatch(executionArn: str, **_kwargs):
+    def _dispatch(executionArn: str, **_kwargs: Any) -> dict[str, Any]:
         return describe_by_arn[executionArn]
 
     client.describe_execution.side_effect = _dispatch
@@ -679,7 +684,7 @@ def _make_multi_execution_mock(
     return client
 
 
-def test_read_pipeline_state_default_returns_most_recent_unchanged():
+def test_read_pipeline_state_default_returns_most_recent_unchanged() -> None:
     """No role_filter, no execution_arn — same as pre-Option-D: most-recent
     execution per ListExecutions maxResults=1."""
     client = _make_sfn_mock()
@@ -691,7 +696,7 @@ def test_read_pipeline_state_default_returns_most_recent_unchanged():
     assert call_kwargs.get("maxResults") == 1
 
 
-def test_read_pipeline_state_with_role_filter_finds_first_match():
+def test_read_pipeline_state_with_role_filter_finds_first_match() -> None:
     """Three executions in history: smoke / weekly / smoke. Filter to
     'weekly' — picks the middle one."""
     smoke1_arn = EXECUTION_ARN + "-smoke1"
@@ -714,7 +719,7 @@ def test_read_pipeline_state_with_role_filter_finds_first_match():
     assert run.pipeline_role == "weekly"
 
 
-def test_read_pipeline_state_with_role_filter_no_match_raises():
+def test_read_pipeline_state_with_role_filter_no_match_raises() -> None:
     """Three smoke executions, filter to 'weekly' — raises
     SFNNoExecutions naming the filter so the caller can render an
     operator-actionable banner."""
@@ -735,7 +740,7 @@ def test_read_pipeline_state_with_role_filter_no_match_raises():
     assert "weekly" in str(exc_info.value)
 
 
-def test_read_pipeline_state_with_role_filter_treats_missing_role_as_no_match():
+def test_read_pipeline_state_with_role_filter_treats_missing_role_as_no_match() -> None:
     """Pre-Option-D executions lack pipeline_role; role_filter must NOT
     match those (otherwise the filter is no filter at all). The walk
     keeps going until an explicitly-tagged execution turns up."""
@@ -755,7 +760,7 @@ def test_read_pipeline_state_with_role_filter_treats_missing_role_as_no_match():
     assert run.execution_arn == weekly_arn
 
 
-def test_read_pipeline_state_with_execution_arn_fetches_specific_execution():
+def test_read_pipeline_state_with_execution_arn_fetches_specific_execution() -> None:
     """Dropdown-click path: when execution_arn is set, the function fetches
     that specific execution directly (bypasses ListExecutions). role_filter
     and search_limit are ignored on this path."""
@@ -771,7 +776,7 @@ def test_read_pipeline_state_with_execution_arn_fetches_specific_execution():
     client.list_executions.assert_not_called()
 
 
-def test_read_pipeline_state_carries_pipeline_role_to_returned_run():
+def test_read_pipeline_state_carries_pipeline_role_to_returned_run() -> None:
     """The pipeline_role field on PipelineRun is populated from input JSON
     even when no role_filter is applied (default path) — the dashboard's
     section header shows it regardless of how the execution was picked."""
@@ -782,7 +787,7 @@ def test_read_pipeline_state_carries_pipeline_role_to_returned_run():
     assert run.pipeline_role == "weekly"
 
 
-def test_read_pipeline_state_pipeline_role_none_when_input_lacks_role():
+def test_read_pipeline_state_pipeline_role_none_when_input_lacks_role() -> None:
     """No pipeline_role in input → PipelineRun.pipeline_role is None
     (rendered as 'role: unknown' on the dashboard)."""
     client = _make_sfn_mock(
@@ -792,10 +797,82 @@ def test_read_pipeline_state_pipeline_role_none_when_input_lacks_role():
     assert run.pipeline_role is None
 
 
+# ── execution degradation output ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ({"gate_degraded": True}, DegradationState.DEGRADED),
+        (
+            {
+                "gate_degraded": False,
+                "health_check_degraded": False,
+                "report_card_degraded": False,
+                "parity_degraded": False,
+                "degraded_summary": {"degraded": False},
+            },
+            DegradationState.VERIFIED,
+        ),
+        ({"gate_degraded": False}, DegradationState.UNKNOWN),
+        ({"gate_degraded": 1}, DegradationState.UNKNOWN),
+    ],
+)
+def test_read_pipeline_state_parses_degradation_flags(
+    flags: dict[str, object], expected: DegradationState
+) -> None:
+    describe = _make_describe_response(role="weekly")
+    describe["output"] = json.dumps(flags)
+    client = _make_sfn_mock(describe_response=describe)
+
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+
+    assert run.degradation.state == expected
+    assert client.describe_execution.call_count == 1
+
+
+@pytest.mark.parametrize("output", [None, "not-json", "[]", '{"gate_degraded": null}'])
+def test_read_pipeline_state_invalid_output_is_unknown(output: object) -> None:
+    describe = _make_describe_response(role="weekly")
+    describe["output"] = output
+    client = _make_sfn_mock(describe_response=describe)
+
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+
+    assert run.degradation.state == DegradationState.UNKNOWN
+
+
+def test_read_pipeline_state_unreadable_output_is_unknown() -> None:
+    class UnreadableOutput(dict[str, object]):
+        def get(self, key: str, default: object = None) -> object:
+            if key == "output":
+                raise RuntimeError("unreadable")
+            return super().get(key, default)
+
+    describe = UnreadableOutput(_make_describe_response(role="weekly"))
+    client = _make_sfn_mock(describe_response=describe)
+
+    run = read_pipeline_state(SATURDAY_ARN, client=client)
+
+    assert run.degradation.state == DegradationState.UNKNOWN
+
+
+def test_pipeline_run_old_serialized_record_has_unknown_degradation() -> None:
+    old_record = {
+        "state_machine_arn": SATURDAY_ARN,
+        "pretty_label": "Weekly Freshness SF",
+        "status": "SUCCEEDED",
+    }
+
+    run = PipelineRun.model_validate(old_record)
+
+    assert run.degradation.state == DegradationState.UNKNOWN
+
+
 # ── list_recent_pipeline_runs ─────────────────────────────────────────────
 
 
-def test_list_recent_pipeline_runs_returns_summaries_with_roles():
+def test_list_recent_pipeline_runs_returns_summaries_with_roles() -> None:
     """Returns last N executions, each carrying its pipeline_role for the
     operator dropdown's at-a-glance smoke-vs-weekly distinction."""
     arns = [EXECUTION_ARN + f"-{i}" for i in range(5)]
@@ -812,7 +889,7 @@ def test_list_recent_pipeline_runs_returns_summaries_with_roles():
     assert [s.pipeline_role for s in summaries] == roles
 
 
-def test_list_recent_pipeline_runs_role_filter_pre_filters():
+def test_list_recent_pipeline_runs_role_filter_pre_filters() -> None:
     """When role_filter is set, only matching executions are returned —
     the operator's "show me weekly runs only" view."""
     arns = [EXECUTION_ARN + f"-{i}" for i in range(6)]
@@ -830,7 +907,7 @@ def test_list_recent_pipeline_runs_role_filter_pre_filters():
     assert all(s.pipeline_role == "weekly" for s in summaries)
 
 
-def test_list_recent_pipeline_runs_carries_run_date():
+def test_list_recent_pipeline_runs_carries_run_date() -> None:
     """The TRADING DAY, off the same DescribeExecution response as the role.
 
     A consumer grouping executions into cycles must key on this and not on
@@ -850,7 +927,7 @@ def test_list_recent_pipeline_runs_carries_run_date():
     assert client.describe_execution.call_count == 2
 
 
-def test_list_recent_pipeline_runs_falls_back_to_the_start_date():
+def test_list_recent_pipeline_runs_falls_back_to_the_start_date() -> None:
     """The third source (alpha-engine-config-I8216).
 
     CHANGED FIXTURE — this test previously asserted `run_date is None` for an
@@ -877,7 +954,7 @@ def test_list_recent_pipeline_runs_falls_back_to_the_start_date():
     assert summaries[0].pipeline_role == "smoke"
 
 
-def test_list_recent_pipeline_runs_run_date_none_only_without_a_start_date():
+def test_list_recent_pipeline_runs_run_date_none_only_without_a_start_date() -> None:
     """None survives as a value, for a response carrying none of the three."""
     arn = EXECUTION_ARN + "-nostart"
     resp = _make_describe_response(role="smoke")
@@ -893,7 +970,7 @@ def test_list_recent_pipeline_runs_run_date_none_only_without_a_start_date():
     assert client is not None
 
 
-def test_extract_run_date_derives_the_scheduled_weekly_cycle_key():
+def test_extract_run_date_derives_the_scheduled_weekly_cycle_key() -> None:
     """The closes-when case from alpha-engine-config-I8216, verbatim.
 
     A DescribeExecution response with `input='{"pipeline_role":"weekly"}'`,
@@ -911,7 +988,7 @@ def test_extract_run_date_derives_the_scheduled_weekly_cycle_key():
     assert _extract_run_date(resp) == "2026-08-22"
 
 
-def test_extract_run_date_normalises_to_utc_before_taking_the_date():
+def test_extract_run_date_normalises_to_utc_before_taking_the_date() -> None:
     """A local-time conversion produces an off-by-one on the 02:00 UTC
     scheduled runs specifically — the exact executions the third source
     recovers. `States.StringSplit` splits a UTC ISO string, so UTC is the
@@ -931,7 +1008,7 @@ def test_extract_run_date_normalises_to_utc_before_taking_the_date():
     assert _extract_run_date(resp) == "2026-08-22"
 
 
-def test_list_recent_pipeline_runs_input_run_date_wins_over_the_name():
+def test_list_recent_pipeline_runs_input_run_date_wins_over_the_name() -> None:
     """The 2026-08-15/16 case, exactly.
 
     `watch-rerun-2026-08-16-4` is NAMED for the date it ran ON and carries in
@@ -951,7 +1028,7 @@ def test_list_recent_pipeline_runs_input_run_date_wins_over_the_name():
     assert summaries[0].run_date == "2026-08-15"
 
 
-def test_list_recent_pipeline_runs_falls_back_to_a_date_in_the_name():
+def test_list_recent_pipeline_runs_falls_back_to_a_date_in_the_name() -> None:
     """Operator reruns do not always thread the field; dropping them would
     destroy the attempts-per-cycle count, which is the whole metric."""
     arn = EXECUTION_ARN + "-named"
@@ -966,7 +1043,7 @@ def test_list_recent_pipeline_runs_falls_back_to_a_date_in_the_name():
     assert summaries[0].run_date == "2026-08-15"
 
 
-def test_list_recent_pipeline_runs_degenerate_input_falls_through_to_start_date():
+def test_list_recent_pipeline_runs_degenerate_input_falls_through_to_start_date() -> None:
     """Malformed JSON, a non-dict body, a non-string or empty run_date — each
     degrades this one SOURCE rather than failing the listing, and resolution
     continues to the name and then to startDate (I8216). Previously these
@@ -985,7 +1062,7 @@ def test_list_recent_pipeline_runs_degenerate_input_falls_through_to_start_date(
         assert summaries[0].run_date == "2026-05-24", raw
 
 
-def test_list_recent_pipeline_runs_empty_returns_empty_list():
+def test_list_recent_pipeline_runs_empty_returns_empty_list() -> None:
     """Zero executions → empty list (NOT SFNNoExecutions). The dropdown
     just renders 'no executions yet' inline; the page-25 section banner
     is the load-bearing error surface, not this lighter-weight API."""
