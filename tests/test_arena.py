@@ -1190,18 +1190,25 @@ def test_an_unusable_filing_day_is_refused_rather_than_stamped(bad):
         )
 
 
-def test_omitting_the_filing_day_warns_and_is_not_silent():
-    """The compatibility path for callers pinned to an older release
-    reproduces the defect, so it must be audible. A silent fallback would be
-    indistinguishable from the bug it replaces."""
-    with pytest.warns(DeprecationWarning, match="filed_on"):
-        reg, record = ArmRegister().register(
+def test_the_filing_day_is_required_without_a_none_fallback():
+    """Omission is a call error, and ``None`` cannot recreate the old
+    ``created_date`` compatibility fallback."""
+    with pytest.raises(TypeError, match="filed_on"):
+        ArmRegister().register(
             slot="model",
             name="no_filing_day",
             spec={"recipe": "no_filing_day"},
             created_date="2026-06-01",
+        )  # pyright: ignore[reportCallIssue] -- omission is the behavior under test
+
+    with pytest.raises(ValueError, match="filed_on"):
+        ArmRegister().register(
+            slot="model",
+            name="none_filing_day",
+            spec={"recipe": "none_filing_day"},
+            created_date="2026-06-01",
+            filed_on=None,  # pyright: ignore[reportArgumentType] -- invalid value is under test
         )
-    assert reg.events[-1].date == record.created_date
 
 
 # --------------------------------------------------------------------------
