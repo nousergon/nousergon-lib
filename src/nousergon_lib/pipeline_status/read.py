@@ -113,6 +113,14 @@ class TaskStatus(str, Enum):
     NOT_RUN = "NOT-RUN"
 
 
+class DegradationState(str, Enum):
+    """Aggregate confidence in the execution's degradation flags."""
+
+    DEGRADED = "degraded"
+    VERIFIED = "verified"
+    UNKNOWN = "unknown"
+
+
 # ── Exception types ───────────────────────────────────────────────────────
 
 
@@ -176,6 +184,39 @@ class TaskRow(BaseModel):
     failure_cause: str | None = None  # populated only when status == FAILED
 
 
+class ExecutionDegradation(BaseModel):
+    """The five degradation flags persisted in a Step Functions output.
+
+    ``None`` means the flag was absent or was not an explicit JSON boolean.
+    That distinction prevents old or malformed execution output from being
+    mistaken for a verified, non-degraded run.
+    """
+
+    model_config = _STRICT_CONFIG
+
+    gate_degraded: bool | None = None
+    health_check_degraded: bool | None = None
+    report_card_degraded: bool | None = None
+    parity_degraded: bool | None = None
+    degraded_summary_degraded: bool | None = None
+
+    @property
+    def state(self) -> DegradationState:
+        """Degraded if any flag is true, verified only if all are false."""
+        flags = (
+            self.gate_degraded,
+            self.health_check_degraded,
+            self.report_card_degraded,
+            self.parity_degraded,
+            self.degraded_summary_degraded,
+        )
+        if any(flag is True for flag in flags):
+            return DegradationState.DEGRADED
+        if all(flag is False for flag in flags):
+            return DegradationState.VERIFIED
+        return DegradationState.UNKNOWN
+
+
 class PipelineRun(BaseModel):
     """Top-level shape returned by :func:`read_pipeline_state`."""
 
@@ -201,6 +242,7 @@ class PipelineRun(BaseModel):
     # always knows whether they're looking at the canonical cadence run
     # or a smoke / recovery overlay.
     pipeline_role: str | None = None
+    degradation: ExecutionDegradation = Field(default_factory=ExecutionDegradation)
 
 
 class PipelineExecutionSummary(BaseModel):
@@ -566,6 +608,45 @@ def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> str | None:
     return role if isinstance(role, str) and role else None
 
 
+def _extract_execution_degradation(
+    describe_resp: Mapping[str, object],
+) -> ExecutionDegradation:
+    """Parse degradation flags from this DescribeExecution response's output.
+
+    Step Functions returns ``output`` as a JSON string. Parsing is deliberately
+    fail-unknown: output can be absent for running executions, truncated or
+    malformed, and custom Mapping implementations can raise while being read.
+    """
+    try:
+        raw_output = describe_resp.get("output")
+        if not isinstance(raw_output, str):
+            return ExecutionDegradation()
+        parsed: object = json.loads(raw_output)
+        if not isinstance(parsed, Mapping):
+            return ExecutionDegradation()
+    except Exception as exc:  # noqa: BLE001 — unreadable output is unknown
+        logger.warning("Could not read SF execution output degradation flags: %s", exc)
+        return ExecutionDegradation()
+
+    output = cast(Mapping[str, object], parsed)
+    summary = output.get("degraded_summary")
+
+    def _boolean(value: object) -> bool | None:
+        return value if isinstance(value, bool) else None
+
+    return ExecutionDegradation(
+        gate_degraded=_boolean(output.get("gate_degraded")),
+        health_check_degraded=_boolean(output.get("health_check_degraded")),
+        report_card_degraded=_boolean(output.get("report_card_degraded")),
+        parity_degraded=_boolean(output.get("parity_degraded")),
+        degraded_summary_degraded=_boolean(
+            cast(Mapping[str, object], summary).get("degraded")
+            if isinstance(summary, Mapping)
+            else None
+        ),
+    )
+
+
 def _build_pipeline_run_from_execution_arn(
     execution_arn: str,
     state_machine_arn: str,
@@ -610,6 +691,7 @@ def _build_pipeline_run_from_execution_arn(
         _failure_cause_from(describe_resp) if run_status == RunStatus.FAILED else None
     )
     pipeline_role = _extract_pipeline_role(describe_resp)
+    degradation = _extract_execution_degradation(describe_resp)
 
     events = _paged_execution_history(client, execution_arn)
     tasks = _materialize_tasks(events)
@@ -630,6 +712,7 @@ def _build_pipeline_run_from_execution_arn(
         failing_state=failing_state,
         failure_cause=failure_cause,
         pipeline_role=pipeline_role,
+        degradation=degradation,
     )
 
 
