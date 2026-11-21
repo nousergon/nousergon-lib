@@ -16,6 +16,9 @@ Using this module guarantees that:
   stays importable on consumers that don't install the ``[arcticdb]``
   optional extra (e.g. lightweight CLI tools that only use the logging
   submodule).
+- :func:`configure_arcticdb_io_threads` sizes the VersionStore I/O pool
+  before that import. An explicit ``ARCTICDB_VersionStore_NumIOThreads_int``
+  already in the environment is left alone.
 
 Requires the ``arcticdb`` optional extra
 (``nousergon-lib[arcticdb]``) to actually call any function here.
@@ -23,16 +26,44 @@ Requires the ``arcticdb`` optional extra
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, cast
+import sys
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
 
     import pandas as pd
-    from arcticdb.version_store.library import Library, VersionedItem
+    from arcticdb.version_store.library import Library, ReadRequest, VersionedItem
+
+
+class _OpenedArctic(Protocol):
+    """The ``Arctic`` handle this module actually uses."""
+
+    def get_library(self, name: str, *, create_if_missing: bool = False) -> Library: ...
+
+
+class _ArcticModule(Protocol):
+    """Attributes touched on a lazily imported ``arcticdb`` module."""
+
+    Arctic: Callable[[str], _OpenedArctic]
+    ReadRequest: Callable[..., ReadRequest]
+    DataError: type[object]
+
+
+class _S3Body(Protocol):
+    def read(self) -> bytes: ...
+
+
+class _S3ObjectResponse(Protocol):
+    def __getitem__(self, key: str) -> _S3Body: ...
+
+
+class _S3Client(Protocol):
+    def get_object(self, *, Bucket: str, Key: str) -> _S3ObjectResponse: ...
 
 log = logging.getLogger(__name__)
 
@@ -143,8 +174,78 @@ def arctic_uri(bucket: str, *, region: str | None = None) -> str:
     )
 
 
-def _import_arcticdb():
+# ArcticDB reads ARCTICDB_* once, inside its own import
+# (``set_config_from_env_vars``). On a small host the default I/O pool is
+# about 1.5x the CPU count — 3 threads where a scanner measured 150 symbols
+# at 45-47s, and 5-6s at 32. ``setdefault`` so a value already in the
+# environment always wins. The config API outranks the environment, so once
+# arcticdb is loaded we push that same winning value through
+# ``set_config_int`` and never a different default.
+IO_THREADS_ENV = "ARCTICDB_VersionStore_NumIOThreads_int"
+IO_THREADS_CONFIG_KEY = "VersionStore.NumIOThreads"
+DEFAULT_IO_THREADS = 32
+
+# nousergon-data ``UNIVERSE_CHUNK_SIZE`` after the 2026-05-11 daily_append
+# OOM: one read_batch of ~900 full histories held the process over the
+# 2GB trading host. 150 symbols is the batch the 32-thread measurement used.
+READ_BATCH_CHUNK_SIZE = 150
+
+
+def configure_arcticdb_io_threads(n: int = DEFAULT_IO_THREADS) -> str:
+    """Set the ArcticDB I/O pool unless the environment already did.
+
+    Does not import arcticdb when nothing has imported it yet. Call this
+    before the first ``import arcticdb`` so the import-time env scan picks
+    the value up. When arcticdb is already loaded, the same winning value
+    is applied with ``set_config_int``. ArcticDB reads that value when a
+    Library is constructed and does not resize a Library that already
+    exists, so a handle opened before this call keeps the pool it was
+    built with. :func:`load_universe_ohlcv` and :func:`load_macro_series`
+    call this before they construct their own handle, including when the
+    caller imported arcticdb earlier in the process.
+    An explicit ``ARCTICDB_VersionStore_NumIOThreads_int`` is returned
+    unchanged and is what gets pushed; ``n`` is only the fallback.
+
+    Returns the value now in the environment.
+    """
+    existing = os.environ.get(IO_THREADS_ENV)
+    if existing is None:
+        os.environ[IO_THREADS_ENV] = str(int(n))
+    chosen = os.environ[IO_THREADS_ENV]
+    _apply_loaded_io_threads(chosen)
+    return chosen
+
+
+def _apply_loaded_io_threads(chosen: str) -> None:
+    """Push ``chosen`` into a running interpreter. No-op before import."""
+    loaded = sys.modules.get("arcticdb")
+    # A stub module (tests) has no ``__path__``. Importing ``arcticdb.config``
+    # then would bind the real package's setter if a previous test had loaded
+    # it, and overwrite that process's pool.
+    if loaded is None or getattr(loaded, "__path__", None) is None:
+        return
+    try:
+        threads = int(chosen)
+    except ValueError:
+        log.warning(
+            "ArcticDB IO thread env %s=%r is not an int; leaving the loaded pool unchanged",
+            IO_THREADS_ENV,
+            chosen,
+        )
+        return
+    try:
+        from arcticdb.config import (  # pyright: ignore[reportMissingTypeStubs]
+            set_config_int,  # pyright: ignore[reportUnknownVariableType]
+        )
+    except ImportError:
+        log.debug("arcticdb.config.set_config_int unavailable", exc_info=True)
+        return
+    set_config_int(IO_THREADS_CONFIG_KEY, threads)
+
+
+def _import_arcticdb() -> _ArcticModule:
     """Lazy import helper with a uniform error message."""
+    configure_arcticdb_io_threads()
     try:
         import arcticdb as adb
     except ImportError as exc:
@@ -153,10 +254,10 @@ def _import_arcticdb():
             "nousergon-lib[arcticdb] or add arcticdb to the deploy "
             f"image: {exc}"
         ) from exc
-    return adb
+    return cast("_ArcticModule", adb)
 
 
-def open_arctic(bucket: str, *, region: str | None = None):
+def open_arctic(bucket: str, *, region: str | None = None) -> _OpenedArctic:
     """Return an ``arcticdb.Arctic`` instance pointed at ``bucket``.
 
     Raises ``RuntimeError`` if ``arcticdb`` is not installed.
@@ -245,8 +346,8 @@ def read_settled_only(
     symbol: str,
     *,
     region: str | None = None,
-    as_of=None,
-    **read_kwargs,
+    as_of: int | str | pd.Timestamp | None = None,
+    **read_kwargs: Any,  # pyright: ignore[reportExplicitAny]  # forwarded unchanged to Library.read
 ) -> pd.DataFrame | None:
     """THE read-path chokepoint for a published/final-report price read
     (config#2459 scope item 2).
@@ -334,13 +435,13 @@ def read_settled_only(
 
 
 def write_correction(
-    lib,
+    lib: Library,
     symbol: str,
     df: pd.DataFrame,
     *,
     reason: str,
     source: str,
-    correction_time=None,
+    correction_time: pd.Timestamp | None = None,
 ) -> VersionedItem:
     """Write a post-hoc correction to a previously-published settled
     value as a NEW ArcticDB version — never an in-place overwrite
@@ -402,7 +503,7 @@ def write_correction(
 
 
 def _load_constituent_membership(
-    bucket: str, *, s3_client=None
+    bucket: str, *, s3_client: _S3Client | None = None
 ) -> dict[str, list[str]]:
     """Read the PIT constituent membership map from S3.
 
@@ -425,7 +526,7 @@ def _load_constituent_membership(
             raise RuntimeError(
                 f"boto3 is required to read {HISTORICAL_CONSTITUENTS_KEY}: {exc}"
             ) from exc
-        s3_client = boto3.client("s3")
+        s3_client = cast("_S3Client", boto3.client("s3"))  # pyright: ignore[reportUnknownMemberType]
 
     import json
 
@@ -505,7 +606,7 @@ def get_universe_symbols(
     *,
     as_of: date | None = None,
     region: str | None = None,
-    s3_client=None,
+    s3_client: _S3Client | None = None,
 ) -> set[str]:
     """Return the set of universe symbols, optionally as-of a past date.
 
@@ -577,12 +678,12 @@ _SLIM_EQUIVALENT_LOOKBACK_DAYS = 730
 
 
 def _load_arctic_frames(
-    lib,
-    symbols,
+    lib: Library,
+    symbols: Iterable[str],
     *,
     lookback_days: int,
     end: pd.Timestamp | str | None,
-    columns,
+    columns: Sequence[str] | None,
     label: str,
 ) -> dict[str, pd.DataFrame]:
     """Shared read core for the universe + macro ArcticDB readers.
@@ -597,14 +698,16 @@ def _load_arctic_frames(
     / empty frames are logged at WARNING and dropped — the caller decides
     how to handle a partial load.
 
-    ONE ``read_batch`` call, not N threaded ``read`` calls
-    (alpha-engine-config-I7812). ArcticDB's batch API pipelines the whole
-    request set through its own C++ IO pool, which issues the object-store
+    ``read_batch`` in chunks of :data:`READ_BATCH_CHUNK_SIZE`, not N threaded
+    ``read`` calls (alpha-engine-config-I7812). ArcticDB's batch API pipelines
+    a request set through its own C++ IO pool, which issues the object-store
     GETs with far more concurrency than a Python ``ThreadPoolExecutor`` of
     per-symbol ``lib.read`` calls and pays the per-symbol index lookup once
-    per batch rather than once per thread hop. Measured 2026-08-20 against
-    the live ``alpha-engine-research`` universe library, 905 symbols,
-    ``columns=["Close"]``:
+    per batch rather than once per thread hop. The pool size is set by
+    :func:`configure_arcticdb_io_threads` (default 32; an explicit
+    ``ARCTICDB_VersionStore_NumIOThreads_int`` wins) before arcticdb is
+    imported. Measured 2026-08-20 against the live ``alpha-engine-research``
+    universe library, 905 symbols, ``columns=["Close"]``:
 
     ==========================  ==========  =========
     read shape                  569d window 65d window
@@ -625,6 +728,15 @@ def _load_arctic_frames(
     argument would describe nothing. No fleet call site passed it (grepped
     2026-08-20 across all repos under ``~/Development``); the two public
     wrappers dropped it in the same commit.
+
+    Chunks of :data:`READ_BATCH_CHUNK_SIZE` (150) match nousergon-data's
+    ``UNIVERSE_CHUNK_SIZE`` after the 2026-05-11 daily_append OOM. Each
+    normalized frame is copied into the result, the raw ``read_batch``
+    result is dropped, and ``gc.collect()`` runs before the next chunk.
+    That bounds the live raw payload to one chunk. It does not bound the
+    returned dict (every frame is retained), ArcticDB's decompression
+    buffers, or the library's storage connections. A universe smaller
+    than one chunk is still a single ``read_batch`` and does not collect.
     """
     import pandas as pd  # lazy: only needed with the [arcticdb] extra
 
@@ -646,55 +758,91 @@ def _load_arctic_frames(
         end_ts = end_ts.tz_localize(None)
     start_ts = end_ts - pd.Timedelta(days=lookback_days)
 
-    def _normalize(df):
+    def _normalize(df: pd.DataFrame | None) -> pd.DataFrame | None:
         if df is None or df.empty:
             return None
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         if df.index.tz is not None:
             df.index = df.index.tz_convert("UTC").tz_localize(None)
-        return df[~df.index.duplicated(keep="last")].sort_index()
-
-    requests = [
-        adb.ReadRequest(
-            symbol=sym,
-            date_range=(start_ts, end_ts),
-            columns=list(columns) if columns is not None else None,
+        return cast(
+            "pd.DataFrame",
+            df[~df.index.duplicated(keep="last")].sort_index(),  # pyright: ignore[reportUnknownMemberType]
         )
-        for sym in symbols
-    ]
+
+    # list is invariant, so a list[ReadRequest] is not a list[str | ReadRequest].
+    requests: list[str | ReadRequest] = []
+    for sym in symbols:
+        requests.append(
+            adb.ReadRequest(
+                symbol=sym,
+                date_range=(start_ts, end_ts),
+                columns=list(columns) if columns is not None else None,
+            )
+        )
     # read_batch returns one result per request, IN REQUEST ORDER, each
     # either a VersionedItem or a DataError describing that symbol's
     # failure. A DataError is returned, never raised — so it must be
     # matched explicitly or a failed symbol would be treated as a frame.
     # A failure of the batch CALL itself still raises and is not caught:
     # that is the whole store being unreachable, not a partial load.
-    results = lib.read_batch(requests)
+    # Chunks keep that contract and release each raw result before the
+    # next read_batch, so a full universe cannot pin every payload at once.
     data_error = getattr(adb, "DataError", ())
 
     out: dict[str, pd.DataFrame] = {}
     errors = 0
-    for sym, res in zip(symbols, results):
-        if isinstance(res, data_error):
-            log.warning(
-                "ArcticDB %s read failed for %s: %s",
-                label,
-                sym,
-                getattr(res, "exception_string", None) or res,
-            )
-            errors += 1
-            continue
-        try:
-            df = _normalize(getattr(res, "data", None))
-        except Exception as exc:  # noqa: BLE001 - partial-load contract
-            log.warning("ArcticDB %s normalize failed for %s: %s", label, sym, exc)
-            errors += 1
-            continue
-        if df is None:
-            log.warning("ArcticDB %s returned empty frame for %s", label, sym)
-            errors += 1
-            continue
-        out[sym] = df
+    if READ_BATCH_CHUNK_SIZE < 1:
+        raise ValueError(
+            f"READ_BATCH_CHUNK_SIZE must be >= 1, got {READ_BATCH_CHUNK_SIZE}"
+        )
+    start = 0
+    total = len(requests)
+    while start < total:
+        chunk_reqs = requests[start : start + READ_BATCH_CHUNK_SIZE]
+        chunk_syms = symbols[start : start + READ_BATCH_CHUNK_SIZE]
+        # lazy=False (the default) returns a list. The union also includes
+        # LazyDataFrameCollection, which this call never requests.
+        # list is invariant, so list[ReadRequest] is not list[str | ReadRequest].
+        # DataError comes from the untyped extension, so the declared return
+        # is partially unknown. The cast drops the lazy-collection arm this
+        # call never requests.
+        results = cast(
+            "list[object]",
+            lib.read_batch(chunk_reqs),  # pyright: ignore[reportUnknownMemberType]
+        )
+        res: object | None = None
+        for sym, res in zip(chunk_syms, results):
+            if isinstance(res, data_error):
+                log.warning(
+                    "ArcticDB %s read failed for %s: %s",
+                    label,
+                    sym,
+                    getattr(res, "exception_string", None) or res,
+                )
+                errors += 1
+                continue
+            try:
+                df = _normalize(getattr(res, "data", None))
+            except Exception as exc:  # noqa: BLE001 - partial-load contract
+                log.warning("ArcticDB %s normalize failed for %s: %s", label, sym, exc)
+                errors += 1
+                continue
+            if df is None:
+                log.warning("ArcticDB %s returned empty frame for %s", label, sym)
+                errors += 1
+                continue
+            # Copy detaches the frame from the VersionedItem so dropping the
+            # raw result can release that chunk's payload. The copy is the
+            # object the caller keeps.
+            out[sym] = df.copy()
+        # The next ``results = read_batch(...)`` evaluates the call while the
+        # previous name is still bound. Drop it first, then collect, so the
+        # chunk's BlockManager cycles are gone before the next payload lands.
+        del res, results, chunk_reqs
+        start += READ_BATCH_CHUNK_SIZE
+        if start < total:
+            gc.collect()
 
     log.info(
         "%s: %d symbols OK, %d errors (window %s..%s)",
@@ -710,10 +858,10 @@ def _load_arctic_frames(
 def load_universe_ohlcv(
     bucket: str,
     *,
-    symbols=None,
+    symbols: Iterable[str] | None = None,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
     end: pd.Timestamp | str | None = None,
-    columns=None,
+    columns: Sequence[str] | None = None,
     region: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load a ticker -> OHLCV DataFrame dict from the ArcticDB **universe** lib.
@@ -770,11 +918,11 @@ def load_universe_ohlcv(
 
 def load_macro_series(
     bucket: str,
-    symbols,
+    symbols: Iterable[str],
     *,
     lookback_days: int = _SLIM_EQUIVALENT_LOOKBACK_DAYS,
     end: pd.Timestamp | str | None = None,
-    columns=None,
+    columns: Sequence[str] | None = None,
     region: str | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Load a symbol -> OHLCV DataFrame dict from the ArcticDB **macro** lib.
