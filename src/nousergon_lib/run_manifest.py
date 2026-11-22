@@ -151,7 +151,9 @@ NOT_APPLICABLE_REASONS: frozenset[str] = frozenset(
 #: How an execution was started. Closed: an unknown trigger is a run nobody can
 #: attribute, and ``manual`` exists so a hand-run repair is COUNTED as one
 #: rather than disguised as a schedule (plan §4.4).
-TRIGGERS: frozenset[str] = frozenset({"scheduled", "on_demand", "manual", "gha", "backfill"})
+TRIGGERS: frozenset[str] = frozenset(
+    {"scheduled", "on_demand", "manual", "gha", "backfill", "rehearsal"}
+)
 
 #: Optional environment declarations for the compute row, exported by the box
 #: shell that launched the workload.
