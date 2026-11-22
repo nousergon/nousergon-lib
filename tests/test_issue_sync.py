@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 import pytest
 
+from nousergon_lib import issue_sync
 from nousergon_lib.issue_sync import DuplicateIssueTitleError, IssueSyncCounts, reconcile_issues
 
 
@@ -88,3 +89,15 @@ def test_github_command_failure_propagates() -> None:
     commands = Commands([], fail_on="create")
     with pytest.raises(subprocess.CalledProcessError):
         sync({"alpha": "bad"}, commands)
+
+
+def test_full_listing_is_refused_as_possibly_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(issue_sync, "_ISSUE_LIST_LIMIT", 2)
+    commands = Commands([
+        {"number": 8, "title": "unrelated issue"},
+        {"number": 9, "title": "another unrelated issue"},
+    ])
+    with pytest.raises(ValueError, match="may be truncated"):
+        sync({"alpha": "bad"}, commands)
+    assert commands.calls[0][commands.calls[0].index("--limit") + 1] == "2"
+    assert len(commands.calls) == 1

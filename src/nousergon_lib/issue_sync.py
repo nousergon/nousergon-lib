@@ -20,6 +20,12 @@ Subject = TypeVar("Subject")
 Finding = TypeVar("Finding")
 CommandRunner = Callable[[Sequence[str]], str]
 
+#: ``gh issue list`` stops silently at ``--limit``. A listing that reaches it may
+#: be missing the issue a subject already has, which reads as "no issue" and
+#: files a duplicate (the backlog repo held 1,799 open issues on 2026-11-22),
+#: so a full page is refused rather than trusted.
+_ISSUE_LIST_LIMIT = 10_000
+
 
 class DuplicateIssueTitleError(ValueError):
     """Raised when a title cannot identify exactly one open issue."""
@@ -46,7 +52,7 @@ def _run(command: Sequence[str]) -> str:
 
 
 def _open_issues(*, repo: str | None, runner: CommandRunner) -> list[_Issue]:
-    command = ["gh", "issue", "list", "--state", "open", "--limit", "1000", "--json", "number,title"]
+    command = ["gh", "issue", "list", "--state", "open", "--limit", str(_ISSUE_LIST_LIMIT), "--json", "number,title"]
     if repo is not None:
         command.extend(("--repo", repo))
     raw = cast(object, json.loads(runner(command)))
@@ -63,6 +69,8 @@ def _open_issues(*, repo: str | None, runner: CommandRunner) -> list[_Issue]:
         if not isinstance(number, int) or not isinstance(title, str):
             raise ValueError("gh issue list returned an invalid issue")
         issues.append(_Issue(number=number, title=title))
+    if len(issues) >= _ISSUE_LIST_LIMIT:
+        raise ValueError(f"gh issue list returned {len(issues)} issues, its limit; the enumeration may be truncated")
     return issues
 
 
