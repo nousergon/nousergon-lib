@@ -1187,7 +1187,7 @@ wheels = [
 
 [[package]]
 name = "nousergon-lib"
-version = "0.124.224"
+version = "0.124.228"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
