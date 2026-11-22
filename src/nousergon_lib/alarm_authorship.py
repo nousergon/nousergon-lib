@@ -65,8 +65,29 @@ _OPERATORS = tuple(sorted(_REDIRECT_OPERATORS + _CONTROL_OPERATORS, key=len, rev
 # Words that may precede the command name of a simple command.
 _COMMAND_PREFIXES = frozenset({"!", "{", "if", "then", "else", "elif", "while", "until", "do"})
 # Wrappers that run the following words as a command, after their own options.
-_COMMAND_WRAPPERS = frozenset({"command", "env", "exec", "nohup", "sudo", "time"})
+_COMMAND_WRAPPERS = frozenset({"command", "env", "exec", "nohup", "run", "sudo", "time"})
+_DURATION_WRAPPERS = frozenset({"timeout"})
+_OPTION_VALUE_WRAPPERS = frozenset({"nice", "xargs"})
+_WRAPPER_VALUE_OPTIONS = frozenset(
+    {
+        "--arg-file",
+        "--eof",
+        "--max-args",
+        "--max-chars",
+        "--max-lines",
+        "--max-procs",
+        "--replace",
+        "-E",
+        "-I",
+        "-L",
+        "-P",
+        "-a",
+        "-n",
+        "-s",
+    }
+)
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+_VARIABLE = re.compile(r"\$(?:{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))$")
 
 # YAML keys whose scalar (or list of scalars) value is a shell script.
 _YAML_SCRIPT_KEYS = frozenset({"run", "script", "shell", "commands", "before_script", "after_script"})
@@ -228,6 +249,19 @@ def _command_name_index(words: list[_Word]) -> int:
             index += 1
             while index < len(words) and (words[index].text.startswith("-") or _ASSIGNMENT.match(words[index].text)):
                 index += 1
+        elif word in _DURATION_WRAPPERS:
+            index += 1
+            while index < len(words) and words[index].text.startswith("-"):
+                index += 1
+            if index < len(words):
+                index += 1
+        elif word in _OPTION_VALUE_WRAPPERS:
+            index += 1
+            while index < len(words) and words[index].text.startswith("-"):
+                option = words[index].text
+                index += 1
+                if option in _WRAPPER_VALUE_OPTIONS and index < len(words):
+                    index += 1
         else:
             break
     return index
@@ -237,10 +271,36 @@ def _shell_call_positions(text: str) -> list[tuple[int, int]]:
     """Return (1-based line, 0-based column) of each alarm command in shell *text*."""
     line_starts = [0] + [match.end() for match in re.finditer("\n", text)]
     positions: list[tuple[int, int]] = []
+    variables: dict[str, str] = {}
     for words in _shell_simple_commands(text):
+        for word in words:
+            assignment = _ASSIGNMENT.match(word.text)
+            if assignment is not None:
+                variables[word.text[: assignment.end() - 1].rstrip("+")] = word.text[assignment.end() :]
         start = _command_name_index(words)
-        if _is_alarm_argv([word.text for word in words[start:]]):
+        if start >= len(words):
+            continue
+        command_words = [word.text for word in words[start:]]
+        variable = _VARIABLE.fullmatch(command_words[0])
+        variable_name = variable.group("braced") or variable.group("plain") if variable is not None else None
+        if variable_name is not None and (value := variables.get(variable_name)) is not None:
+            command_words = value.split() + command_words[1:]
+        if _is_alarm_argv(command_words):
             offset = words[start].offset
+            line_index = bisect.bisect_right(line_starts, offset) - 1
+            positions.append((line_index + 1, offset - line_starts[line_index]))
+            continue
+
+        command = command_words[0].rsplit("/", 1)[-1]
+        string_index: int | None = None
+        if command in {"bash", "sh"} and "-c" in command_words[1:]:
+            option_index = command_words.index("-c", 1)
+            if option_index + 1 < len(command_words):
+                string_index = start + option_index + 1
+        elif command == "eval" and len(command_words) > 1:
+            string_index = start + 1
+        if string_index is not None and _shell_call_positions(words[string_index].text):
+            offset = words[string_index].offset
             line_index = bisect.bisect_right(line_starts, offset) - 1
             positions.append((line_index + 1, offset - line_starts[line_index]))
     return positions
@@ -319,6 +379,13 @@ def _python_calls(source: str) -> list[AlarmCall]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             is_alarm = isinstance(node.func, ast.Attribute) and node.func.attr == _BOTO3_METHOD
+            is_alarm = is_alarm or (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == _BOTO3_METHOD
+            )
             argument = _command_argument(node) if _function_name(node) in _COMMAND_FUNCTIONS else None
             if argument is not None:
                 command_arguments.add(id(argument))
@@ -330,13 +397,16 @@ def _python_calls(source: str) -> list[AlarmCall]:
                     is_alarm = is_alarm or bool(_shell_call_positions(shell))
             if is_alarm:
                 positions.append((node.lineno, node.col_offset))
+        elif isinstance(node, ast.Attribute) and node.attr == _BOTO3_METHOD:
+            positions.append((node.lineno, node.col_offset))
         elif isinstance(node, (ast.List, ast.Tuple)) and id(node) not in command_arguments:
             # An argv literal is a command being built, wherever it is bound.
             argv = _argv_words(node)
             if argv is not None and _is_alarm_argv(argv):
                 positions.append((node.lineno, node.col_offset))
     return [
-        AlarmCall(line=line, column=column + 1, text=source_lines[line - 1].strip()) for line, column in positions
+        AlarmCall(line=line, column=column + 1, text=source_lines[line - 1].strip())
+        for line, column in dict.fromkeys(positions)
     ]
 
 
