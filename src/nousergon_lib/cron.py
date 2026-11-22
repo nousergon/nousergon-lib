@@ -1,167 +1,205 @@
-"""Helpers for reading and comparing GitHub Actions cron schedules."""
+"""Read GitHub Actions cron schedules and derive the cadence they keep.
+
+Lifted from nous-ergon-ops ``scripts/authority_surface.py``
+(``schedule_crons`` / ``cron_interval_minutes`` and their helpers) so that
+consumers can share one implementation. The behaviour is the ops contract,
+unchanged: ``tests/test_cron.py`` carries that repo's parametrized cases
+verbatim, and a divergence from them is a defect here, not an improvement.
+
+The interval answers "how long until this SHOULD have fired once" — the
+input to a staleness threshold. It is not a scheduler.
+"""
 
 from __future__ import annotations
 
 import re
 
-_CRON_LINE = re.compile(r"^\s*-?\s*cron\s*:\s*(.*?)\s*$")
-_DAY_NAMES = {
-    "SUN": 0,
-    "MON": 1,
-    "TUE": 2,
-    "WED": 3,
-    "THU": 4,
-    "FRI": 5,
-    "SAT": 6,
-}
+__all__ = ["cron_interval_hours", "cron_interval_minutes", "schedule_crons"]
+
+# A cron LINE, with the expression left to `_cron_expr` to unwrap. "The rest of
+# the line" rather than a character class: a class excluding `#` silently
+# drops every cron carrying a trailing comment.
+_CRON_RE = re.compile(r"^\s*-\s*cron:\s*(.+?)\s*$", re.M)
+_SCHEDULE_RE = re.compile(r"^\s*schedule:\s*$", re.M)
+_CRON_ENTRY_RE = re.compile(r"^\s*-\s*cron:", re.M)
+
+_WEEK_MINUTES = 10080
 
 
-def _without_comment(value: str) -> str:
-    quote: str | None = None
-    for index, char in enumerate(value):
-        if char in "'\"":
-            if quote is None:
-                quote = char
-            elif quote == char:
-                quote = None
-        elif char == "#" and quote is None:
-            return value[:index].rstrip()
-    return value.strip()
+def _has_schedule(text: str) -> bool:
+    """True when the workflow declares a cron trigger.
+
+    Deliberately textual: parsing the YAML resolves ``on:`` to True in some
+    documents (the Norway problem), which drops the trigger block entirely.
+    """
+    return bool(_SCHEDULE_RE.search(text)) and bool(_CRON_ENTRY_RE.search(text))
+
+
+def _cron_expr(raw: str) -> str:
+    """One cron field value, unquoted and stripped of a trailing comment.
+
+    A comment is only stripped OUTSIDE quotes: ``'0 7 * * *'  # daily`` loses
+    the comment, ``"0 7 * * *"`` keeps its five fields intact, and an unquoted
+    ``0 7 * * * # daily`` loses everything from the hash.
+    """
+    raw = raw.strip()
+    if raw[:1] in ("'", '"'):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        if end != -1:
+            return raw[1:end]
+        return raw[1:]
+    return raw.split("#", 1)[0].strip()
 
 
 def schedule_crons(text: str) -> list[str]:
-    """Return cron expressions from the ``schedule`` entries in workflow text."""
-    crons: list[str] = []
-    for line in text.splitlines():
-        match = _CRON_LINE.match(line)
-        if match is None:
-            continue
-        value = _without_comment(match.group(1)).strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
-        if value:
-            crons.append(value)
-    return crons
+    """Every cron expression a workflow file declares.
+
+    Returns ``[]`` when the file declares no schedule at all. A file that does
+    declare ``schedule:`` but whose crons are unreadable is a different
+    condition; callers check for it separately.
+    """
+    if not _has_schedule(text):
+        return []
+    return [expr for expr in (_cron_expr(match.group(1)) for match in _CRON_RE.finditer(text)) if expr]
 
 
-def _number(value: str, names: dict[str, int] | None = None) -> int | None:
-    if names is not None and value.upper() in names:
-        return names[value.upper()]
-    return int(value) if value.isdigit() else None
+def _field_fires(field: str, period: int) -> int:
+    """How many times one cron field fires across its full period (60/24/31/7).
+
+    Handles ``*``, ``*/N``, comma lists, ranges and a bare value. Unparseable
+    input counts as ONE fire, which overstates the interval; that is the answer
+    only where the expression could not be read at all.
+    """
+    field = field.strip()
+    if field == "*":
+        return period
+    if "," in field:
+        return sum(_field_fires(part, period) for part in field.split(","))
+    base, _, step_text = field.partition("/")
+    step = 1
+    if step_text:
+        try:
+            step = max(1, int(step_text))
+        except ValueError:
+            return 1
+    if base == "*":
+        span = period
+    elif "-" in base:
+        low, _, high = base.partition("-")
+        try:
+            span = max(1, int(high) - int(low) + 1)
+        except ValueError:
+            return 1
+    else:
+        return 1
+    return max(1, span // step)
 
 
-def _field_values(
-    field: str,
-    minimum: int,
-    maximum: int,
-    *,
-    names: dict[str, int] | None = None,
-) -> set[int] | None:
+def _field_values(field: str, low: int, high: int) -> set[int] | None:
+    """The exact values one cron field selects in ``[low, high]``, or None when
+    the field cannot be read exactly (a name like ``MON``, a malformed step).
+
+    Handles ``*``, ``*/N``, ``a``, ``a-b``, ``a-b/N`` and comma lists of those.
+    None is never guessed into a value: the caller falls back to the coarse
+    average for the whole workflow instead.
+    """
     values: set[int] = set()
-    for part in field.split(","):
-        base, separator, step_text = part.partition("/")
-        if separator:
-            if not step_text.isdigit() or int(step_text) < 1:
+    for part in field.strip().split(","):
+        base, _, step_text = part.partition("/")
+        try:
+            step = int(step_text) if step_text else 1
+            if step < 1:
                 return None
-            step = int(step_text)
-        else:
-            step = 1
-        if base in ("*", "?"):
-            start, end = minimum, maximum
-        elif "-" in base:
-            start_text, end_text = base.split("-", 1)
-            start = _number(start_text, names)
-            end = _number(end_text, names)
-            if start is None or end is None or start > end:
-                return None
-        else:
-            value = _number(base, names)
-            if value is None:
-                return None
-            start = end = value
-        if start < minimum or end > maximum:
+            if base == "*":
+                first, last = low, high
+            elif "-" in base:
+                start, _, end = base.partition("-")
+                first, last = int(start), int(end)
+            else:
+                first = int(base)
+                last = high if step_text else first
+        except ValueError:
             return None
-        values.update(range(start, end + 1, step))
+        if first < low or last > high or first > last:
+            return None
+        values.update(range(first, last + 1, step))
     return values or None
 
 
-def _weekly_fires(expr: str) -> set[int] | None:
-    fields = expr.split()
-    if len(fields) != 5 or fields[2] not in ("*", "?") or fields[3] != "*":
-        return None
-    minutes = _field_values(fields[0], 0, 59)
-    hours = _field_values(fields[1], 0, 23)
-    days = _field_values(fields[4], 0, 7, names=_DAY_NAMES)
-    if minutes is None or hours is None or days is None:
-        return None
-    days = {day % 7 for day in days}
-    return {day * 1440 + hour * 60 + minute for day in days for hour in hours for minute in minutes}
+def _week_fires(expr: str) -> list[int] | None:
+    """Every fire of one cron expression as a minute-of-week (Sunday 00:00 = 0),
+    or None when the expression is not exactly expandable over a week.
 
-
-def _average_interval(expr: str) -> float | None:
+    Only expressions whose day-of-month and month are ``*`` repeat weekly, so
+    only those expand; a monthly cron returns None and takes the average.
+    """
     fields = expr.split()
     if len(fields) != 5:
         return None
-    minutes = _field_values(fields[0], 0, 59)
-    hours = _field_values(fields[1], 0, 23)
-    month_days = _field_values(fields[2], 1, 30)
-    months = _field_values(fields[3], 1, 12)
-    week_days = _field_values(fields[4], 0, 7, names=_DAY_NAMES)
-    if (
-        minutes is None
-        or hours is None
-        or month_days is None
-        or months is None
-        or week_days is None
-    ):
+    minute, hour, day_of_month, month, day_of_week = fields
+    if day_of_month != "*" or month != "*":
         return None
-    week_days = {day % 7 for day in week_days}
-    fires_per_month = (
-        len(minutes)
-        * len(hours)
-        * len(month_days)
-        * len(months)
-        / 12
-        * len(week_days)
-        / 7
-    )
-    return 43200 / fires_per_month if fires_per_month else None
+    minutes = _field_values(minute, 0, 59)
+    hours = _field_values(hour, 0, 23)
+    days = _field_values(day_of_week, 0, 7)
+    if minutes is None or hours is None or days is None:
+        return None
+    days = {day % 7 for day in days}  # cron's 7 is Sunday, same as 0
+    return sorted(day * 1440 + hour_value * 60 + minute_value for day in days for hour_value in hours for minute_value in minutes)
+
+
+def _cron_average_interval_minutes(crons: list[str]) -> int | None:
+    """The coarse fallback: the AVERAGE interval of the fastest expression.
+
+    Exact only for evenly spaced crons. For an irregular one it understates the
+    longest gap (``0 3,6,8 * * *`` averages 480 min but goes 19 h overnight),
+    so it is used only where `_week_fires` cannot expand an expression.
+    """
+    best: int | None = None
+    for expr in crons:
+        fields = expr.split()
+        if len(fields) != 5:
+            continue
+        minute, hour, day_of_month, _month, day_of_week = fields
+        per_day = _field_fires(minute, 60) * _field_fires(hour, 24)
+        if day_of_week != "*":
+            interval = 10080.0 / (per_day * _field_fires(day_of_week, 7))
+        elif day_of_month != "*":
+            interval = 43200.0 / (per_day * _field_fires(day_of_month, 31))
+        else:
+            interval = 1440.0 / per_day
+        rounded = max(1, int(round(interval)))
+        best = rounded if best is None else min(best, rounded)
+    return best
 
 
 def cron_interval_minutes(crons: list[str]) -> int | None:
-    """Return the longest interval between firings in a union of schedules.
+    """The LONGEST gap between consecutive fires across a workflow's cron
+    expressions, in whole minutes, or None when nothing parseable was given.
 
-    Weekly schedules are evaluated together, including the wrap into the next
-    week. Schedules that cannot be represented over a week use their average
-    firing interval instead.
+    The fires of every expression are unioned over one week (wrapping into the
+    next week) before the gaps are measured, so interleaving expressions are
+    read together and ``*/N`` fires every N minutes. If ANY expression does not
+    repeat weekly (day-of-month or month restricted) or cannot be read exactly
+    (for example a day name), the whole workflow falls back to the minimum of
+    the per-expression average intervals.
     """
-    if not crons:
-        return None
     fires: set[int] = set()
-    averages: list[float] = []
     for expr in crons:
-        weekly = _weekly_fires(expr)
-        if weekly is None:
-            average = _average_interval(expr)
-            if average is None:
-                return None
-            averages.append(average)
-        else:
-            fires.update(weekly)
-    if averages:
-        rates = sum(1 / average for average in averages)
-        if fires:
-            rates += len(fires) / 10080
-        return round(1 / rates)
-    ordered = sorted(fires)
-    if not ordered:
+        week = _week_fires(expr)
+        if week is None:
+            return _cron_average_interval_minutes(crons)
+        fires.update(week)
+    if not fires:
         return None
+    ordered = sorted(fires)
     gaps = [later - earlier for earlier, later in zip(ordered, ordered[1:])]
-    gaps.append(10080 + ordered[0] - ordered[-1])
+    gaps.append(ordered[0] + _WEEK_MINUTES - ordered[-1])
     return max(gaps)
 
 
 def cron_interval_hours(crons: list[str]) -> float | None:
-    """Return :func:`cron_interval_minutes` converted to hours."""
+    """Compatibility wrapper: :func:`cron_interval_minutes` in hours."""
     minutes = cron_interval_minutes(crons)
     return minutes / 60 if minutes is not None else None
