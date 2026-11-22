@@ -17,7 +17,7 @@ import pytest
 from nousergon_lib.pipeline_status import registry
 
 
-def test_state_to_archive_page_entries_are_non_empty():
+def test_state_to_archive_page_entries_are_non_empty() -> None:
     """Every registry entry is either a valid ArchivePageRef (non-empty
     page + label) or a valid ArtifactReason (non-empty reason string)."""
     for name, entry in registry.STATE_TO_ARCHIVE_PAGE.items():
@@ -37,7 +37,7 @@ def test_state_to_archive_page_entries_are_non_empty():
             pytest.fail(f"Registry entry for {name!r} is wrong type: {type(entry)}")
 
 
-def test_pipeline_labels_match_sf_telegram_notifier():
+def test_pipeline_labels_match_sf_telegram_notifier() -> None:
     """Pretty labels are kept verbatim with sf-telegram-notifier's _SF_LABELS
     (alpha-engine-data/infrastructure/lambdas/sf-telegram-notifier/index.py L43-47).
     The two MUST agree so Telegram + email + page channels render the same
@@ -50,7 +50,7 @@ def test_pipeline_labels_match_sf_telegram_notifier():
     }
 
 
-def test_wait_grouping_parents_are_in_registry():
+def test_wait_grouping_parents_are_in_registry() -> None:
     """Every Wait-grouping target (the parent state name) MUST exist in the
     registry — otherwise the wait companion gets absorbed into a parent
     that doesn't render, dropping the row entirely."""
@@ -63,7 +63,7 @@ def test_wait_grouping_parents_are_in_registry():
     )
 
 
-def test_wait_for_instance_ready_maps_to_start_executor_ec2():
+def test_wait_for_instance_ready_maps_to_start_executor_ec2() -> None:
     """Regression pin (v0.28.1) — `WaitForInstanceReady` is the post-boot
     settle delay after `StartExecutorEC2` in the Pre-open Trading SF. Caught by
     the alpha-engine-dashboard registry-drift CI test on first Phase-2
@@ -73,7 +73,7 @@ def test_wait_for_instance_ready_maps_to_start_executor_ec2():
     assert registry.WAIT_GROUPING.get("WaitForInstanceReady") == "StartExecutorEC2"
 
 
-def test_wait_grouping_keys_are_wait_prefix():
+def test_wait_grouping_keys_are_wait_prefix() -> None:
     """Every key in WAIT_GROUPING is a ``WaitFor*`` state name (sanity check
     that we haven't accidentally rolled up a non-wait state)."""
     for wait_name in registry.WAIT_GROUPING.keys():
@@ -83,7 +83,7 @@ def test_wait_grouping_keys_are_wait_prefix():
         )
 
 
-def test_substantive_resources_covers_expected_arn_set():
+def test_substantive_resources_covers_expected_arn_set() -> None:
     """Pin the SUBSTANTIVE_RESOURCES set — these are the Resource ARN
     values the SF JSON walk must filter to. Drift between this set and the
     SF JSONs is caught at the dashboard PR's CI test in Phase 2."""
@@ -98,7 +98,7 @@ def test_substantive_resources_covers_expected_arn_set():
     )
 
 
-def test_registry_covers_known_saturday_substantive_states():
+def test_registry_covers_known_saturday_substantive_states() -> None:
     """Spot-check: the operator-meaningful Weekly Freshness SF states (per plan
     doc §2.1) ALL appear in the registry. Backstop against a future
     refactor accidentally dropping one."""
@@ -135,7 +135,7 @@ def test_registry_covers_known_saturday_substantive_states():
     assert not missing, f"Saturday substantive states missing from registry: {missing}"
 
 
-def test_registry_covers_known_weekday_substantive_states():
+def test_registry_covers_known_weekday_substantive_states() -> None:
     required = {
         "DeployDriftCheck",
         "StartExecutorEC2",
@@ -156,7 +156,7 @@ def test_registry_covers_known_weekday_substantive_states():
     assert not missing, f"Weekday substantive states missing from registry: {missing}"
 
 
-def test_registry_covers_known_eod_substantive_states():
+def test_registry_covers_known_eod_substantive_states() -> None:
     required = {
         "PostMarketData",
         "CaptureSnapshot",
@@ -172,20 +172,20 @@ def test_registry_covers_known_eod_substantive_states():
     assert not missing, f"EOD substantive states missing from registry: {missing}"
 
 
-def test_lookup_registry_returns_none_for_unknown_state():
+def test_lookup_registry_returns_none_for_unknown_state() -> None:
     """``lookup_registry`` MUST return None for unknown states — the
     dashboard treats None as a CI-time registry-drift signal, NOT as a
     renderable placeholder."""
     assert registry.lookup_registry("NoSuchState") is None
 
 
-def test_lookup_registry_returns_entry_for_known_state():
+def test_lookup_registry_returns_entry_for_known_state() -> None:
     entry = registry.lookup_registry("Research")
     assert isinstance(entry, registry.ArchivePageRef)
     assert entry.page == "host_research_signals?tab=Briefing+Archive"
 
 
-def test_archive_page_ref_is_frozen():
+def test_archive_page_ref_is_frozen() -> None:
     """ArchivePageRef + ArtifactReason are frozen Pydantic models —
     mutation is forbidden so consumers can rely on registry stability
     across a process lifetime. Pydantic V2 raises ValidationError with
@@ -200,7 +200,7 @@ def test_archive_page_ref_is_frozen():
         ref.page = "z"  # type: ignore[misc]
 
 
-def test_artifact_reason_is_frozen():
+def test_artifact_reason_is_frozen() -> None:
     from pydantic import ValidationError
 
     reason = registry.ArtifactReason(reason="x")
@@ -208,7 +208,7 @@ def test_artifact_reason_is_frozen():
         reason.reason = "y"  # type: ignore[misc]
 
 
-def test_postclose_split_moves_the_collector_stages_to_the_reconcile_machine():
+def test_postclose_split_moves_the_collector_stages_to_the_reconcile_machine() -> None:
     """nousergon-data-PR1996 split the post-close run in two
     (alpha-engine-config-I11269 follow-up). The three collector-dependent
     spine stages moved, unrenamed, to ``ne-postclose-reconcile-pipeline``.
@@ -233,7 +233,7 @@ def test_postclose_split_moves_the_collector_stages_to_the_reconcile_machine():
         assert stage in registry.STATE_TO_ARCHIVE_PAGE
 
 
-def test_director_poll_companion_rolls_up_into_the_director_row():
+def test_director_poll_companion_rolls_up_into_the_director_row() -> None:
     """alpha-engine-config-I11936: the weekly Director runs over SSM on the
     launcher spot, polled by ``WaitForDirector``; the poll must roll up into
     the existing ``Director`` row rather than render as its own."""
@@ -244,12 +244,12 @@ def test_director_poll_companion_rolls_up_into_the_director_row():
 # ── alpha-engine-config-I11081: the declared substantive-stage subset ─────────
 
 
-def test_every_spine_pipeline_declares_a_vacuity_spine():
+def test_every_spine_pipeline_declares_a_vacuity_spine() -> None:
     assert set(registry.VACUITY_SPINE) == set(registry.PIPELINE_STAGE_ORDER)
 
 
 @pytest.mark.parametrize("pipeline", sorted(registry.PIPELINE_STAGE_ORDER))
-def test_vacuity_spine_is_a_non_empty_ordered_subset_of_the_spine(pipeline):
+def test_vacuity_spine_is_a_non_empty_ordered_subset_of_the_spine(pipeline: str) -> None:
     spine = registry.PIPELINE_STAGE_ORDER[pipeline]
     vac = registry.VACUITY_SPINE[pipeline]
     assert vac, f"{pipeline}: an empty vacuity spine makes every rerun vacuous"
@@ -257,7 +257,7 @@ def test_vacuity_spine_is_a_non_empty_ordered_subset_of_the_spine(pipeline):
     assert list(vac) == [s for s in spine if s in vac], f"{pipeline}: order differs from the spine"
 
 
-def test_infrastructure_stages_are_not_substantive():
+def test_infrastructure_stages_are_not_substantive() -> None:
     """The stages no skip flag gates. Measured 2026-10-23: including any of them
     made the weekday guard structurally unable to fire (alpha-engine-config-I11081)."""
     pre = registry.VACUITY_SPINE["ne-preopen-trading-pipeline"]
@@ -268,14 +268,14 @@ def test_infrastructure_stages_are_not_substantive():
         assert stage not in rec
 
 
-def test_weekly_vacuity_spine_is_the_full_spine():
+def test_weekly_vacuity_spine_is_the_full_spine() -> None:
     # The weekly rerun guard (I11075) reads the full spine; this release must not
     # change its verdicts.
     assert (registry.VACUITY_SPINE["ne-weekly-freshness-pipeline"]
             == registry.PIPELINE_STAGE_ORDER["ne-weekly-freshness-pipeline"])
 
 
-def test_vacuity_spine_for_accepts_arn_or_name_and_is_empty_when_undeclared():
+def test_vacuity_spine_for_accepts_arn_or_name_and_is_empty_when_undeclared() -> None:
     arn = "arn:aws:states:us-east-1:000000000000:stateMachine:ne-postclose-trading-pipeline"
     assert registry.vacuity_spine_for(arn) == ("CaptureSnapshot",)
     assert registry.vacuity_spine_for("ne-postclose-trading-pipeline") == ("CaptureSnapshot",)
@@ -283,7 +283,20 @@ def test_vacuity_spine_for_accepts_arn_or_name_and_is_empty_when_undeclared():
     assert registry.vacuity_spine_for("") == ()
 
 
-def test_vacuity_spine_is_exported_from_the_package():
+def test_vacuity_spine_is_exported_from_the_package() -> None:
     import nousergon_lib.pipeline_status as ps
     assert ps.vacuity_spine_for is registry.vacuity_spine_for
     assert "VACUITY_SPINE" in ps.__all__ and "vacuity_spine_for" in ps.__all__
+
+
+def test_director_sub_status_degraded_is_registered_as_an_artifact_reason() -> None:
+    """The non-fatal Director degraded SNS notice persists no artifact, so it
+    is an ArtifactReason (like PublishAggregateCostsDegraded), not a page ref."""
+    entry = registry.lookup_registry("PublishDirectorSubStatusDegraded")
+    assert isinstance(entry, registry.ArtifactReason)
+    assert "Director" in entry.reason
+    assert "No persisted artifact" in entry.reason
+    assert isinstance(
+        registry.lookup_registry("PublishAggregateCostsDegraded"),
+        registry.ArtifactReason,
+    )
