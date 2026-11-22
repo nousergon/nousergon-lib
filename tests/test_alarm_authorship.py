@@ -44,6 +44,31 @@ def test_shell_calls_are_reported(source: str) -> None:
     assert calls == [AlarmCall(line=1, column=source.index("aws") + 1, text=source.strip())]
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "run aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "timeout 30 aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "xargs aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "env REGION=us-east-1 aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "command aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "nice -n 10 aws cloudwatch put-metric-alarm --alarm-name x\n",
+        '"$AWS" cloudwatch put-metric-alarm --alarm-name x\n',
+        '"${AWS}" cloudwatch put-metric-alarm --alarm-name x\n',
+        'bash -c "aws cloudwatch put-metric-alarm --alarm-name x"\n',
+        "sh -c 'aws cloudwatch put-metric-alarm --alarm-name x'\n",
+        'eval "aws cloudwatch put-metric-alarm --alarm-name x"\n',
+    ],
+)
+def test_shell_wrapper_forms_are_reported(source: str) -> None:
+    assert len(find_imperative_alarm_calls(source, "shell")) == 1
+
+
+def test_shell_command_variable_is_reported_when_executed() -> None:
+    source = 'alarm_cmd="aws cloudwatch put-metric-alarm --alarm-name x"\n$alarm_cmd\n'
+    assert [call.line for call in find_imperative_alarm_calls(source, "shell")] == [2]
+
+
 def test_shell_comments_and_printed_prose_are_not_calls() -> None:
     source = '''# aws cloudwatch put-metric-alarm --alarm-name example
 echo "aws cloudwatch put-metric-alarm --alarm-name example"
@@ -189,6 +214,17 @@ def test_python_argv_literal_bound_to_a_name_is_a_call() -> None:
 def test_python_printed_command_is_not_a_call() -> None:
     source = 'print(f"run: aws cloudwatch put-metric-alarm --alarm-name {name}")\n'
     assert find_imperative_alarm_calls(source, "python") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "create_alarm = client.put_metric_alarm\n",
+        'create_alarm = getattr(client, "put_metric_alarm")\n',
+    ],
+)
+def test_python_bound_method_references_are_calls(source: str) -> None:
+    assert [call.line for call in find_imperative_alarm_calls(source, "python")] == [1]
 
 
 def test_unparseable_python_fails_closed() -> None:
