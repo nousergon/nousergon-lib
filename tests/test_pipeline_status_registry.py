@@ -294,3 +294,16 @@ def test_vacuity_spine_is_exported_from_the_package() -> None:
     import nousergon_lib.pipeline_status as ps
     assert ps.vacuity_spine_for is registry.vacuity_spine_for
     assert "VACUITY_SPINE" in ps.__all__ and "vacuity_spine_for" in ps.__all__
+
+
+def test_director_sub_status_degraded_is_registered_as_an_artifact_reason() -> None:
+    """The non-fatal Director degraded SNS notice persists no artifact, so it
+    is an ArtifactReason (like PublishAggregateCostsDegraded), not a page ref."""
+    entry = registry.lookup_registry("PublishDirectorSubStatusDegraded")
+    assert isinstance(entry, registry.ArtifactReason)
+    assert "Director" in entry.reason
+    assert "No persisted artifact" in entry.reason
+    assert isinstance(
+        registry.lookup_registry("PublishAggregateCostsDegraded"),
+        registry.ArtifactReason,
+    )
