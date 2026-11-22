@@ -163,6 +163,36 @@ def test_shell_resumes_scanning_after_a_heredoc() -> None:
     assert [call.line for call in find_imperative_alarm_calls(source, "shell")] == [4]
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "run aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "timeout 30s aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "xargs -n 1 aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "env REGION=us-east-1 aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "command aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "nice -n 5 aws cloudwatch put-metric-alarm --alarm-name x\n",
+        "env REGION=us-east-1 timeout 30s nice command aws cloudwatch put-metric-alarm --alarm-name x\n",
+    ],
+)
+def test_shell_wrapped_commands_are_calls(source: str) -> None:
+    assert len(find_imperative_alarm_calls(source, "shell")) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "bash -c 'aws cloudwatch put-metric-alarm --alarm-name x'\n",
+        'sh -c "aws cloudwatch put-metric-alarm --alarm-name x"\n',
+        "eval 'aws cloudwatch put-metric-alarm --alarm-name x'\n",
+        "AWS=aws\n$AWS cloudwatch put-metric-alarm --alarm-name x\n",
+        "alarm_cmd='aws cloudwatch put-metric-alarm --alarm-name x'\n$alarm_cmd\n",
+    ],
+)
+def test_shell_indirect_commands_are_calls(source: str) -> None:
+    assert len(find_imperative_alarm_calls(source, "shell")) == 1
+
+
 # --- Python forms the subprocess-list check missed ---
 
 
@@ -189,6 +219,18 @@ def test_python_argv_literal_bound_to_a_name_is_a_call() -> None:
 def test_python_printed_command_is_not_a_call() -> None:
     source = 'print(f"run: aws cloudwatch put-metric-alarm --alarm-name {name}")\n'
     assert find_imperative_alarm_calls(source, "python") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "create_alarm = cloudwatch.put_metric_alarm\n",
+        'create_alarm = getattr(cloudwatch, "put_metric_alarm")\n',
+        'getattr(cloudwatch, "put_metric_alarm")(AlarmName="x")\n',
+    ],
+)
+def test_python_indirect_method_references_are_calls(source: str) -> None:
+    assert len(find_imperative_alarm_calls(source, "python")) == 1
 
 
 def test_unparseable_python_fails_closed() -> None:
