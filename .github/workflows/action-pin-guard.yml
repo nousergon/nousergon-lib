@@ -105,6 +105,10 @@ jobs:
       - name: Install deps
         run: pip install --quiet pyyaml
 
+      # No PYTHONPATH on purpose. The script imports `nousergon_lib.action_pins`
+      # and resolves that library from its own sibling `src/` (the bootstrap at
+      # the top of the script), so a consumer that pinned this skeleton before
+      # the import existed keeps working without bumping anything.
       - name: Every `uses:` resolves to a commit
         env:
           GH_TOKEN: ${{ github.token }}
