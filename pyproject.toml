@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nousergon-lib"
-version = "0.124.222"
+version = "0.124.224"
 description = "Shared utilities for the Nous Ergon (Crucible) modules: preflight, logging, ArcticDB, dates, decision capture, cost telemetry, Anthropic payload chokepoint, artifact freshness, windowed artifact resolution, RAG, agent schemas, SSM secrets, Telegram + SNS alerts, EC2 spot resilience, SSM log-capture, SSM dispatcher, Step-Functions execution-state projection, S3-conditional-PUT writer locks, and bounded-backoff HTTP retry. Full surface documented in README."
 readme = "README.md"
 # Floor is 3.10 (alpha-engine-config-I11251/I11253/I11254/I11255/I11256).
@@ -52,7 +52,13 @@ nousergon-cost-gate = "nousergon_lib.cost_gate.cli:main"
 workflow-health-semantics = "nousergon_lib.workflow_health_semantics:main"
 
 [project.optional-dependencies]
-arcticdb = ["arcticdb>=6.11", "pandas>=2.0"]
+# ArcticDB 6.x round-trips pandas 3's datetime64[us] indexes as
+# datetime64[ns], so the bitemporal dtype-preservation checks fail even though
+# the values are unchanged (alpha-engine-config#11020). Keep pandas on the
+# 2.x line verified by tests/test_arcticdb_bitemporal.py. The normal CI extras
+# install resolves the newest admitted 2.x release and runs that file, so a
+# separate maximum-version job would duplicate the existing coverage.
+arcticdb = ["arcticdb>=6.11", "pandas>=2.0,<3"]
 # Quantitative portfolio analytics (nousergon_lib.quant). Only the
 # factor-risk module needs numpy; the VaR/CVaR, riskstats, returns, and
 # attribution modules are pure stdlib and import without this extra.
@@ -61,7 +67,7 @@ quant = ["numpy>=1.24"]
 # Needs pandas (always) + scikit-learn (LedoitWolf/OAS shrinkage). Kept
 # separate from [quant] so the numpy-only consumers (e.g. robodashboard)
 # don't pull pandas+sklearn.
-quant-xs = ["numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.0"]
+quant-xs = ["numpy>=1.24", "pandas>=2.0,<3", "scikit-learn>=1.0"]
 # Per-series L2 data-contract validation gates (nousergon_lib.series_contract
 # — alpha-engine-config#2456): schema/sanity/staleness/continuity/outlier/
 # calendar-monotonic checks over an OHLCV DataFrame. pandas-only (no numpy
