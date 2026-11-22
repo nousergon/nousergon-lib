@@ -33,9 +33,59 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict, cast
 
 import yaml
+
+
+class DebugSwallowAllowlistEntry(TypedDict):
+    """One debug-swallow allowlist entry."""
+
+    path: str
+    line: int
+    reason: str
+    expires: str
+    tracking: str
+
+
+@dataclass(frozen=True)
+class DebugSwallowSite:
+    """A matching swallow site and the source context needed to report it."""
+
+    path: Path
+    function: str | None
+    try_node: ast.Try
+
+
+def find_matching_swallow_sites(path: Path) -> tuple[DebugSwallowSite, ...]:
+    """Return matching swallow sites in ``path``, including their context.
+
+    ``function`` is the nearest enclosing function name, or ``None`` for a
+    module-level ``try``.  The returned ``try_node`` can be inspected or
+    normalized with :func:`ast.unparse` by callers that need source details.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    sites: list[DebugSwallowSite] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try) or not any(
+            _is_bare_except_exception(handler) and _is_debug_only_or_pass(handler.body)
+            for handler in node.handlers
+        ):
+            continue
+        parent = parents.get(node)
+        while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parent = parents.get(parent)
+        function = parent.name if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+        sites.append(DebugSwallowSite(path=path, function=function, try_node=node))
+    return tuple(sites)
 
 
 def _is_debug_call(stmt: ast.stmt) -> bool:
@@ -66,14 +116,12 @@ def find_swallow_sites(path: Path) -> set[int]:
     body is a debug-only-or-pass swallow. Raises ``SyntaxError`` unchanged
     if ``path`` does not parse — a scanner that silently skipped an
     unparseable file would itself be a swallow."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    sites: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Try):
-            for handler in node.handlers:
-                if _is_bare_except_exception(handler) and _is_debug_only_or_pass(handler.body):
-                    sites.add(handler.lineno)
-    return sites
+    return {
+        handler.lineno
+        for site in find_matching_swallow_sites(path)
+        for handler in site.try_node.handlers
+        if _is_bare_except_exception(handler) and _is_debug_only_or_pass(handler.body)
+    }
 
 
 def find_debug_only_swallows(
@@ -95,16 +143,16 @@ def find_debug_only_swallows(
     }
 
 
-def load_allowlist(allowlist_path: Path) -> list[dict]:
+def load_allowlist(allowlist_path: Path) -> list[DebugSwallowAllowlistEntry]:
     """Load and shape-check a ``.debug-swallow-allowlist.yaml`` file
     (``schema_version: 1``, mirrors ``.provider-linkage-allowlist.yaml``)."""
-    doc = yaml.safe_load(allowlist_path.read_text(encoding="utf-8"))
+    doc = cast(dict[str, object], yaml.safe_load(allowlist_path.read_text(encoding="utf-8")))
     assert doc.get("schema_version") == 1, "unrecognized allowlist schema_version"
-    return doc["entries"]
+    return cast(list[DebugSwallowAllowlistEntry], doc["entries"])
 
 
 def check_against_allowlist(
-    live_sites: dict[str, set[int]], allowlist: list[dict]
+    live_sites: dict[str, set[int]], allowlist: list[DebugSwallowAllowlistEntry]
 ) -> list[str]:
     """Diff ``live_sites`` (from :func:`find_debug_only_swallows`) against
     a loaded allowlist. Returns human-readable failure lines: an
@@ -148,7 +196,9 @@ def check_against_allowlist(
     return expired + uncovered + stale
 
 
-def check_allowlist_entries_self_contained(allowlist: list[dict]) -> list[str]:
+def check_allowlist_entries_self_contained(
+    allowlist: Sequence[Mapping[str, object]],
+) -> list[str]:
     """Every entry must name a reason, an expiry, and a tracking issue — a
     swallow with no named recording surface is not a swallow, it is a
     deletion. Returns human-readable failure lines; empty means clean."""

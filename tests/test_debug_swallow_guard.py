@@ -6,23 +6,26 @@
 from __future__ import annotations
 
 import textwrap
+from pathlib import Path
 
 import pytest
 
 from nousergon_lib.testing.debug_swallow_guard import (
+    DebugSwallowAllowlistEntry,
     check_against_allowlist,
     check_allowlist_entries_self_contained,
     find_debug_only_swallows,
+    find_matching_swallow_sites,
     find_swallow_sites,
     load_allowlist,
 )
 
 
-def _write(path, source: str):
+def _write(path: Path, source: str) -> None:
     path.write_text(textwrap.dedent(source))
 
 
-def test_finds_bare_pass_swallow(tmp_path):
+def test_finds_bare_pass_swallow(tmp_path: Path) -> None:
     mod = tmp_path / "mod.py"
     _write(
         mod,
@@ -37,7 +40,7 @@ def test_finds_bare_pass_swallow(tmp_path):
     assert find_swallow_sites(mod) == {5}
 
 
-def test_finds_debug_only_swallow(tmp_path):
+def test_finds_debug_only_swallow(tmp_path: Path) -> None:
     mod = tmp_path / "mod.py"
     _write(
         mod,
@@ -52,7 +55,27 @@ def test_finds_debug_only_swallow(tmp_path):
     assert find_swallow_sites(mod) == {5}
 
 
-def test_control_flow_after_debug_still_in_scope(tmp_path):
+def test_matching_sites_include_path_function_and_try_node(tmp_path: Path) -> None:
+    mod = tmp_path / "mod.py"
+    _write(
+        mod,
+        """
+        async def fetch():
+            try:
+                await risky()
+            except Exception:
+                pass
+        """,
+    )
+
+    (site,) = find_matching_swallow_sites(mod)
+
+    assert site.path == mod
+    assert site.function == "fetch"
+    assert site.try_node.lineno == 3
+
+
+def test_control_flow_after_debug_still_in_scope(tmp_path: Path) -> None:
     mod = tmp_path / "mod.py"
     _write(
         mod,
@@ -69,7 +92,7 @@ def test_control_flow_after_debug_still_in_scope(tmp_path):
     assert find_swallow_sites(mod) == {6}
 
 
-def test_ignores_handler_with_second_statement(tmp_path):
+def test_ignores_handler_with_second_statement(tmp_path: Path) -> None:
     mod = tmp_path / "mod.py"
     _write(
         mod,
@@ -84,7 +107,7 @@ def test_ignores_handler_with_second_statement(tmp_path):
     assert find_swallow_sites(mod) == set()
 
 
-def test_ignores_narrow_except(tmp_path):
+def test_ignores_narrow_except(tmp_path: Path) -> None:
     mod = tmp_path / "mod.py"
     _write(
         mod,
@@ -99,7 +122,7 @@ def test_ignores_narrow_except(tmp_path):
     assert find_swallow_sites(mod) == set()
 
 
-def test_ignores_reraise(tmp_path):
+def test_ignores_reraise(tmp_path: Path) -> None:
     mod = tmp_path / "mod.py"
     _write(
         mod,
@@ -114,7 +137,7 @@ def test_ignores_reraise(tmp_path):
     assert find_swallow_sites(mod) == set()
 
 
-def test_find_debug_only_swallows_scans_directory_non_recursive(tmp_path):
+def test_find_debug_only_swallows_scans_directory_non_recursive(tmp_path: Path) -> None:
     pkg = tmp_path / "pkg"
     pkg.mkdir()
     _write(pkg / "a.py", "try:\n    risky()\nexcept Exception:\n    pass\n")
@@ -125,44 +148,44 @@ def test_find_debug_only_swallows_scans_directory_non_recursive(tmp_path):
     assert result == {"pkg/a.py": {3}}
 
 
-def test_check_against_allowlist_flags_uncovered_site():
+def test_check_against_allowlist_flags_uncovered_site() -> None:
     live = {"mod.py": {4}}
     failures = check_against_allowlist(live, allowlist=[])
     assert len(failures) == 1
     assert "mod.py:4" in failures[0]
 
 
-def test_check_against_allowlist_clears_covered_site():
+def test_check_against_allowlist_clears_covered_site() -> None:
     live = {"mod.py": {4}}
-    allowlist = [
+    allowlist: list[DebugSwallowAllowlistEntry] = [
         {"path": "mod.py", "line": 4, "reason": "x", "expires": "2099-01-01", "tracking": "I1"}
     ]
     assert check_against_allowlist(live, allowlist) == []
 
 
-def test_check_against_allowlist_flags_expired_entry():
+def test_check_against_allowlist_flags_expired_entry() -> None:
     live = {"mod.py": {4}}
-    allowlist = [
+    allowlist: list[DebugSwallowAllowlistEntry] = [
         {"path": "mod.py", "line": 4, "reason": "x", "expires": "2000-01-01", "tracking": "I1"}
     ]
     failures = check_against_allowlist(live, allowlist)
     assert any("expired" in f for f in failures)
 
 
-def test_check_against_allowlist_flags_stale_entry():
-    allowlist = [
+def test_check_against_allowlist_flags_stale_entry() -> None:
+    allowlist: list[DebugSwallowAllowlistEntry] = [
         {"path": "mod.py", "line": 4, "reason": "x", "expires": "2099-01-01", "tracking": "I1"}
     ]
     failures = check_against_allowlist({}, allowlist)
     assert any("no longer matches" in f for f in failures)
 
 
-def test_check_allowlist_entries_self_contained_requires_fields():
+def test_check_allowlist_entries_self_contained_requires_fields() -> None:
     failures = check_allowlist_entries_self_contained([{"path": "mod.py", "line": 4}])
     assert failures
 
 
-def test_load_allowlist_rejects_wrong_schema_version(tmp_path):
+def test_load_allowlist_rejects_wrong_schema_version(tmp_path: Path) -> None:
     p = tmp_path / "allow.yaml"
     p.write_text("schema_version: 2\nentries: []\n")
     with pytest.raises(AssertionError):

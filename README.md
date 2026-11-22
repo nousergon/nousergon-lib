@@ -453,7 +453,11 @@ calls raise, so a failed post means the job's manifest is `failed` and no messag
 `find_debug_only_swallows(source_dir)` AST-walks a directory of `*.py` files for `except Exception`
 handlers whose entire body is a bare `pass` or a `logger.debug(...)` call — the shape that goes
 unrecorded anywhere when a repo's root logger runs at INFO (alpha-engine-config-I10031,
-`crucible-executor-PR547`). `load_allowlist`, `check_against_allowlist` and
+`crucible-executor-PR547`). `find_matching_swallow_sites(path)` exposes each match as a
+`DebugSwallowSite` with its source path, nearest enclosing function (or `None` at module scope),
+and matching `ast.Try` node for callers that need to report or inspect the source. Existing verdict
+callers can continue to use `find_swallow_sites(path)` and `find_debug_only_swallows(source_dir)`.
+`load_allowlist`, `check_against_allowlist` and
 `check_allowlist_entries_self_contained` diff the live sites against a repo-local
 `.debug-swallow-allowlist.yaml` (same `schema_version: 1` shape as `.provider-linkage-allowlist.yaml`)
 so a consumer's own `tests/test_no_debug_only_swallows.py` is a few lines calling these four
