@@ -26,7 +26,7 @@ def test_state_to_archive_page_entries_are_non_empty() -> None:
             assert entry.artifact_label, (
                 f"ArchivePageRef for {name!r} has empty artifact_label"
             )
-        elif isinstance(entry, registry.ArtifactReason):
+        elif isinstance(entry, registry.ArtifactReason):  # pyright: ignore[reportUnnecessaryIsInstance]
             assert entry.reason, f"ArtifactReason for {name!r} has empty reason"
             # Per feedback_no_silent_fails — explicit non-generic reason
             assert "no artifact" not in entry.reason.lower() or len(entry.reason) > 30, (
@@ -54,7 +54,7 @@ def test_wait_grouping_parents_are_in_registry() -> None:
     """Every Wait-grouping target (the parent state name) MUST exist in the
     registry — otherwise the wait companion gets absorbed into a parent
     that doesn't render, dropping the row entirely."""
-    missing = []
+    missing: list[tuple[str, str]] = []
     for wait_name, parent in registry.WAIT_GROUPING.items():
         if parent not in registry.STATE_TO_ARCHIVE_PAGE:
             missing.append((wait_name, parent))
@@ -239,6 +239,13 @@ def test_director_poll_companion_rolls_up_into_the_director_row() -> None:
     the existing ``Director`` row rather than render as its own."""
     assert registry.WAIT_GROUPING.get("WaitForDirector") == "Director"
     assert "Director" in registry.STATE_TO_ARCHIVE_PAGE
+
+
+def test_preopen_correctness_gate_follows_code_freshness_gate() -> None:
+    spine = registry.PIPELINE_STAGE_ORDER["ne-preopen-trading-pipeline"]
+    freshness_index = spine.index("CodeFreshnessGate")
+    assert spine[freshness_index + 1] == "CorrectnessVerdictGate"
+    assert "WaitForCorrectnessVerdict" not in spine
 
 
 # ── alpha-engine-config-I11081: the declared substantive-stage subset ─────────
