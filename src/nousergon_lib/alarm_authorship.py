@@ -285,7 +285,10 @@ def _shell_call_positions(text: str) -> list[tuple[int, int]]:
         variable_name = variable.group("braced") or variable.group("plain") if variable is not None else None
         if variable_name is not None and (value := variables.get(variable_name)) is not None:
             command_words = value.split() + command_words[1:]
-        if _is_alarm_argv(command_words):
+        unresolved_aws = variable_name is not None and variable_name not in variables
+        if _is_alarm_argv(command_words) or (
+            unresolved_aws and _is_alarm_argv(["aws", *command_words[1:]])
+        ):
             offset = words[start].offset
             line_index = bisect.bisect_right(line_starts, offset) - 1
             positions.append((line_index + 1, offset - line_starts[line_index]))
