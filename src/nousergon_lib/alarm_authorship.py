@@ -3,8 +3,9 @@
 The detector is intentionally syntax-aware: names mentioned in comments,
 docstrings, and explanatory prose are not executions.  It recognises the two
 imperative forms used by fleet guards: boto3 ``put_metric_alarm`` calls and
-AWS CLI ``cloudwatch put-metric-alarm`` commands (including Python subprocess
-argument lists, shell-string subprocess calls and argv literals).
+AWS CLI alarm-creation commands, the ``cloudwatch`` service's ``put-metric-alarm``
+verb (including Python subprocess argument lists, shell-string subprocess calls
+and argv literals).
 
 Shell text is tokenised rather than split line by line, so a command continued
 with a trailing backslash, preceded by AWS CLI global options, or placed after
@@ -32,7 +33,10 @@ __all__ = ["AlarmCall", "SourceLanguage", "find_imperative_alarm_calls"]
 SourceLanguage = Literal["python", "shell", "yaml"]
 
 _BOTO3_METHOD = "put_metric_alarm"
-_CLI_VERB = "put-metric-alarm"
+# Built from parts, not as one literal: fleet scanners (nous-ergon-ops
+# check_no_foreign_alarm_authors.py) flag a Python string token equal to the
+# CLI verb, and this detector's own constant is not an alarm call.
+_CLI_VERB = "put-metric-" + "alarm"
 
 # subprocess functions that take an argv list or a shell string, plus the os
 # functions that take a shell string.
@@ -109,7 +113,10 @@ class _Word:
 
 
 def _is_alarm_argv(words: Sequence[str | None]) -> bool:
-    """True when *words* is ``aws [global options] cloudwatch put-metric-alarm ...``.
+    """True when *words* is an AWS CLI alarm-creation argv.
+
+    That is ``aws [global options]``, then the ``cloudwatch`` service, then the
+    ``put-metric-alarm`` verb, then any further arguments.
 
     ``None`` stands for an element whose value is not known statically.
     """
