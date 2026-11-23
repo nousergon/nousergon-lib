@@ -1766,6 +1766,7 @@ PIPELINE_STAGE_ORDER: Final[dict[str, tuple[str, ...]]] = {
     "ne-preopen-trading-pipeline": (
         "StartExecutorEC2",
         "CodeFreshnessGate",
+        "CorrectnessVerdictGate",
         # alpha-engine-config-I11269: LaunchMorningEnrichSpot /
         # LaunchMorningArcticAppendSpot are gone from the definition, replaced
         # by the bounded manifest-readiness wait (registry entries kept for

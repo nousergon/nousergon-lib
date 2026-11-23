@@ -34,6 +34,8 @@ DEFAULT_PILLAR_WEIGHTS: dict[str, float] = {
     p: 1.0 / len(PILLAR_ORDER) for p in PILLAR_ORDER
 }
 
+# With ddof=0, max |z| = (n - 1) / sqrt(n), so this clip is unreachable for
+# n < 11. See https://github.com/nousergon/alpha-engine-config/issues/7273.
 _ZSCORE_CLIP = 3.0
 
 
