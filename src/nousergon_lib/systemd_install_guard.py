@@ -62,6 +62,7 @@ hands in. Two gaps every caller must keep naming in its own docstring:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 __all__ = [
@@ -115,14 +116,21 @@ _NOT_A_UNIT_NAME = frozenset("<>&(){}[]!\\`")
 _ECHOED_RE = re.compile(r"\b(echo|printf|log|say|cat)\b")
 
 
-def sections(text: str) -> dict:
+#: ``{section name: its non-comment lines}`` — one unit file.
+Sections = dict[str, list[str]]
+
+#: ``{unit file name: its sections}`` — every unit :func:`load_units` read.
+Units = dict[str, Sections]
+
+
+def sections(text: str) -> Sections:
     """Split unit-file text into ``{section: [lines]}``, dropping comments.
 
     Comment lines (``#`` or ``;``) are dropped whole. Note this is the unit-file
     grammar, where a comment is only ever a full line — unlike the shell, where
     :func:`started_units` must be more careful.
     """
-    out: dict = {}
+    out: Sections = {}
     current = ""
     for raw in text.splitlines():
         line = raw.strip()
@@ -136,13 +144,13 @@ def sections(text: str) -> dict:
     return out
 
 
-def directive(lines, key: str) -> list:
+def directive(lines: Iterable[str], key: str) -> list[str]:
     """Every whitespace-separated value assigned to ``key`` in ``lines``.
 
     systemd allows a directive to repeat and to carry several values per line;
     both are accumulated, matching how systemd merges list-valued keys.
     """
-    vals: list = []
+    vals: list[str] = []
     for line in lines:
         k, _, v = line.partition("=")
         if k.strip() == key:
@@ -150,7 +158,7 @@ def directive(lines, key: str) -> list:
     return vals
 
 
-def load_units(systemd_dir: Path) -> dict:
+def load_units(systemd_dir: Path) -> Units:
     """Every ``*.service`` / ``*.timer`` in ``systemd_dir``, drop-ins merged.
 
     ``<name>.service.d/*.conf`` fragments are appended to the base unit's
@@ -158,7 +166,7 @@ def load_units(systemd_dir: Path) -> dict:
     whose base file this repo does not carry still yields an entry, so its
     edges are visible.
     """
-    units: dict = {}
+    units: Units = {}
     if not systemd_dir.is_dir():
         return units
     for path in sorted(systemd_dir.glob("*")):
@@ -173,7 +181,7 @@ def load_units(systemd_dir: Path) -> dict:
     return units
 
 
-def triggered_service(timer: str, timer_sections) -> str:
+def triggered_service(timer: str, timer_sections: Mapping[str, list[str]]) -> str:
     """The service a timer activates: explicit ``Unit=``, else same basename."""
     explicit = directive(timer_sections.get("Timer", []), "Unit")
     if explicit:
@@ -181,14 +189,14 @@ def triggered_service(timer: str, timer_sections) -> str:
     return timer[: -len(".timer")] + ".service"
 
 
-def scheduled_workloads(units) -> set:
+def scheduled_workloads(units: Mapping[str, Sections]) -> set[str]:
     """``Type=oneshot`` services that a timer in ``units`` exists to trigger.
 
     DERIVED, never a literal list — that property is the whole point. A new
     timer-driven job joins the protected class by existing, not by being added
     to an allowlist somebody has to remember.
     """
-    out: set = set()
+    out: set[str] = set()
     for name, unit_sections in units.items():
         if not name.endswith(".timer"):
             continue
@@ -201,7 +209,7 @@ def scheduled_workloads(units) -> set:
     return out
 
 
-def _normalise(token: str):
+def _normalise(token: str) -> str | None:
     """A bare systemctl argument as a unit name, or ``None`` if it is not one."""
     token = token.strip().strip("\"'")
     if not token or token.startswith("-") or "$" in token or "*" in token:
@@ -213,7 +221,7 @@ def _normalise(token: str):
     return token
 
 
-def started_units(script: Path) -> set:
+def started_units(script: Path) -> set[str]:
     """Units ``script`` activates, by source text.
 
     Anti-false-positive rules, each of which exists because a real script in the
@@ -228,7 +236,7 @@ def started_units(script: Path) -> set:
       and a token starting a trailing comment ends the argument list;
     * ``enable`` counts only with ``--now``; ``reenable`` never counts.
     """
-    started: set = set()
+    started: set[str] = set()
     for line in script.read_text(encoding="utf-8").splitlines():
         if line.lstrip().startswith("#"):
             continue
@@ -257,14 +265,14 @@ def started_units(script: Path) -> set:
     return started
 
 
-def start_closure(unit: str, units) -> set:
+def start_closure(unit: str, units: Mapping[str, Sections]) -> set[str]:
     """``unit`` plus everything starting it pulls in, per ``units``.
 
     Transitive over :data:`DEP_KEYS` in each unit's ``[Unit]`` section. Names of
     units absent from ``units`` are included (they were named by a real edge)
     but not expanded — the calling repo cannot see edges it does not own.
     """
-    seen: set = set()
+    seen: set[str] = set()
     stack = [unit]
     while stack:
         current = stack.pop()
@@ -281,7 +289,7 @@ def start_closure(unit: str, units) -> set:
     return seen
 
 
-def may_start(unit: str, units) -> bool:
+def may_start(unit: str, units: Mapping[str, Sections]) -> bool:
     """Does ``unit`` declare ``X-InstallMayStart=yes`` in its own ``[Unit]``?
 
     The reason lives beside the declaration in the unit file. ``X-`` keys are
@@ -293,7 +301,7 @@ def may_start(unit: str, units) -> bool:
     return "yes" in directive(unit_sections.get("Unit", []), INSTALL_MAY_START_KEY)
 
 
-def violations(script: Path, units) -> dict:
+def violations(script: Path, units: Mapping[str, Sections]) -> dict[str, set[str]]:
     """``{started unit: scheduled workloads it pulls in}`` for ``script``.
 
     Empty when the script is clean. The caller owns the assertion and its
@@ -301,7 +309,7 @@ def violations(script: Path, units) -> dict:
     repo's fix.
     """
     workloads = scheduled_workloads(units)
-    offenders: dict = {}
+    offenders: dict[str, set[str]] = {}
     for unit in started_units(script):
         pulled = {u for u in start_closure(unit, units) & workloads if not may_start(u, units)}
         if pulled:

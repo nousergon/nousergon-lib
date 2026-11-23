@@ -72,10 +72,19 @@ Requires the ``contracts`` extra (``nousergon-lib[contracts]`` → jsonschema).
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from functools import cache
 from importlib import resources
-from typing import Any
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; jsonschema is the optional 'contracts' extra
+    from typing import TypeAlias
+
+    from jsonschema import ValidationError
+    from jsonschema.protocols import Validator
+
+    # A JSON instance, as jsonschema's ``Validator.iter_errors`` types it.
+    _Json: TypeAlias = str | int | float | bool | None | Mapping[str, "_Json"] | Sequence["_Json"]
 
 __all__ = [
     "CONTRACT_SCHEMAS",
@@ -162,7 +171,7 @@ SCHEMA_VERSIONS: dict[str, int] = {
 class ContractViolation(Exception):
     """A payload failed its slot contract. ``errors`` carries the full list."""
 
-    def __init__(self, name: str, errors: list[str]):
+    def __init__(self, name: str, errors: list[str]) -> None:
         self.name = name
         self.errors = errors
         preview = "; ".join(errors[:5]) + (" …" if len(errors) > 5 else "")
@@ -173,7 +182,7 @@ class ContractViolation(Exception):
 
 
 @cache
-def load_schema(name: str) -> dict[str, Any]:
+def load_schema(name: str) -> dict[str, object]:
     """Load the JSON Schema for a contract (``signals`` | ``predictions`` | ``outcome_record``)."""
     if name not in CONTRACT_SCHEMAS:
         raise KeyError(f"unknown contract {name!r}; known: {sorted(CONTRACT_SCHEMAS)}")
@@ -187,7 +196,7 @@ def load_schema(name: str) -> dict[str, Any]:
         return json.load(f)
 
 
-def _validator(name: str):
+def _validator(name: str) -> Validator:
     # Deferred import so the lib core stays importable without the extra.
     try:
         from jsonschema import Draft202012Validator
@@ -199,25 +208,27 @@ def _validator(name: str):
     return Draft202012Validator(load_schema(name))
 
 
-def iter_errors(name: str, payload: Any) -> Iterator[Any]:
+def iter_errors(name: str, payload: object) -> Iterator[ValidationError]:
     """Yield raw jsonschema ValidationError objects for ``payload``."""
-    return _validator(name).iter_errors(payload)
+    # ``payload`` is caller-supplied decoded JSON of unknown shape; jsonschema
+    # accepts any value at runtime and reports what the schema rejects.
+    return _validator(name).iter_errors(cast("_Json", payload))
 
 
-def conformance_errors(name: str, payload: Any) -> list[str]:
+def conformance_errors(name: str, payload: object) -> list[str]:
     """Human-readable contract errors for ``payload`` (empty list = conforms).
 
     The conformance-kit primitive: producer CI, consumer fixture tests, and
     external slot implementations all assert ``conformance_errors(...) == []``.
     """
-    out = []
+    out: list[str] = []
     for e in iter_errors(name, payload):
         path = "/".join(str(p) for p in e.absolute_path) or "<root>"
         out.append(f"{path}: {e.message}")
     return sorted(out)
 
 
-def validate(name: str, payload: Any) -> None:
+def validate(name: str, payload: object) -> None:
     """Validate ``payload`` against its slot contract; raise :class:`ContractViolation`.
 
     Fail-loud by design (no boolean-return variant): a contract break should

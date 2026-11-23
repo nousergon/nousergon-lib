@@ -32,7 +32,8 @@ Checks, per ``uses:`` value (local ``./`` and ``docker://`` refs are skipped):
 
 1. carries an ``@ref`` at all;
 2. that ref is a 40-hex SHA -- the fleet pins actions by commit, never by tag
-   or branch, so a mutable ref is a finding in its own right;
+   or branch, so a mutable ref is a finding in its own right; a short or long
+   hexadecimal ref is named as such rather than as a branch;
 3. that SHA resolves to a **commit** in the named repository.
 
 Network failure is a hard error, never a pass. A guard that treats an
@@ -43,6 +44,12 @@ Invisibility is reported as invisibility. ``GITHUB_TOKEN`` reads only the repo
 running the workflow, so a ``uses:`` into a *different private* repo 404s at
 every object endpoint — byte-identical to a deleted SHA. That case names the
 access problem instead, because the fix is a token, not a repin.
+
+**The logic lives in ``nousergon_lib.action_pins``, not here.** This file is the
+CLI: it walks workflow files, owns the HTTP transport, and words each finding.
+Parsing ``uses:`` values, the 40-hex SHA rule, and the commit/blob/tag/unreadable
+classification are the shared module's, so a second guard asks the same
+question and gets the same answer.
 
 Exit codes: ``0`` clean, ``1`` findings, ``2`` could not complete the check.
 
@@ -57,7 +64,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import urllib.error
 import urllib.request
@@ -67,19 +73,25 @@ from typing import Any, Callable
 
 import yaml
 
+# Self-bootstrap, same reason as validate_merge_group_required_checks.py: this
+# file is executed from a CHECKOUT of nousergon-lib (the reusable workflow clones
+# it beside the caller's repo), not from an installed package, and the script
+# ref floats while each consumer pins the workflow skeleton. Resolving the
+# sibling `src/` here means no consumer has to bump a pin for the import to work.
+if __package__ is None:  # executed as a file, which is the only way this runs
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from nousergon_lib.action_pins import (  # noqa: E402 -- bootstrap must precede
+    ObjectKind,
+    RefShape,
+    ResolutionError,
+    UsesKind,
+    classify_object,
+    parse_uses,
+    ref_shape,
+)
+
 _API = "https://api.github.com"
-
-# Lowercase only: git object IDs render lowercase everywhere GitHub emits them,
-# and an uppercase ref is far more likely to be hand-mangled than deliberate.
-_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-
-# owner/repo, optionally followed by a path inside that repo (reusable
-# workflows and repo-hosted composite actions both use the longer form).
-_USES_RE = re.compile(r"^(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+)(?P<path>/[^@]*)?@(?P<ref>.+)$")
-
-
-class ResolutionError(RuntimeError):
-    """The check could not be completed -- not a finding, an infrastructure fault."""
 
 
 # ── GitHub reads ─────────────────────────────────────────────────────────────
@@ -112,48 +124,32 @@ def _get(path: str, token: str | None) -> tuple[int, Any]:
 def classify_ref(owner_repo: str, sha: str, token: str | None = None) -> str | None:
     """Return ``None`` when *sha* is a commit in *owner_repo*, else why it is not.
 
-    The message is the deliverable. "Not found" sends someone back to the same
-    endpoint that produced the bad value; "this is the blob SHA of the file"
-    ends the investigation.
+    Resolution is ``nousergon_lib.action_pins.classify_object`` over this
+    file's transport; what is left here is the wording of the finding.
     """
-    status, _ = _get(f"repos/{owner_repo}/commits/{sha}", token)
-    if status == 200:
+    verdict = classify_object(lambda path: _get(path, token), owner_repo, sha)
+    if verdict.kind is ObjectKind.COMMIT:
         return None
-
-    # Wrong-type probes, cheapest first. Both are real objects in the repo, so
-    # the only thing that distinguishes them from a commit is the endpoint that
-    # accepts them.
-    tag_status, tag = _get(f"repos/{owner_repo}/git/tags/{sha}", token)
-    if tag_status == 200 and isinstance(tag, dict):
-        target = (tag.get("object") or {}).get("sha", "?")
-        name = tag.get("tag", "?")
+    if verdict.detail == "tag_object":
         return (
-            f"is the ANNOTATED TAG OBJECT for `{name}`, not a commit. "
-            f"GitHub cannot resolve a tag object in `uses:` -- dereference it: use {target}"
+            f"is the ANNOTATED TAG OBJECT for `{verdict.tag_name}`, not a commit. "
+            f"GitHub cannot resolve a tag object in `uses:` -- dereference it: use {verdict.target_sha}"
         )
-
-    blob_status, _ = _get(f"repos/{owner_repo}/git/blobs/{sha}", token)
-    if blob_status == 200:
+    if verdict.detail == "blob":
         return (
             "is a BLOB SHA (the file object), not a commit. This is what "
             "`GET /repos/{owner}/{repo}/contents/{path}` returns in `.sha` -- "
             "read the commit from `GET /repos/{owner}/{repo}/commits/{ref}` instead"
         )
-
-    # Everything above 404s identically when the repository itself is invisible
-    # to this token. GITHUB_TOKEN is scoped to the repo running the workflow, so
-    # a `uses:` into a DIFFERENT private repo reads exactly like a deleted
-    # object — and reporting it as one sends someone hunting a SHA that is fine.
-    # Separate the two by asking whether the repo is visible at all.
-    repo_status, _ = _get(f"repos/{owner_repo}", token)
-    if repo_status != 200:
+    if verdict.kind is ObjectKind.UNREADABLE:
+        # GITHUB_TOKEN is scoped to the repo running the workflow, so a `uses:`
+        # into a DIFFERENT private repo reads exactly like a deleted object.
         return (
             f"could not be checked: `{owner_repo}` is not visible to this token "
             f"(private to another repo, renamed, or deleted). GITHUB_TOKEN only "
             f"reads the repo running the workflow -- a cross-repo private `uses:` "
             f"needs a token with access to both"
         )
-
     return f"does not exist in `{owner_repo}` as any reachable object"
 
 
@@ -187,24 +183,34 @@ def line_of(text: str, value: str) -> int:
 
 def check_uses(value: str, resolver: Callable[[str, str], str | None]) -> str | None:
     """Return a problem string for one ``uses:`` value, or ``None`` when it is fine."""
-    if value.startswith("./") or value.startswith(".\\") or value.startswith("docker://"):
+    parsed = parse_uses(value)
+    if parsed.kind is UsesKind.SKIPPED:
         return None  # local action or container image -- no cross-repo ref to resolve
-
-    match = _USES_RE.match(value)
-    if not match:
-        if "@" not in value:
-            return "is not pinned -- `uses:` must carry `@<40-hex commit SHA>`"
+    if parsed.kind is UsesKind.UNPINNED:
+        return "is not pinned -- `uses:` must carry `@<40-hex commit SHA>`"
+    if parsed.kind is UsesKind.UNPARSEABLE:
         return "is not a parseable `owner/repo[/path]@ref` reference"
 
-    ref = match.group("ref")
-    if not _SHA_RE.match(ref):
+    ref = parsed.ref
+    shape = ref_shape(ref)
+    if shape is RefShape.SHORT_HEX:
+        return (
+            f"is pinned to `{ref}`, a {len(ref)}-character hexadecimal ref -- an abbreviated SHA is "
+            f"mutable (it can become ambiguous, and GitHub does not resolve it in `uses:`). Pin to the "
+            f"full 40-hex commit SHA (keep the tag in a trailing comment)"
+        )
+    if shape is RefShape.LONG_HEX:
+        return (
+            f"is pinned to `{ref}`, a {len(ref)}-character hexadecimal ref, longer than a 40-hex "
+            f"commit SHA. Pin to the exact 40-hex commit SHA (keep the tag in a trailing comment)"
+        )
+    if shape is not RefShape.SHA:
         return (
             f"is pinned to `{ref}`, a mutable ref. Pin to the 40-hex commit SHA "
             f"it currently resolves to (keep the tag in a trailing comment)"
         )
 
-    owner_repo = f"{match.group('owner')}/{match.group('repo')}"
-    problem = resolver(owner_repo, ref)
+    problem = resolver(parsed.owner_repo, ref)
     return None if problem is None else f"@{ref} {problem}"
 
 

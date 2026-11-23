@@ -347,3 +347,63 @@ def test_an_undelivered_headline_is_still_a_failure_after_a_good_post(monkeypatc
     permalink = tracker.post_comment(7, "full update")
     with pytest.raises(UndeliveredError):
         deliver(f"see {permalink}", severity="info", source="s", console_artifact="a")
+
+
+# --------------------------------------------------------------------------
+# labels at creation, and dedup across closed issues (alpha-engine-config-I13712)
+
+
+def test_labels_ride_the_create_payload_only_when_given(monkeypatch):
+    tracker, opener = _tracker(monkeypatch, [(200, {"items": []}), (201, {"number": 12, "html_url": "u"})])
+    assert tracker.find_or_create_issue(title="[incident] week", body="b", labels=["incident"]) == 12
+    assert json.loads(opener.requests[1].data) == {"title": "[incident] week", "body": "b", "labels": ["incident"]}
+
+
+def test_a_found_issue_is_never_relabelled(monkeypatch):
+    tracker, opener = _tracker(monkeypatch, [(200, {"items": [{"number": 7, "title": "daily", "state": "open"}]})])
+    assert tracker.find_or_create_issue(title="daily", body="b", labels=["incident"]) == 7
+    assert len(opener.requests) == 1
+
+
+def test_include_closed_counts_a_closed_exact_match_as_filed(monkeypatch):
+    tracker, opener = _tracker(
+        monkeypatch,
+        [
+            (
+                200,
+                {
+                    "items": [
+                        {"number": 9, "title": "daily", "state": "closed"},
+                        {"number": 4, "title": "daily", "state": "closed"},
+                    ]
+                },
+            )
+        ],
+    )
+    assert tracker.find_or_create_issue(title="daily", body="b", include_closed=True) == 4
+    assert len(opener.requests) == 1
+    assert "is%3Aopen" not in opener.requests[0].full_url
+
+
+def test_include_closed_still_prefers_the_open_match(monkeypatch):
+    tracker, _ = _tracker(
+        monkeypatch,
+        [
+            (
+                200,
+                {
+                    "items": [
+                        {"number": 4, "title": "daily", "state": "closed"},
+                        {"number": 9, "title": "daily", "state": "open"},
+                    ]
+                },
+            )
+        ],
+    )
+    assert tracker.find_issue_by_title("daily", include_closed=True) == 9
+
+
+def test_without_include_closed_a_closed_match_is_not_found(monkeypatch):
+    tracker, opener = _tracker(monkeypatch, [(200, {"items": [{"number": 4, "title": "daily", "state": "closed"}]})])
+    assert tracker.find_issue_by_title("daily") is None
+    assert "is%3Aopen" in opener.requests[0].full_url

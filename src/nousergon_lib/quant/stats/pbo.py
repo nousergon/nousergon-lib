@@ -26,11 +26,40 @@ to keep package import cheap, matching the rest of ``quant.stats``). Install
 from __future__ import annotations
 
 import math
+from collections.abc import Hashable, Iterable
+from typing import Callable, Literal, TypedDict, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 
-def cscv_pbo(ic_matrix, *, spec_ids=None, min_splits: int = 4) -> dict:
+class _InsufficientPbo(TypedDict):
+    status: Literal["insufficient"]
+    reason: str
+    n_splits: int
+    n_specs: int
+    pbo: float
+
+
+class _SuccessfulPbo(TypedDict):
+    status: Literal["ok"]
+    n_splits: int
+    n_specs: int
+    spec_ids: list[Hashable]
+    pbo: float
+    mean_logit: float
+    selected_counts: dict[Hashable, int]
+
+
+PboResult = _InsufficientPbo | _SuccessfulPbo
+
+
+def cscv_pbo(
+    ic_matrix: object,
+    *,
+    spec_ids: Iterable[Hashable] | None = None,
+    min_splits: int = 4,
+) -> PboResult:
     """CSCV Probability of Backtest Overfitting over an aligned trial matrix
     (Bailey, Borwein, López de Prado & Zhu 2014).
 
@@ -52,7 +81,10 @@ def cscv_pbo(ic_matrix, *, spec_ids=None, min_splits: int = 4) -> dict:
     fabricated number when there are <2 combos or <``min_splits`` clean rows —
     the honest-N/A posture: an insufficient PBO must not silently pass the gate.
     """
-    from scipy.stats import rankdata as _rankdata
+    from scipy.stats import rankdata as _rankdata  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
+
+    # scipy has no installed type information; narrow its untyped API at this boundary.
+    rankdata = cast(Callable[[NDArray[np.float64]], NDArray[np.float64]], _rankdata)
 
     m = np.asarray(ic_matrix, dtype=float)
     if m.ndim != 2 or m.shape[1] < 2:
@@ -73,25 +105,25 @@ def cscv_pbo(ic_matrix, *, spec_ids=None, min_splits: int = 4) -> dict:
             "n_specs": int(n_specs),
             "pbo": float("nan"),
         }
-    ids = list(spec_ids) if spec_ids is not None else list(range(n_specs))
+    ids: list[Hashable] = list(spec_ids) if spec_ids is not None else list(range(n_specs))
     logits: list[float] = []
-    selected_counts: dict = {}
+    selected_counts: dict[Hashable, int] = {}
     total = clean.sum(axis=0)
     for c in range(n_splits):
         is_mean = (total - clean[c]) / (n_splits - 1)   # IS = all splits but c
-        s_star = int(np.argmax(is_mean))
+        s_star = int(is_mean.argmax())
         selected_counts[ids[s_star]] = selected_counts.get(ids[s_star], 0) + 1
         # OOS relative rank of the IS pick at the held-out split. rankdata
         # average-ties so a degenerate all-equal row yields w=0.5 (logit 0,
         # counted as underperformance — conservative).
-        w = float(_rankdata(clean[c])[s_star]) / (n_specs + 1)
+        w = float(rankdata(clean[c])[s_star]) / (n_specs + 1)
         logits.append(math.log(w / (1.0 - w)))
     lam = np.asarray(logits, dtype=float)
 
-    def _r(v, p=6):
+    def _r(v: np.float64 | float, p: int = 6) -> float:
         return round(float(v), p) if np.isfinite(v) else float("nan")
 
-    return {
+    result: _SuccessfulPbo = {
         "status": "ok",
         "n_splits": int(n_splits),
         "n_specs": int(n_specs),
@@ -100,6 +132,7 @@ def cscv_pbo(ic_matrix, *, spec_ids=None, min_splits: int = 4) -> dict:
         "mean_logit": _r(float(lam.mean())),
         "selected_counts": selected_counts,
     }
+    return result
 
 
 __all__ = ["cscv_pbo"]

@@ -45,7 +45,7 @@
     },
     "trigger": {
       "description": "How this execution was started. Closed: an unknown trigger is a run nobody can attribute, and `manual` exists precisely so a hand-run repair is counted as one rather than disguised as a schedule (`data_collection_plan_260914.md` §4.4).",
-      "enum": ["scheduled", "on_demand", "manual", "gha", "backfill"],
+      "enum": ["scheduled", "on_demand", "manual", "gha", "backfill", "rehearsal"],
       "type": "string"
     },
     "trading_day": {

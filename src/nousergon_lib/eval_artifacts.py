@@ -92,8 +92,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import Protocol, cast
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,20 @@ logger = logging.getLogger(__name__)
 # Stable filename for the operator-UX single-fetch sidecar. Constant
 # rather than configurable so dashboards / scripts can hard-code it.
 EVAL_LATEST_FILENAME: str = "latest.json"
+
+
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
+class _Paginator(Protocol):
+    def paginate(self, *, Bucket: str, Prefix: str) -> Iterable[Mapping[str, object]]: ...
+
+
+class _S3Client(Protocol):
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def get_paginator(self, operation_name: str) -> _Paginator: ...
 
 
 def new_eval_run_id(*, now: datetime | None = None) -> str:
@@ -215,11 +230,11 @@ def eval_latest_key(prefix: str) -> str:
 
 
 def load_latest_eval_artifact(
-    s3_client: Any,
+    s3_client: _S3Client,
     *,
     bucket: str,
     prefix: str,
-) -> dict | None:
+) -> dict[str, object] | None:
     """Load the most recent eval-style artifact via canonical sidecar pointer.
 
     Resolution sequence (all-or-nothing, returns None on any failure):
@@ -253,7 +268,8 @@ def load_latest_eval_artifact(
     sidecar_key = eval_latest_key(prefix)
     try:
         sidecar_obj = s3_client.get_object(Bucket=bucket, Key=sidecar_key)
-        sidecar = json.loads(sidecar_obj["Body"].read())
+        body = cast(_Readable, sidecar_obj["Body"])
+        sidecar = cast(object, json.loads(body.read()))
     except Exception as e:
         logger.info(
             "[load_latest_eval_artifact] sidecar read failed at s3://%s/%s (%s) — "
@@ -262,7 +278,7 @@ def load_latest_eval_artifact(
         )
         return None
 
-    artifact_key = sidecar.get("artifact_key") if isinstance(sidecar, dict) else None
+    artifact_key = cast("Mapping[str, object]", sidecar).get("artifact_key") if isinstance(sidecar, dict) else None
     if not artifact_key:
         logger.warning(
             "[load_latest_eval_artifact] sidecar at s3://%s/%s lacks artifact_key",
@@ -271,8 +287,9 @@ def load_latest_eval_artifact(
         return None
 
     try:
-        body_obj = s3_client.get_object(Bucket=bucket, Key=artifact_key)
-        return json.loads(body_obj["Body"].read())
+        body_obj = s3_client.get_object(Bucket=bucket, Key=cast(str, artifact_key))
+        body = cast(_Readable, body_obj["Body"])
+        return cast("dict[str, object]", json.loads(body.read()))
     except Exception as e:
         logger.warning(
             "[load_latest_eval_artifact] artifact body read failed at s3://%s/%s (%s)",
@@ -282,12 +299,12 @@ def load_latest_eval_artifact(
 
 
 def list_eval_artifacts(
-    s3_client: Any,
+    s3_client: _S3Client,
     *,
     bucket: str,
     prefix: str,
     n_recent: int | None = None,
-) -> list[dict]:
+) -> list[dict[str, object]]:
     """List eval-style artifacts under ``prefix``, oldest → newest by run_id.
 
     Lists ``{prefix}/{YYMMDDHHMM}.json`` keys (canonical eval_artifacts
@@ -325,8 +342,8 @@ def list_eval_artifacts(
         paginator = s3_client.get_paginator("list_objects_v2")
         run_ids: list[tuple[str, str]] = []  # (run_id, artifact_key)
         for page in paginator.paginate(Bucket=bucket, Prefix=list_prefix):
-            for obj in page.get("Contents", []):
-                key = obj.get("Key", "")
+            for obj in cast("list[Mapping[str, object]]", page.get("Contents", [])):
+                key = cast(str, obj.get("Key", ""))
                 rel = key[len(list_prefix):]
                 if "/" in rel or not rel.endswith(".json"):
                     continue
@@ -345,11 +362,12 @@ def list_eval_artifacts(
     if n_recent is not None and len(run_ids) > n_recent:
         run_ids = run_ids[-n_recent:]
 
-    out: list[dict] = []
+    out: list[dict[str, object]] = []
     for _run_id, key in run_ids:
         try:
             body_obj = s3_client.get_object(Bucket=bucket, Key=key)
-            out.append(json.loads(body_obj["Body"].read()))
+            body = cast(_Readable, body_obj["Body"])
+            out.append(cast("dict[str, object]", json.loads(body.read())))
         except Exception as e:
             logger.warning(
                 "[list_eval_artifacts] body read failed at s3://%s/%s (%s) — "

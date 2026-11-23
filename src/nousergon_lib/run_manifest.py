@@ -66,17 +66,17 @@ import os
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Generic, Protocol, TypedDict, TypeVar, cast
 
 # `resolve_code_sha` / `new_run_id` moved to `run_identity` (I10831 deliverable
 # 2) — neither reads or writes anything schema-shaped, so crucible's
 # `run_manifest.v2` can import them directly without coupling to this module's
-# `data_run_manifest.v1` contract. `_REAL_SHA_RE` stays imported (not
+# `data_run_manifest.v1` contract. `REAL_SHA_RE` stays imported (not
 # re-derived) so this module's own sha-shape refusal below cannot drift from
 # `run_identity`'s.
 from nousergon_lib.run_identity import (
-    _REAL_SHA_RE,
     CODE_SHA_ENV,
+    REAL_SHA_RE,
     CodeShaError,
     new_run_id,
     resolve_code_sha,
@@ -151,7 +151,9 @@ NOT_APPLICABLE_REASONS: frozenset[str] = frozenset(
 #: How an execution was started. Closed: an unknown trigger is a run nobody can
 #: attribute, and ``manual`` exists so a hand-run repair is COUNTED as one
 #: rather than disguised as a schedule (plan §4.4).
-TRIGGERS: frozenset[str] = frozenset({"scheduled", "on_demand", "manual", "gha", "backfill"})
+TRIGGERS: frozenset[str] = frozenset(
+    {"scheduled", "on_demand", "manual", "gha", "backfill", "rehearsal"}
+)
 
 #: Optional environment declarations for the compute row, exported by the box
 #: shell that launched the workload.
@@ -218,7 +220,7 @@ class NotApplicable(Exception):
     run-record objective exists to end.
     """
 
-    def __init__(self, reason: str, detail: str = ""):
+    def __init__(self, reason: str, detail: str = "") -> None:
         if reason not in NOT_APPLICABLE_REASONS:
             raise ValueError(
                 f"not_applicable reason {reason!r} is not in the closed list "
@@ -234,6 +236,98 @@ class NotApplicable(Exception):
 # ---------------------------------------------------------------------------
 # Sinks — where a manifest lands.
 # ---------------------------------------------------------------------------
+
+
+class InputRecord(TypedDict):
+    """One ``inputs[]`` row: an artifact the run READ, at the version read."""
+
+    key: str
+    etag: str | None
+    version: str | None
+    schema_version: str | None
+
+
+class _InputRefKey(TypedDict):
+    key: str
+
+
+class InputRef(_InputRefKey, total=False):
+    """A pre-declared input passed to :func:`run_unit`; only ``key`` is required."""
+
+    etag: str | None
+    version: str | None
+    schema_version: str | None
+
+
+class _OutputRecordFields(TypedDict):
+    key: str
+    etag: str | None
+    schema_version: str | None
+    rows_out: int
+    bytes: int | None
+    version_id: str | None
+
+
+class OutputRecord(_OutputRecordFields, total=False):
+    """One ``outputs[]`` row; ``version_capture`` is set on every recorded output."""
+
+    version_capture: str
+    version_capture_error: str
+
+
+class GuardRecord(TypedDict):
+    """One ``guards[]`` row: a write-time guard's reading."""
+
+    guard: str
+    mode: str
+    verdict: str
+    detail: str
+    key: str | None
+    value: float | None
+    baseline: float | None
+
+
+class ExcludedRecord(TypedDict):
+    """One ``excluded[]`` row: a record left out of the denominator."""
+
+    id: str
+    declared_class: str
+    source: str | None
+
+
+class DenominatorRecord(TypedDict):
+    """The ``denominator`` block."""
+
+    source: str
+    count: int
+    floor: float | None
+
+
+class ComputeRecord(TypedDict):
+    """The ``compute`` block, from what the box declared."""
+
+    instance_type: str
+    spot: bool
+    escalated_on_demand: bool
+    interruptions: int
+    region: str | None
+
+
+class _ModelDumpable(Protocol):
+    """A pydantic model (a ``MetricRecord``), as :meth:`UnitRun.record_metric` uses it."""
+
+    def model_dump(self, *, mode: str, exclude_none: bool) -> dict[str, object]: ...
+
+
+class S3ManifestClient(Protocol):
+    """The two S3 calls :class:`S3ManifestSink` makes (a boto3 S3 client)."""
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object: ...
+
+    def head_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+
+_T = TypeVar("_T")
 
 
 class ManifestSink(Protocol):
@@ -276,7 +370,7 @@ class ObjectVersion:
     bytes: int | None
 
 
-def _clean_etag(value: Any) -> str | None:
+def _clean_etag(value: object) -> str | None:
     return value.strip('"') if isinstance(value, str) else None
 
 
@@ -313,15 +407,18 @@ class S3ManifestSink:
 
     bucket: str
     prefix: str = DEFAULT_MANIFEST_PREFIX
-    s3_client: Any = None
+    #: An :class:`S3ManifestClient` (a boto3 S3 client); ``None`` builds one on
+    #: first use. Held as ``object`` because boto3 ships no stubs, so the client
+    #: it constructs has no type to check against the protocol.
+    s3_client: object = None
     head_key: Callable[[str], str] | None = None
 
-    def _client(self) -> Any:
+    def _client(self) -> S3ManifestClient:
         if self.s3_client is None:
-            import boto3  # local import: the lib core stays importable without boto3
+            import boto3  # pyright: ignore[reportMissingTypeStubs]  # local import keeps the lib core importable without boto3, which ships no stubs
 
             self.s3_client = boto3.client("s3")
-        return self.s3_client
+        return cast(S3ManifestClient, self.s3_client)
 
     def write(self, key: str, payload: bytes) -> str | None:
         resp = self._client().put_object(
@@ -330,7 +427,8 @@ class S3ManifestSink:
             Body=payload,
             ContentType="application/json",
         )
-        etag = resp.get("ETag") if isinstance(resp, Mapping) else None
+        # A boto3 response is a dict; a test double may return anything.
+        etag = cast("Mapping[str, object]", resp).get("ETag") if isinstance(resp, Mapping) else None
         return etag.strip('"') if isinstance(etag, str) else None
 
     def head(self, key: str) -> ObjectVersion | None:
@@ -349,7 +447,9 @@ class S3ManifestSink:
             response = getattr(exc, "response", None)
             code = ""
             if isinstance(response, Mapping):
-                code = str((response.get("Error") or {}).get("Code") or "")
+                # botocore's ClientError.response: {"Error": {"Code": ...}, ...}.
+                error: object = cast("Mapping[str, object]", response).get("Error") or {}
+                code = str(cast("Mapping[str, object]", error).get("Code") or "")
             if code in {"404", "NoSuchKey", "NotFound"}:
                 return None
             raise
@@ -388,7 +488,7 @@ class LocalDirManifestSink:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_compute() -> dict[str, Any]:
+def _resolve_compute() -> ComputeRecord:
     """The compute row, from what the box declared — never guessed.
 
     An undeclared environment is a laptop or CI run, and says so: ``local``,
@@ -438,14 +538,14 @@ class UnitRun:
 
     rows_in: int = 0
     cost_usd: float = 0.0
-    inputs: list[dict[str, Any]] = field(default_factory=list)
-    outputs: list[dict[str, Any]] = field(default_factory=list)
+    inputs: list[InputRecord] = field(default_factory=list[InputRecord])
+    outputs: list[OutputRecord] = field(default_factory=list[OutputRecord])
     rejected: dict[str, int] = field(default_factory=dict)
-    guards: list[dict[str, Any]] = field(default_factory=list)
-    metrics: list[dict[str, Any]] = field(default_factory=list)
-    excluded: list[dict[str, Any]] = field(default_factory=list)
-    denominator: dict[str, Any] | None = None
-    compute: dict[str, Any] = field(default_factory=_resolve_compute)
+    guards: list[GuardRecord] = field(default_factory=list[GuardRecord])
+    metrics: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+    excluded: list[ExcludedRecord] = field(default_factory=list[ExcludedRecord])
+    denominator: DenominatorRecord | None = None
+    compute: ComputeRecord = field(default_factory=_resolve_compute)
     #: Looks up an output object's current version. Set by :func:`run_unit`
     #: from a sink that has a ``head`` method; never written to the manifest.
     object_head: Callable[[str], ObjectVersion | None] | None = field(default=None, repr=False)
@@ -489,7 +589,7 @@ class UnitRun:
         """
         if rows_out < 0:
             raise ValueError(f"rows_out must be >= 0, got {rows_out}")
-        record: dict[str, Any] = {
+        record: OutputRecord = {
             "key": key,
             "etag": etag,
             "schema_version": schema_version,
@@ -568,12 +668,13 @@ class UnitRun:
             }
         )
 
-    def record_metric(self, record: Any) -> None:
+    def record_metric(self, record: object) -> None:
         """Attach a MetricRecord (or a plain dict of one) to this run."""
         if hasattr(record, "model_dump"):
-            self.metrics.append(record.model_dump(mode="json", exclude_none=True))
+            self.metrics.append(cast(_ModelDumpable, record).model_dump(mode="json", exclude_none=True))
         elif isinstance(record, Mapping):
-            self.metrics.append(dict(record))
+            # A plain dict of one MetricRecord: string keys, JSON values.
+            self.metrics.append(dict(cast("Mapping[str, object]", record)))
         else:
             raise TypeError(f"metric must be a MetricRecord or a mapping, got {type(record)!r}")
 
@@ -590,14 +691,18 @@ class UnitRun:
 
 
 @dataclass(frozen=True)
-class UnitRunResult:
-    """What :func:`run_unit` returns on a run that did not raise."""
+class UnitRunResult(Generic[_T]):
+    """What :func:`run_unit` returns on a run that did not raise.
+
+    ``value`` is what the unit body returned, or ``None`` when the body raised
+    :class:`NotApplicable`.
+    """
 
     status: str
     reason: str
-    manifest: dict[str, Any]
+    manifest: dict[str, object]
     key: str | None
-    value: Any = None
+    value: _T | None = None
 
 
 def _rfc3339(moment: dt.datetime) -> str:
@@ -611,7 +716,7 @@ def _build_manifest(
     reason: str,
     finished: dt.datetime,
     reason_truncated_bytes: int = 0,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": ctx.run_id,
@@ -642,7 +747,7 @@ def _build_manifest(
 
 def run_unit(
     unit_id: str,
-    fn: Callable[[UnitRun], Any],
+    fn: Callable[[UnitRun], _T],
     *,
     sink: ManifestSink | None,
     trigger: str,
@@ -652,8 +757,8 @@ def run_unit(
     now: dt.datetime | None = None,
     code_sha: str | None = None,
     prefix: str = DEFAULT_MANIFEST_PREFIX,
-    inputs: Iterable[Mapping[str, Any]] = (),
-) -> UnitRunResult:
+    inputs: Iterable[InputRef] = (),
+) -> UnitRunResult[_T]:
     """Run ``fn`` as unit ``unit_id`` and write its manifest, whatever happens.
 
     ``fn`` receives a :class:`UnitRun` and records its own lineage on it. The
@@ -687,7 +792,7 @@ def run_unit(
             "(observability-policy §6.2)."
         )
     resolved_sha = code_sha if code_sha is not None else resolve_code_sha()
-    if not _REAL_SHA_RE.match(resolved_sha):
+    if not REAL_SHA_RE.match(resolved_sha):
         raise CodeShaError(f"code_sha {resolved_sha!r} is not a real 40-character git sha")
 
     started = now or dt.datetime.now(dt.timezone.utc)
@@ -713,7 +818,7 @@ def run_unit(
     status = "failed"
     reason = "run did not reach a terminal state"
     reason_truncated_bytes = 0
-    value: Any = None
+    value: _T | None = None
     try:
         value = fn(ctx)
         status, reason = "ok", ""

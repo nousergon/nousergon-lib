@@ -47,6 +47,10 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; pytest is imported lazily below
+    import pytest
 
 _FLOOR_RE = re.compile(
     r'([A-Za-z][A-Za-z0-9_.\-]*)\s*(\[[^\]]+\])?\s*>=\s*([0-9][0-9A-Za-z.\-]*)'
@@ -66,9 +70,9 @@ class FloorViolation:
         return f'pip install -U "{self.package}>={self.floor}"'
 
 
-def _version_tuple(v: str) -> tuple:
+def _version_tuple(v: str) -> tuple[int, ...]:
     parts = re.split(r"[.\-]", v)
-    out = []
+    out: list[int] = []
     for p in parts:
         try:
             out.append(int(p))
@@ -178,7 +182,7 @@ def format_violation_report(violations: list[FloorViolation]) -> str:
     return "\n".join(lines)
 
 
-def pytest_sessionstart(session):  # pragma: no cover - pytest hook wiring
+def pytest_sessionstart(session: pytest.Session) -> None:  # pragma: no cover - pytest hook wiring
     if os.environ.get(_SKIP_ENV):
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if reporter is not None:

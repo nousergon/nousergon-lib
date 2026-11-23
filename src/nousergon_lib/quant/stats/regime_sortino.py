@@ -34,10 +34,11 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, cast
+from typing import Literal, Protocol, TypedDict, cast, overload
 
 import numpy as np
-import pandas as pd
+import pandas as pd  # pyright: ignore[reportMissingTypeStubs]  # pandas ships no stubs and pandas-stubs is not a dependency
+from numpy.typing import NDArray
 
 from nousergon_lib.quant import riskstats
 from nousergon_lib.quant.horizons import DEFAULT_POLICY, HorizonPolicy
@@ -78,6 +79,69 @@ SUPPORTED_HORIZONS: tuple[int, ...] = DEFAULT_POLICY.all_horizons
 # same distribution.
 _SORTINO_USEFUL_THRESHOLD: float = 0.3
 _SORTINO_INVERTED_THRESHOLD: float = -0.3
+
+
+# ── Typed views of the pandas surface used here ─────────────────────────────
+#
+# pandas ships no stubs (pandas-stubs is not a dependency), so pyright infers
+# many Series members from pandas' implementation and they come out partially
+# unknown. Each Protocol below names exactly the calls this module makes, with
+# the shapes they return for the inputs it is given; pandas objects are cast to
+# them at the boundary. Runtime behaviour is unchanged — ``cast`` is a no-op.
+
+
+class _Mask(Protocol):
+    """A boolean Series."""
+
+    def any(self) -> np.bool_: ...
+    def mean(self) -> float: ...
+    def __and__(self, other: _Mask, /) -> _Mask: ...
+
+
+class _Column(Protocol):
+    """A column selected by name from a frame with unique column names."""
+
+    @overload
+    def astype(self, dtype: Literal["float64"], /) -> pd.Series: ...
+    @overload
+    def astype(self, dtype: type[bool], /) -> _Mask: ...
+    def notna(self) -> _Mask: ...
+    def unique(self) -> NDArray[np.object_]: ...
+
+
+class _FloatSeries(Protocol):
+    """A float64 Series."""
+
+    @property
+    def index(self) -> pd.Index: ...
+    @property
+    def empty(self) -> bool: ...
+    @property
+    def size(self) -> int: ...
+    def to_numpy(self) -> NDArray[np.float64]: ...
+    def min(self) -> float: ...
+    def max(self) -> float: ...
+
+
+class _DateSeries(Protocol):
+    """A datetime64 Series (``pd.to_datetime`` of a Series)."""
+
+    @property
+    def empty(self) -> bool: ...
+    def dropna(self) -> _DateSeries: ...
+    def min(self) -> pd.Timestamp: ...
+    def max(self) -> pd.Timestamp: ...
+
+
+class _ToDatetime(Protocol):
+    """The ``pandas`` module's ``to_datetime``, Series-argument overload."""
+
+    def to_datetime(self, arg: pd.Series, *, errors: Literal["coerce"]) -> _DateSeries: ...
+
+
+def _float64_values(series: pd.Series) -> NDArray[np.float64]:
+    """``series.to_numpy()`` for a Series already coerced to float64."""
+    return cast(_FloatSeries, series).to_numpy()
 
 
 @dataclass(frozen=True)
@@ -167,10 +231,10 @@ def _to_fraction(
       here is the whole point: a future source swap must break the run, not
       quietly change what the number means.
     """
-    converted = cast("pd.Series", values.astype("float64"))
+    converted = cast(_Column, values).astype("float64")
     if units is ReturnUnits.PERCENT:
         converted = cast("pd.Series", converted / 100.0)
-    finite = cast("pd.Series", converted[np.isfinite(converted.to_numpy())])
+    finite = cast(_FloatSeries, converted[np.isfinite(_float64_values(converted))])
     if finite.empty:
         return converted
     lo, hi = float(finite.min()), float(finite.max())
@@ -235,8 +299,8 @@ def _arithmetic_to_log_alpha(
     the canonical ``log_alpha_{h}d`` column where the store publishes one;
     this path exists for horizons that do not yet carry it.
     """
-    ret = _to_fraction(arithmetic_return, units, column=return_column)
-    spy = _to_fraction(arithmetic_spy_return, units, column=spy_column)
+    ret = cast(_FloatSeries, _to_fraction(arithmetic_return, units, column=return_column))
+    spy = cast(_FloatSeries, _to_fraction(arithmetic_spy_return, units, column=spy_column))
     return pd.Series(
         np.log1p(ret.to_numpy()) - np.log1p(spy.to_numpy()), index=ret.index,
     )
@@ -253,7 +317,7 @@ def _annualization_factor(horizon_days: int) -> float:
 
 
 def _annualized_sortino_from_log_alphas(
-    log_alphas: np.ndarray,
+    log_alphas: NDArray[np.float64],
     horizon_days: int,
 ) -> float | None:
     """Annualized Sortino on per-pick log alphas.
@@ -292,7 +356,7 @@ def _annualized_sortino_from_log_alphas(
 
 
 def _annualized_sharpe_from_log_alphas(
-    log_alphas: np.ndarray,
+    log_alphas: NDArray[np.float64],
     horizon_days: int,
 ) -> float | None:
     """Annualized Sharpe on per-pick log alphas — secondary diagnostic.
@@ -308,7 +372,7 @@ def _annualized_sharpe_from_log_alphas(
     return mean / std * _annualization_factor(horizon_days)
 
 
-def _downside_std(log_alphas: np.ndarray) -> float | None:
+def _downside_std(log_alphas: NDArray[np.float64]) -> float | None:
     """Downside deviation — the Sortino denominator, surfaced independently of
     the ratio.
 
@@ -351,7 +415,7 @@ def _resolve_log_alphas(
     units: ReturnUnits,
     policy: HorizonPolicy,
     use_canonical: bool,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Per-pick log alphas for one stratum, canonical column FIRST.
 
     ``score_performance_outcomes`` publishes ``log_alpha`` in decimals for the
@@ -365,14 +429,14 @@ def _resolve_log_alphas(
     """
     cols = policy.outcome_columns(horizon_days)
     if use_canonical:
-        return cast("pd.Series", populated[cols.log_alpha]).astype("float64").to_numpy()
-    return _arithmetic_to_log_alpha(
+        return _float64_values(cast(_Column, populated[cols.log_alpha]).astype("float64"))
+    return _float64_values(_arithmetic_to_log_alpha(
         cast("pd.Series", populated[cols.stock_return]),
         cast("pd.Series", populated[cols.spy_return]),
         units=units,
         return_column=cols.stock_return,
         spy_column=cols.spy_return,
-    ).to_numpy()
+    ))
 
 
 def _stratum_metrics(
@@ -407,11 +471,14 @@ def _stratum_metrics(
     # column is published, ITS non-nullness is the population — otherwise a
     # row could be counted as a pick and then have no alpha to contribute.
     log_col = cols.log_alpha
-    use_canonical = log_col in slice_df.columns and bool(slice_df[log_col].notna().any())
+    use_canonical = log_col in slice_df.columns and bool(
+        cast(_Column, slice_df[log_col]).notna().any()
+    )
     mask = (
-        slice_df[log_col].notna()
+        cast(_Column, slice_df[log_col]).notna()
         if use_canonical
-        else slice_df[return_col].notna() & slice_df[spy_col].notna()
+        else cast(_Column, slice_df[return_col]).notna()
+        & cast(_Column, slice_df[spy_col]).notna()
     )
     populated = cast("pd.DataFrame", slice_df[mask])
     n_picks = len(populated)
@@ -429,9 +496,11 @@ def _stratum_metrics(
     sharpe = _annualized_sharpe_from_log_alphas(log_alphas, horizon_days=horizon_days)
     hit_rate: float | None = None
     if beat_col in populated.columns:
-        beat_populated = populated[populated[beat_col].notna()]
+        beat_populated = cast(
+            "pd.DataFrame", populated[cast(_Column, populated[beat_col]).notna()]
+        )
         if len(beat_populated) > 0:
-            hit_rate = float(beat_populated[beat_col].astype(bool).mean())
+            hit_rate = float(cast(_Column, beat_populated[beat_col]).astype(bool).mean())
 
     return StratumMetrics(
         market_regime=market_regime,
@@ -478,8 +547,8 @@ def stratified_sortino_by_regime(
 
     # See the analogous cast in _stratum_metrics: boolean-mask row
     # selection on a DataFrame always returns a DataFrame.
-    df_with_regime = cast("pd.DataFrame", df[df["market_regime"].notna()])
-    regimes = sorted(df_with_regime["market_regime"].unique())
+    df_with_regime = cast("pd.DataFrame", df[cast(_Column, df["market_regime"]).notna()])
+    regimes = sorted(cast(_Column, df_with_regime["market_regime"]).unique())
 
     out: list[StratumMetrics] = []
     for regime in regimes:
@@ -500,10 +569,27 @@ def stratified_sortino_by_regime(
     return out
 
 
+class RegimeSpread(TypedDict):
+    """:func:`compute_regime_spread`'s result."""
+
+    horizon_days: int
+    bull_sortino: float | None
+    bear_sortino: float | None
+    neutral_sortino: float | None
+    caution_sortino: float | None
+    spread_bull_minus_bear_sortino: float | None
+    interpretation: str
+    bull_n_picks: int
+    bear_n_picks: int
+    diagnostic_sharpe_spread_bull_minus_bear: float | None
+    diagnostic_bull_sharpe: float | None
+    diagnostic_bear_sharpe: float | None
+
+
 def compute_regime_spread(
     strata: Sequence[StratumMetrics],
     horizon_days: int = DEFAULT_POLICY.primary_horizon,
-) -> dict[str, Any]:
+) -> RegimeSpread:
     """Headline Sortino-spread metric: bull-Sortino minus bear-Sortino.
 
     Positive spread = the regime call enabled better downside-risk-adjusted picks
@@ -586,7 +672,7 @@ class InputWindow:
     max_score_date: str | None
     n_rows: int
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, str | int | None]:
         return {
             "min_score_date": self.min_score_date,
             "max_score_date": self.max_score_date,
@@ -605,11 +691,13 @@ STATUS_OK: str = "ok"
 STATUS_UNMEASURABLE: str = "unmeasurable"
 
 
-def input_window(df: pd.DataFrame, *, date_col: str = "score_date") -> InputWindow:
+def input_window(df: pd.DataFrame | None, *, date_col: str = "score_date") -> InputWindow:
     """Min/max/count of ``date_col`` over the rows fed to the metric."""
     if df is None or df.empty or date_col not in df.columns:
         return InputWindow(min_score_date=None, max_score_date=None, n_rows=0)
-    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    dates = cast(_ToDatetime, pd).to_datetime(
+        cast("pd.Series", df[date_col]), errors="coerce"
+    ).dropna()
     if dates.empty:
         return InputWindow(min_score_date=None, max_score_date=None, n_rows=len(df))
     return InputWindow(
@@ -671,8 +759,8 @@ def assess_input_freshness(
 def assemble_t2_eval_payload(
     *,
     strata: Sequence[StratumMetrics],
-    spread_primary: Mapping[str, Any],
-    spread_diagnostic: Mapping[str, Any],
+    spread_primary: Mapping[str, object],
+    spread_diagnostic: Mapping[str, object],
     run_id: str,
     calendar_date: str,
     trading_day: str,
@@ -682,7 +770,7 @@ def assemble_t2_eval_payload(
     units: ReturnUnits = ReturnUnits.FRACTION,
     min_picks_per_stratum: int = DEFAULT_MIN_PICKS_PER_STRATUM,
     policy: HorizonPolicy = DEFAULT_POLICY,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Assemble the canonical eval-artifact JSON payload (pure dict build; no I/O).
 
     The consumer persists this via ``nousergon_lib.eval_artifacts`` writers.

@@ -133,16 +133,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from .partition import cycle_keys
 from .read import (
     RunStatus,
-    _extract_pipeline_role,
-    _paged_execution_history,
-    _parse_ts,
-    _raise_for_boto_error,
-    _sfn_client,
+    _extract_pipeline_role,  # pyright: ignore[reportPrivateUsage] -- shared pipeline-status helper
+    _paged_execution_history,  # pyright: ignore[reportPrivateUsage] -- shared pipeline-status helper
+    _parse_ts,  # pyright: ignore[reportPrivateUsage] -- shared pipeline-status helper
+    _raise_for_boto_error,  # pyright: ignore[reportPrivateUsage] -- shared pipeline-status helper
+    _sfn_client,  # pyright: ignore[reportPrivateUsage] -- shared pipeline-status helper
 )
 from .registry import (
     declared_skip_stages_for,
@@ -156,8 +156,7 @@ from .work import WorkOutcome, WorkVerdict, classify_work, entered_states_from_h
 
 if TYPE_CHECKING:  # pragma: no cover
     from mypy_boto3_stepfunctions.client import SFNClient
-else:  # pragma: no cover
-    SFNClient = Any
+    from mypy_boto3_stepfunctions.type_defs import ListExecutionsInputTypeDef
 
 logger = logging.getLogger(__name__)
 
@@ -192,11 +191,11 @@ REHEARSAL_EXECUTION_PREFIX = "rehearsal-"
 _REHEARSAL_RUN_MODE = "rehearsal"
 
 
-def _is_rehearsal_name(name: str | None) -> bool:
+def _is_rehearsal_name(name: object | None) -> bool:
     return bool(name) and str(name).startswith(REHEARSAL_EXECUTION_PREFIX)
 
 
-def is_rehearsal_execution(describe_resp: Mapping[str, Any]) -> bool:
+def is_rehearsal_execution(describe_resp: Mapping[str, object]) -> bool:
     """Is this DescribeExecution response a rehearsal? — ``alpha-engine-config-I12382``.
 
     True when ANY of:
@@ -223,9 +222,10 @@ def is_rehearsal_execution(describe_resp: Mapping[str, Any]) -> bool:
         return False
     if not isinstance(parsed, dict):
         return False
-    if parsed.get("rehearsal"):
+    parsed_object = cast("dict[object, object]", parsed)
+    if parsed_object.get("rehearsal"):
         return True
-    run_mode = parsed.get("run_mode")
+    run_mode = parsed_object.get("run_mode")
     return isinstance(run_mode, str) and run_mode.strip().lower() == _REHEARSAL_RUN_MODE
 
 
@@ -289,7 +289,7 @@ DEFAULT_WALK_CAP: int = 60
 DEFAULT_LOOKBACK_DAYS: int = 14
 
 
-def cycle_key_for(describe_resp: Mapping[str, Any]) -> str | None:
+def cycle_key_for(describe_resp: Mapping[str, object]) -> str | None:
     """The cycle key of one execution — delegates to :func:`~.read._extract_run_date`.
 
     THIS IS A THIN ALIAS AND MUST STAY ONE. The three-source resolution
@@ -304,7 +304,7 @@ def cycle_key_for(describe_resp: Mapping[str, Any]) -> str | None:
     the third source fixes. The fix was to lift the third source into
     ``read``, not to keep a better copy beside it.
     """
-    from .read import _extract_run_date  # local: avoids a cycle at import time
+    from .read import _extract_run_date  # pyright: ignore[reportPrivateUsage] -- canonical resolver
 
     return _extract_run_date(describe_resp)
 
@@ -346,7 +346,7 @@ class CycleExecution:
     #: ``()`` means a readable input declared none (alpha-engine-config-I9051).
     skips: tuple[str, ...] | None = None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "execution_arn": self.execution_arn,
             "execution_name": self.execution_name,
@@ -496,7 +496,7 @@ class CycleShape:
             tail += " [ListExecutions walk cap reached — contributor set may be incomplete]"
         return head + tail
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         """Primitive projection — this IS the completion marker's payload."""
         return {
             "pipeline": self.pipeline,
@@ -518,6 +518,19 @@ class CycleShape:
             "verdict_trustworthy": self.verdict_trustworthy,
             "explain": self.explain(),
         }
+
+
+class _CycleShapeCommon(TypedDict):
+    pipeline: str
+    run_date: str
+    executions: tuple[CycleExecution, ...]
+    stage_spine: tuple[str, ...]
+    stages_entered: tuple[str, ...]
+    stages_missing: tuple[str, ...]
+    stages_declared_skipped: tuple[str, ...]
+    walk_exhausted: bool
+    observer_execution_arn: str
+    rehearsals_excluded: tuple[str, ...]
 
 
 def build_cycle_shape(
@@ -656,7 +669,7 @@ def build_cycle_shape(
         and s not in served
     )
 
-    common: dict[str, Any] = {
+    common: _CycleShapeCommon = {
         "pipeline": pipeline,
         "run_date": run_date,
         "executions": executions,
@@ -770,7 +783,7 @@ def read_cycle_shape(
     before_floor = False
 
     while inspected < walk_cap:
-        kwargs: dict[str, Any] = {
+        kwargs: ListExecutionsInputTypeDef = {
             "stateMachineArn": state_machine_arn,
             "maxResults": min(100, walk_cap - inspected),
         }

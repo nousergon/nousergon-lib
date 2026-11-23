@@ -29,11 +29,14 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from statistics import NormalDist
-from typing import Callable, TypedDict
+from typing import Callable, TypedDict, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 _DEFAULT_N_RESAMPLES = 1000
+
+FloatArray = NDArray[np.float64]
 
 
 class BootstrapCIResult(TypedDict, total=False):
@@ -68,15 +71,15 @@ class WilsonScoreResult(TypedDict, total=False):
     method: str           # "wilson"
 
 
-def _clean(data: Sequence[float] | np.ndarray) -> np.ndarray:
+def _clean(data: Sequence[float] | FloatArray) -> FloatArray:
     """Coerce to a 1-D float array with NaN/inf dropped."""
     arr = np.asarray(data, dtype=float).ravel()
     return arr[np.isfinite(arr)]
 
 
 def bootstrap_ci(
-    data: Sequence[float] | np.ndarray,
-    statistic: Callable[[np.ndarray], float] = np.mean,
+    data: Sequence[float] | FloatArray,
+    statistic: Callable[[FloatArray], float | np.float64] = np.mean,
     *,
     ci_level: float = 0.95,
     n_resamples: int = _DEFAULT_N_RESAMPLES,
@@ -113,8 +116,10 @@ def bootstrap_ci(
         return {"status": "insufficient_data", "n": n}
 
     tail = (1.0 - ci_level) / 2.0
-    ci_low = float(np.percentile(boot, 100.0 * tail))
-    ci_high = float(np.percentile(boot, 100.0 * (1.0 - tail)))
+    # NumPy's overloaded percentile type is partially unknown at this boundary.
+    percentile = cast(Callable[[FloatArray, float], np.float64], np.percentile)
+    ci_low = float(percentile(boot, 100.0 * tail))
+    ci_high = float(percentile(boot, 100.0 * (1.0 - tail)))
     return {
         "status": "ok",
         "n": n,
@@ -129,11 +134,12 @@ def bootstrap_ci(
 
 def _auto_lags(n: int) -> int:
     """Newey-West (1994) automatic lag selection: floor(4·(n/100)^(2/9))."""
-    return int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+    scaled = cast(float, 4.0 * (n / 100.0) ** (2.0 / 9.0))
+    return math.floor(scaled)
 
 
 def newey_west_se(
-    series: Sequence[float] | np.ndarray,
+    series: Sequence[float] | FloatArray,
     *,
     max_lags: int | None = None,
 ) -> NeweyWestResult:
@@ -160,11 +166,13 @@ def newey_west_se(
     lags = max(0, min(lags, n - 1))
 
     e = x - x.mean()
-    gamma0 = float(np.dot(e, e) / n)
+    # NumPy's overloaded dot type is partially unknown at this boundary.
+    dot = cast(Callable[[FloatArray, FloatArray], np.float64], np.dot)
+    gamma0 = float(dot(e, e) / n)
     lrv = gamma0
     for j in range(1, lags + 1):
         weight = 1.0 - j / (lags + 1.0)
-        gamma_j = float(np.dot(e[j:], e[:-j]) / n)
+        gamma_j = float(dot(e[j:], e[:-j]) / n)
         lrv += 2.0 * weight * gamma_j
     lrv = max(lrv, 0.0)  # Bartlett kernel guarantees PSD; clamp float error.
     se = math.sqrt(lrv / n)

@@ -224,6 +224,25 @@ def test_unreadable_profile_cannot_pass_an_unresolved_author_unjudged(tmp_path):
     assert _run(repo) == 1  # with the profile, the name check catches it
 
 
+def test_a_readable_owner_profile_does_not_mask_an_unread_one(tmp_path):
+    """codex a834056337675e84: one owner's profile supplied a name, so the
+    unread second owner's name was treated as known and an author carrying
+    it on an unlinked email passed unjudged."""
+    repo = _Repo(tmp_path / "r")
+    repo.commit(f"fix\n\n{SESSION}\n", author=("Second Owner", "unlinked@example.org"))
+    assert _run(repo, "--owner-login", "second-owner", fail="users/second-owner") == 2
+
+
+def test_github_synthesised_commit_is_not_unjudged_by_an_unread_profile(tmp_path):
+    """codex bd60ea81f11500a9: findings() exempts a GitHub-synthesised commit's
+    author and committer, so an unresolved author on one must not fail the
+    unread-profile check that exists only for what findings() judges."""
+    repo = _Repo(tmp_path / "r")
+    repo.commit(f"squash\n\n{SESSION}\n", author=AGENT, committer=GITHUB)
+    assert _run(repo, fail="users/") == 0
+    assert _run(repo, fail="users/", forged=True) == 2  # a forged GitHub committer is still judged
+
+
 def test_bad_range_fails_closed(tmp_path):
     repo = _Repo(tmp_path / "r")
     args = ["--repo", str(repo.path), "--base", "0" * 40, "--head", repo.head(),

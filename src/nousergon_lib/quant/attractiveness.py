@@ -9,7 +9,8 @@ share byte-identical numbers for the same factor-profile inputs.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from collections.abc import Mapping
+from typing import SupportsFloat, SupportsIndex, TypedDict, cast
 
 PILLAR_ORDER: tuple[str, ...] = (
     "quality",
@@ -33,7 +34,28 @@ DEFAULT_PILLAR_WEIGHTS: dict[str, float] = {
     p: 1.0 / len(PILLAR_ORDER) for p in PILLAR_ORDER
 }
 
+# With ddof=0, max |z| = (n - 1) / sqrt(n), so this clip is unreachable for
+# n < 11. See https://github.com/nousergon/alpha-engine-config/issues/7273.
 _ZSCORE_CLIP = 3.0
+
+
+class AttractivenessRecord(TypedDict):
+    """One ticker's row in the scores mapping."""
+
+    attractiveness_raw: float | None
+    attractiveness_score: float | None
+    pillar_contributions: dict[str, float]
+    undefined_pillars: list[str]
+
+
+class AttractivenessCoverage(TypedDict):
+    """The coverage report; see :func:`compute_cross_sectional_attractiveness_with_coverage`."""
+
+    n_tickers: int
+    n_scored: int
+    n_excluded_undefined: int
+    excluded_tickers: list[str]
+    degenerate_pillars: dict[str, int]
 
 
 def _num(v: object) -> float | None:
@@ -45,7 +67,7 @@ def _num(v: object) -> float | None:
         # try/except (TypeError, ValueError) below IS the type-safety
         # mechanism for non-ConvertibleToFloat input at runtime, so the
         # cast just tells pyright to let the runtime check do its job.
-        f = float(cast(Any, v))
+        f = float(cast("str | SupportsFloat | SupportsIndex", v))
     except (TypeError, ValueError):
         return None
     if f != f or f in (float("inf"), float("-inf")):
@@ -119,7 +141,7 @@ def normalize_pillar_weights(raw: dict[str, float] | None) -> dict[str, float]:
 def compute_cross_sectional_attractiveness(
     pillar_scores_by_ticker: dict[str, dict[str, float | None]],
     pillar_weights: dict[str, float],
-) -> dict[str, dict]:
+) -> dict[str, AttractivenessRecord]:
     """Blend sector-neutral pillar percentiles into cross-sectional attractiveness scores.
 
     Returns ``{ticker: {attractiveness_raw, attractiveness_score,
@@ -140,7 +162,7 @@ def compute_cross_sectional_attractiveness(
 def compute_cross_sectional_attractiveness_with_coverage(
     pillar_scores_by_ticker: dict[str, dict[str, float | None]],
     pillar_weights: dict[str, float],
-) -> tuple[dict[str, dict], dict]:
+) -> tuple[dict[str, AttractivenessRecord], AttractivenessCoverage]:
     """As :func:`compute_cross_sectional_attractiveness`, plus the coverage report.
 
     Returns ``(scores, coverage)``. ``coverage`` is emitted UNCONDITIONALLY —
@@ -176,7 +198,7 @@ def compute_cross_sectional_attractiveness_with_coverage(
     pillar_stats = {p: _mean_std(list(v.values())) for p, v in pillar_values.items() if v}
 
     blends: dict[str, float] = {}
-    out: dict[str, dict] = {}
+    out: dict[str, AttractivenessRecord] = {}
     degenerate_pillars: dict[str, int] = {}
     for ticker, scores in pillar_scores_by_ticker.items():
         contribs: dict[str, tuple[float, float]] = {}
@@ -203,7 +225,7 @@ def compute_cross_sectional_attractiveness_with_coverage(
             num += w * z
             wsum += w
             contribs[p] = (w, z)
-        rec = {
+        rec: AttractivenessRecord = {
             "attractiveness_raw": None,
             "attractiveness_score": None,
             "pillar_contributions": {},
@@ -223,7 +245,7 @@ def compute_cross_sectional_attractiveness_with_coverage(
         out[ticker]["attractiveness_score"] = pct.get(ticker)
 
     excluded = sorted(t for t in out if out[t]["attractiveness_score"] is None)
-    coverage = {
+    coverage: AttractivenessCoverage = {
         "n_tickers": len(out),
         "n_scored": len(out) - len(excluded),
         "n_excluded_undefined": len(excluded),
@@ -234,10 +256,10 @@ def compute_cross_sectional_attractiveness_with_coverage(
 
 
 def attractiveness_from_factor_profiles(
-    factor_profiles: dict[str, dict],
+    factor_profiles: Mapping[str, Mapping[str, object]],
     *,
     pillar_weights: dict[str, float] | None = None,
-) -> dict[str, dict]:
+) -> dict[str, AttractivenessRecord]:
     """Compute attractiveness from ``{ticker: {quality_score, value_score, …}}`` profiles."""
     return attractiveness_from_factor_profiles_with_coverage(
         factor_profiles, pillar_weights=pillar_weights
@@ -245,10 +267,10 @@ def attractiveness_from_factor_profiles(
 
 
 def attractiveness_from_factor_profiles_with_coverage(
-    factor_profiles: dict[str, dict],
+    factor_profiles: Mapping[str, Mapping[str, object]],
     *,
     pillar_weights: dict[str, float] | None = None,
-) -> tuple[dict[str, dict], dict]:
+) -> tuple[dict[str, AttractivenessRecord], AttractivenessCoverage]:
     """As :func:`attractiveness_from_factor_profiles`, plus the coverage report.
 
     See :func:`compute_cross_sectional_attractiveness_with_coverage` for the

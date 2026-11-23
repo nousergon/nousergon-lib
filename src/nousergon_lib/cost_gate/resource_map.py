@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 
 import yaml
 
@@ -40,7 +40,15 @@ class ResourceMapError(ValueError):
     """The map is unusable. Raised, never returned as an empty map."""
 
 
-def load(path: Path | str | None = None) -> dict:
+class ResourceMapDoc(TypedDict):
+    """The validated map: the two sections :func:`load` guarantees. Other keys
+    the document carries pass through untouched."""
+
+    resource_types: dict[str, str]
+    schedule_rules: dict[str, int]
+
+
+def load(path: Path | str | None = None) -> ResourceMapDoc:
     """Parse and validate the map. Raises :class:`ResourceMapError`.
 
     ``path`` defaults to the document packaged with this library.
@@ -48,13 +56,15 @@ def load(path: Path | str | None = None) -> dict:
     p = Path(path) if path is not None else RESOURCE_MAP_PATH
     if not p.is_file():
         raise ResourceMapError(f"{p} does not exist")
-    doc = yaml.safe_load(p.read_text())
-    if not isinstance(doc, dict):
+    loaded: object = yaml.safe_load(p.read_text())
+    if not isinstance(loaded, dict):
         raise ResourceMapError(f"{p} is not a mapping")
+    doc = cast("dict[str, object]", loaded)
 
-    types = doc.get("resource_types")
-    if not isinstance(types, dict) or not types:
+    types_raw = doc.get("resource_types")
+    if not isinstance(types_raw, dict) or not types_raw:
         raise ResourceMapError(f"{p}: `resource_types` must be a non-empty mapping")
+    types = cast("dict[object, object]", types_raw)
     for key, prefix in types.items():
         if not isinstance(key, str) or key.count("::") != 2 or not key.startswith("AWS::"):
             raise ResourceMapError(
@@ -66,9 +76,10 @@ def load(path: Path | str | None = None) -> dict:
                 f"got {prefix!r}"
             )
 
-    rules = doc.get("schedule_rules") or {}
-    if not isinstance(rules, dict):
+    rules_raw: object = doc.get("schedule_rules") or {}
+    if not isinstance(rules_raw, dict):
         raise ResourceMapError(f"{p}: `schedule_rules` must be a mapping")
+    rules = cast("dict[str, object]", rules_raw)
     for field, default in (
         ("max_retry_attempts", DEFAULT_MAX_RETRY_ATTEMPTS),
         ("min_gha_cron_interval_minutes", DEFAULT_MIN_GHA_CRON_INTERVAL_MINUTES),
@@ -80,7 +91,7 @@ def load(path: Path | str | None = None) -> dict:
             )
         rules[field] = value
     doc["schedule_rules"] = rules
-    return doc
+    return cast("ResourceMapDoc", doc)
 
 
 # -- CloudFormation, read structurally ---------------------------------------
@@ -104,7 +115,7 @@ class Intrinsic:
 
     __slots__ = ("tag", "value")
 
-    def __init__(self, tag: str, value: Any) -> None:
+    def __init__(self, tag: str, value: object) -> None:
         self.tag = tag
         self.value = value
 
@@ -133,7 +144,7 @@ class CfnLoader(yaml.SafeLoader):
 
 def _construct_intrinsic(loader: yaml.Loader, tag_suffix: str, node: yaml.Node) -> Intrinsic:
     if isinstance(node, yaml.ScalarNode):
-        value: Any = loader.construct_scalar(node)
+        value: object = loader.construct_scalar(node)
     elif isinstance(node, yaml.SequenceNode):
         value = loader.construct_sequence(node, deep=True)
     elif isinstance(node, yaml.MappingNode):
@@ -165,7 +176,7 @@ class CfnResource:
         self,
         logical_id: str,
         type_: str,
-        properties: dict,
+        properties: dict[str, object],
         first_line: int,
         last_line: int,
     ) -> None:
@@ -175,11 +186,11 @@ class CfnResource:
         self.first_line = first_line
         self.last_line = last_line
 
-    def touches(self, lines: set) -> bool:
+    def touches(self, lines: set[int]) -> bool:
         return any(self.first_line <= n <= self.last_line for n in lines)
 
 
-def parse_cfn_resources(text: str) -> list:
+def parse_cfn_resources(text: str) -> list[CfnResource]:
     """Every ``Resources:`` entry with a ``Type:``, with 1-based line spans.
 
     Returns ``[]`` for a document that is not a CloudFormation template — a
@@ -202,14 +213,19 @@ def parse_cfn_resources(text: str) -> list:
                 f"graded: {exc}"
             ) from exc
         return []
-    if not isinstance(doc, dict) or not isinstance(doc.get("Resources"), dict):
+    if not isinstance(doc, dict):
         return []
+    top = cast("dict[str, object]", doc)
+    resources_raw = top.get("Resources")
+    if not isinstance(resources_raw, dict):
+        return []
+    declared = cast("dict[object, object]", resources_raw)
 
     # `compose` is parsed a second time rather than shared with `load`: PyYAML
     # exposes no supported way to keep marks off a constructed object, and the
     # templates involved are tens of kilobytes. Correctness over one parse.
-    root = yaml.compose(text, Loader=CfnLoader)
-    spans: dict = {}
+    root: yaml.Node | None = yaml.compose(text, Loader=CfnLoader)
+    spans: dict[str, tuple[int, int]] = {}
     if isinstance(root, yaml.MappingNode):
         for key_node, value_node in root.value:
             if getattr(key_node, "value", None) != "Resources":
@@ -222,17 +238,21 @@ def parse_cfn_resources(text: str) -> list:
                     body_node.end_mark.line + 1,
                 )
 
-    out: list = []
-    for lid, body in doc["Resources"].items():
-        if not isinstance(body, dict) or not isinstance(body.get("Type"), str):
+    out: list[CfnResource] = []
+    for lid, body_raw in declared.items():
+        if not isinstance(body_raw, dict):
+            continue
+        body = cast("dict[str, object]", body_raw)
+        type_name = body.get("Type")
+        if not isinstance(type_name, str):
             continue
         first, last = spans.get(str(lid), (0, 0))
         props = body.get("Properties")
         out.append(
             CfnResource(
                 str(lid),
-                body["Type"],
-                props if isinstance(props, dict) else {},
+                type_name,
+                cast("dict[str, object]", props) if isinstance(props, dict) else {},
                 first,
                 last,
             )
@@ -264,11 +284,19 @@ class PolicyStatement:
     __slots__ = ("effect", "key", "actions", "has_condition", "has_not_resource",
                  "resources", "document")
 
-    def __init__(self, *, effect, key, has_condition, has_not_resource,
-                 resources, document) -> None:
+    def __init__(
+        self,
+        *,
+        effect: str | None,
+        key: str,
+        has_condition: bool,
+        has_not_resource: bool,
+        resources: list[str],
+        document: int,
+    ) -> None:
         self.effect = effect
         self.key = key
-        self.actions: list = []
+        self.actions: list[ActionValue] = []
         self.has_condition = has_condition
         self.has_not_resource = has_not_resource
         self.resources = resources
@@ -310,7 +338,7 @@ class ActionValue:
         self.last_line = last_line
         self.statement = statement
 
-    def touches(self, lines: set) -> bool:
+    def touches(self, lines: set[int]) -> bool:
         return any(self.first_line <= n <= self.last_line for n in lines)
 
 
@@ -332,7 +360,7 @@ def _literal_scalar(node: yaml.Node) -> str | None:
     return None
 
 
-def _collect_action_scalars(node: yaml.Node, out: list,
+def _collect_action_scalars(node: yaml.Node, out: list[ActionValue],
                             statement: PolicyStatement | None = None) -> None:
     """Every scalar directly under an ``Action``/``NotAction`` key, wherever
     in the document it appears — a policy document nests ``Statement`` lists
@@ -356,7 +384,7 @@ def _statement_of(node: yaml.MappingNode, key: str, document: int) -> PolicyStat
     fields = {getattr(k, "value", None): v for k, v in node.value}
     effect_node = fields.get("Effect")
     effect = _literal_scalar(effect_node) if effect_node is not None else None
-    resources: list = []
+    resources: list[str] = []
     res = fields.get("Resource")
     if isinstance(res, yaml.SequenceNode):
         resources = [v for v in map(_literal_scalar, res.value) if v is not None]
@@ -373,7 +401,7 @@ def _statement_of(node: yaml.MappingNode, key: str, document: int) -> PolicyStat
     )
 
 
-def _walk_for_actions(node: yaml.Node, out: list, document: int | None = None) -> None:
+def _walk_for_actions(node: yaml.Node, out: list[ActionValue], document: int | None = None) -> None:
     if isinstance(node, yaml.MappingNode):
         keys = {getattr(k, "value", None) for k, _ in node.value}
         if "Statement" in keys:
@@ -397,7 +425,7 @@ def _walk_for_actions(node: yaml.Node, out: list, document: int | None = None) -
             _walk_for_actions(item, out, document)
 
 
-def parse_action_values(text: str) -> list:
+def parse_action_values(text: str) -> list[ActionValue]:
     """Every ``Action``/``NotAction`` string value in ``text``, with its line
     span — structural, not line-by-line, so a `Condition` key shaped like
     ``aws:SourceAccount`` or a `Principal` never reads as a grant.
@@ -409,19 +437,19 @@ def parse_action_values(text: str) -> list:
     gap.
     """
     try:
-        root = yaml.compose(text, Loader=CfnLoader)
+        root: yaml.Node | None = yaml.compose(text, Loader=CfnLoader)
     except yaml.YAMLError as exc:
         raise ActionParseError(f"could not parse structurally: {exc}") from exc
-    out: list = []
+    out: list[ActionValue] = []
     if root is not None:
         _walk_for_actions(root, out)
     return out
 
 
 def resolve_target_service(
-    arn: Any,
-    by_logical_id: dict,
-    resource_types: dict,
+    arn: object,
+    by_logical_id: dict[str, str],
+    resource_types: dict[str, str],
 ) -> str | None:
     """The billing prefix a schedule target bills to, or ``None`` if unresolvable.
 
@@ -432,12 +460,13 @@ def resolve_target_service(
       * ``!GetAtt Dispatcher.Arn``
       * ``!Ref EodStateMachine``
     """
-    if isinstance(arn, dict) and len(arn) == 1:
+    long_form = cast("dict[object, object]", arn) if isinstance(arn, dict) else {}
+    if len(long_form) == 1:
         # A JSON template, or a YAML one written in long form. `{"Fn::GetAtt":
         # ["Dispatcher", "Arn"]}` and `!GetAtt Dispatcher.Arn` are the same
         # thing, and a gate that read one and not the other would be blind to
         # every JSON stack in the fleet.
-        ((key, value),) = arn.items()
+        ((key, value),) = long_form.items()
         if isinstance(key, str):
             arn = Intrinsic(key.removeprefix("Fn::"), value)
 
@@ -445,17 +474,19 @@ def resolve_target_service(
         if arn.tag == "Ref" and isinstance(arn.value, str):
             return _prefix_for_logical_id(arn.value, by_logical_id, resource_types)
         if arn.tag == "GetAtt":
-            raw = arn.value
+            raw: object = arn.value
             if isinstance(raw, list):
-                raw = ".".join(str(part) for part in raw)
+                raw = ".".join(str(part) for part in cast("list[object]", raw))
             if isinstance(raw, str):
                 return _prefix_for_logical_id(
                     raw.split(".", 1)[0], by_logical_id, resource_types
                 )
             return None
         if arn.tag == "Sub":
-            raw = arn.value[0] if isinstance(arn.value, list) and arn.value else arn.value
-            return _prefix_from_arn_literal(raw) if isinstance(raw, str) else None
+            sub: object = arn.value
+            if isinstance(sub, list) and sub:
+                sub = cast("list[object]", sub)[0]
+            return _prefix_from_arn_literal(sub) if isinstance(sub, str) else None
         return None
     if isinstance(arn, str):
         return _prefix_from_arn_literal(arn)
@@ -471,8 +502,8 @@ def _prefix_from_arn_literal(text: str) -> str | None:
 
 def _prefix_for_logical_id(
     logical_id: str,
-    by_logical_id: dict,
-    resource_types: dict,
+    by_logical_id: dict[str, str],
+    resource_types: dict[str, str],
 ) -> str | None:
     type_ = by_logical_id.get(logical_id)
     if type_ is None:

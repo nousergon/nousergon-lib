@@ -117,6 +117,6 @@ def load_repo_context(cwd: str) -> str | None:
     )
 
 
-def _clear_cache() -> None:
+def _clear_cache() -> None:  # pyright: ignore[reportUnusedFunction] - test-only hook, called from tests/
     """Purge the in-process cache (exposed for tests only)."""
     _cache.clear()
