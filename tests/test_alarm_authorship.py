@@ -193,6 +193,17 @@ def test_shell_indirect_commands_are_calls(source: str) -> None:
     assert len(find_imperative_alarm_calls(source, "shell")) == 1
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        '"$AWS" cloudwatch put-metric-alarm --alarm-name x\n',
+        '"${AWS}" cloudwatch put-metric-alarm --alarm-name x\n',
+    ],
+)
+def test_shell_unresolved_variable_commands_are_calls(source: str) -> None:
+    assert len(find_imperative_alarm_calls(source, "shell")) == 1
+
+
 # --- Python forms the subprocess-list check missed ---
 
 
