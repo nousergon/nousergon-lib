@@ -391,13 +391,14 @@ def test_get_universe_symbols_as_of_malformed_map_raises(monkeypatch):
 class _BatchReads:
     """``read_batch`` expressed in terms of a stub's own ``read``.
 
-    The production core issues ONE ``lib.read_batch(requests)`` call
-    (alpha-engine-config-I7812), so every stub library here must serve that
-    API or it would be testing a code path that no longer exists. Real
-    ArcticDB RETURNS a ``DataError`` for a failed symbol rather than raising,
-    and returns results in request order — both reproduced faithfully, since
-    a stub that raised instead would let a "failed symbol treated as a frame"
-    regression through.
+    The production core issues ``lib.read_batch`` once per chunk of
+    ``READ_BATCH_CHUNK_SIZE`` (alpha-engine-config-I7812), so every stub
+    library here must serve that API or it would be testing a code path that
+    no longer exists. A fixture smaller than one chunk is still one call.
+    Real ArcticDB RETURNS a ``DataError`` for a failed symbol rather than
+    raising, and returns results in request order — both reproduced
+    faithfully, since a stub that raised instead would let a "failed symbol
+    treated as a frame" regression through.
     """
 
     def read_batch(self, requests):
