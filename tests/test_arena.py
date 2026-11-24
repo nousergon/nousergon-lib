@@ -8,10 +8,8 @@ knows what a failure means before reading the assertion.
 
 from __future__ import annotations
 
-import inspect
 import random
 from datetime import date, timedelta
-from typing import cast
 
 import pytest
 
@@ -1178,9 +1176,7 @@ def test_the_filing_day_survives_a_round_trip_through_from_dicts():
 
 
 @pytest.mark.parametrize("bad", ["", "   ", 20260917, None])
-def test_an_unusable_filing_day_is_refused_rather_than_stamped(
-    bad: str | int | None,
-) -> None:
+def test_an_unusable_filing_day_is_refused_rather_than_stamped(bad):
     """`filed_on` is what a grader reads; an empty or non-string value would
     produce an event whose date says nothing, which reads as "always
     registered" to a lenient comparison and as malformed to a strict one."""
@@ -1190,21 +1186,28 @@ def test_an_unusable_filing_day_is_refused_rather_than_stamped(
             name="bad_filing",
             spec={"recipe": "bad_filing"},
             created_date="2026-06-01",
-            filed_on=cast(str, bad),
+            filed_on=bad,
         )
 
 
-def test_the_filing_day_is_required() -> None:
-    """There is no fallback to the recipe's creation date when filing."""
-    signature = inspect.signature(ArmRegister.register)
-    assert signature.parameters["filed_on"].default is inspect.Parameter.empty
+def test_the_filing_day_is_required_with_no_none_fallback():
+    """Omission is a call error and ``None`` is rejected, so neither can
+    silently reproduce the old event-date defect by copying ``created_date``."""
     with pytest.raises(TypeError, match="filed_on"):
-        signature.bind(
-            ArmRegister(),
+        ArmRegister().register(
             slot="model",
             name="no_filing_day",
             spec={"recipe": "no_filing_day"},
             created_date="2026-06-01",
+        )
+
+    with pytest.raises(ValueError, match="filed_on"):
+        ArmRegister().register(
+            slot="model",
+            name="none_filing_day",
+            spec={"recipe": "none_filing_day"},
+            created_date="2026-06-01",
+            filed_on=None,
         )
 
 
