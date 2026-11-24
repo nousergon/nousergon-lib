@@ -65,7 +65,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from .window import elapsed_weeks as _elapsed_weeks
 
@@ -488,10 +488,8 @@ class ArmRegister:
         "every registered arm was scored" demanded them on days whose cycles
         ran before the rows existed.
 
-        Callers must state ``filed_on`` explicitly: deriving it from
-        ``created_date`` recreates `alpha-engine-config-I10948`.
         """
-        if not isinstance(filed_on, str) or not filed_on.strip():  # pyright: ignore[reportUnnecessaryIsInstance] -- validate untyped runtime callers
+        if not isinstance(cast(object, filed_on), str) or not filed_on.strip():
             raise ValueError(
                 f"filed_on must be a non-empty ISO-8601 trading day; got {filed_on!r}"
             )
