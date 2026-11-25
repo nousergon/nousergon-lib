@@ -495,6 +495,7 @@ def test_pointer_moves_to_a_supported_lead():
     assert decision.champion == "chal"
     assert decision.moved
     assert decision.status == "decided"
+    assert [comparison.challenger for comparison in decision.comparisons] == ["chal"]
 
 
 def test_pointer_holds_when_no_lead_is_supported():
@@ -534,6 +535,7 @@ def test_a_slot_with_only_the_champion_reports_unmeasurable_not_success():
     decision = decide_pointer(_config(), AS_OF, "inc", {"inc": _series("inc", [0.01] * 10)})
     assert decision.status == "unmeasurable"
     assert decision.champion == "inc"
+    assert "only the incumbent" in decision.reason
     assert "zero comparisons" in decision.reason
 
 
@@ -545,22 +547,34 @@ def test_no_shared_window_reports_unmeasurable_with_the_reason():
     assert "common_window_too_short" in decision.reason
 
 
-def test_an_arm_that_fails_a_serving_precondition_cannot_serve_however_far_it_leads():
+def test_vetoed_challengers_are_named_when_none_can_be_compared():
     """The M-slot behavioural veto and input completeness are HARD preconditions,
     independent of ranking. An arm may lead the ladder and still not serve."""
     inc = _series("inc", [0.00] * 60)
-    chal = _series("chal", [0.09] * 60)
+    behavioral = _series("behavioral", [0.09] * 60)
+    incomplete = _series("incomplete", [0.08] * 60)
     decision = decide_pointer(
         _config(),
         AS_OF,
         "inc",
-        {"inc": inc, "chal": chal},
+        {"inc": inc, "behavioral": behavioral, "incomplete": incomplete},
         preconditions={
-            "chal": [ServingPrecondition("behavioral_veto", False, "zero high-confidence names")]
+            "behavioral": [
+                ServingPrecondition("predictive_std", True, "available"),
+                ServingPrecondition("behavioral_veto", False, "zero high-confidence names"),
+            ],
+            "incomplete": [
+                ServingPrecondition("input_completeness", False, "7 features zeroed")
+            ],
         },
     )
+    assert decision.status == "unmeasurable"
     assert decision.champion == "inc"
-    assert "chal" in decision.ineligible
+    assert not decision.moved
+    assert decision.comparisons == ()
+    assert "behavioral (behavioral_veto: zero high-confidence names)" in decision.reason
+    assert "incomplete (input_completeness: 7 features zeroed)" in decision.reason
+    assert "predictive_std" not in decision.reason
 
 
 def test_an_ineligible_incumbent_forces_the_pointer_to_move():
