@@ -129,8 +129,10 @@ _CLIENT = re.compile(r"""boto3\s*\.\s*(?:client|resource)\s*\(\s*["']([a-z0-9-]+
 #: head file could not be parsed structurally (see ``parse_action_values``);
 #: otherwise a Condition key shaped like aws colon SourceAccount, or a
 #: component id shaped like pipeline colon unit, reads as a grant it never
-#: was. For every other file (Python call sites, shell, etc.) it is still the
-#: only mechanism, since there is no structure to parse. DELIBERATELY
+#: was. For every other file it is still the only mechanism, since there is no
+#: structure to parse. Python also retains Action-list context across added
+#: lines and requires an out-of-context prefix to exist in the packaged maps.
+#: DELIBERATELY
 #: UNQUOTED in this sentence — a quoted example here would be exactly the
 #: false positive this comment describes, on this file's own next diff.
 #:
@@ -225,6 +227,17 @@ _KEYED_BY = re.compile(r"""["'](?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']\s*:\s*$""")
 #: `word:Word` token keyed by anything ELSE on the same line is someone else's
 #: value, not a grant, no matter how it is shaped.
 _ACTION_KEY_NAMES = frozenset({"action", "actions", "notaction"})
+
+
+def _action_list_key_before(line: str, match_start: int) -> str | None:
+    """Return the Action-shaped key whose list contains a candidate."""
+    prefix = line[:match_start]
+    match = re.search(
+        r'''["'](?P<key>Action|NotAction|Actions)["']\s*:\s*\[[^\]]*$''',
+        prefix,
+        re.IGNORECASE,
+    )
+    return match.group("key").lower() if match is not None else None
 
 #: A TEST. Its call sites and grant strings are both fixtures. This gate's own
 #: test file constructs a `textract` client and names `textract:*` actions to
@@ -802,16 +815,18 @@ def _grade_actions_by_line(
     approval: Approval,
     found: dict[FindingKey, str],
     counts: Counts,
+    known_prefixes: set[str],
+    *,
+    require_known_prefix: bool = False,
 ) -> None:
-    """The pre-context-aware behaviour: every quoted ``prefix:Word`` token on
-    an added line is graded, with no regard for whether it sits in an
-    ``Action`` value, a ``Condition`` key, or a ``Principal`` — except for the
-    same-line keyed-value disambiguation documented on ``_IAM_ACTION``. A value
-    keyed by ``Action``/``NotAction`` on the same line is graded whatever its
-    shape (``_KEYED_ACTION``). Used for non-structured files (Python, shell)
-    and as the fallback when a file that should be gradeable structurally
-    could not be parsed — never silently, always counted (see
-    ``actions_context_fallback`` in :func:`findings`)."""
+    """Grade quoted action candidates in files without parsed policy structure.
+
+    Same-line Action values and multiline Action lists retain their policy
+    context. When ``require_known_prefix`` is true, an out-of-context token is
+    graded only if its prefix occurs in the packaged maps. JSON/YAML parse
+    failures use the conservative mode and remain fail-closed.
+    """
+    action_list_key: str | None = None
     for line in lines:
         deny = _DENY_ON_LINE.search(line) is not None
         keyed_spans: list[tuple[int, int]] = []
@@ -836,10 +851,31 @@ def _grade_actions_by_line(
             if _is_keyed_by_non_action(line, m.start()):
                 continue
             value = m.group(0)[1:-1]
+            list_key = action_list_key or _action_list_key_before(line, m.start())
+            if list_key == "notaction":
+                k, msg = _not_action_finding(path, [value])
+                found[k] = msg
+                continue
+            if (
+                require_known_prefix
+                and list_key is None
+                and _service_part(value) not in known_prefixes
+            ):
+                continue
             issue, svc = grade_action_pattern(value, approval)
             if issue is not None:
                 k, msg = _action_finding(path, value, issue, svc, approval)
                 found[k] = msg
+        if action_list_key is None:
+            key_match = re.search(
+                r'''["'](?P<key>Action|NotAction|Actions)["']\s*:\s*\[''',
+                line,
+                re.IGNORECASE,
+            )
+            if key_match is not None and line.count("[") > line.count("]"):
+                action_list_key = key_match.group("key").lower()
+        elif "]" in line:
+            action_list_key = None
 
 
 def _denied_by(pattern: str, denies: list[PolicyStatement]) -> bool:
@@ -1035,6 +1071,7 @@ def findings(
     known = approval.wholesale
     rmap = resource_map if resource_map is not None else resource_map_mod.load()
     resource_types = rmap["resource_types"]
+    known_action_prefixes = known | set(resource_types.values())
     rules: dict[str, int] = rmap.get("schedule_rules") or {}
     max_retries = rules.get(
         "max_retry_attempts", resource_map_mod.DEFAULT_MAX_RETRY_ATTEMPTS
@@ -1110,7 +1147,19 @@ def findings(
             # a `Condition` key or a component id shaped `word:word`, which a
             # line-level regex cannot do. See the action-class pass.
             continue
-        _grade_actions_by_line(path, [line], approval, found, counts)
+        # Python needs adjacent lines to retain an Action-list context. Grade
+        # it once per file below rather than losing that context here.
+        if not path.endswith(".py"):
+            _grade_actions_by_line(
+                path, [line], approval, found, counts, known_action_prefixes
+            )
+
+    for path, (_, texts) in by_file.items():
+        if path.endswith(".py") and not _TEST.search(path) and not _CAPTURE.search(path):
+            _grade_actions_by_line(
+                path, texts, approval, found, counts, known_action_prefixes,
+                require_known_prefix=True,
+            )
 
     # -- the action class, per JSON/YAML file ----------------------------------
     #
@@ -1128,13 +1177,17 @@ def findings(
                 "head file could not be read (absent from `--root`, or no "
                 "`read_file` supplied)",
             )
-            _grade_actions_by_line(path, texts, approval, found, counts)
+            _grade_actions_by_line(
+                path, texts, approval, found, counts, known_action_prefixes
+            )
             continue
         try:
             values = resource_map_mod.parse_action_values(text)
         except resource_map_mod.ActionParseError as exc:
             _note_fallback(counts, path, str(exc))
-            _grade_actions_by_line(path, texts, approval, found, counts)
+            _grade_actions_by_line(
+                path, texts, approval, found, counts, known_action_prefixes
+            )
             continue
         _grade_actions_structurally(path, touched, values, approval, found, counts)
 

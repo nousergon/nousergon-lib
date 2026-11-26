@@ -1167,22 +1167,54 @@ def test_a_component_id_value_in_a_python_source_line_is_not_an_action():
     assert counts["actions"] == 1
 
 
-def test_a_quoted_action_with_no_preceding_key_in_python_is_still_a_finding():
-    """A bare list element — the shape a real grant takes when building a
-    policy document by hand in Python — has no key on the same line at all,
-    so it is NOT suppressed. Uses `textract` (unbudgeted): the canonical
-    positive fixture in this file — the PR that motivated this fix (I11289)
-    names `ce:GetCostAndUsage` as the illustrative "must stay a finding"
-    shape, but `ce` is itself budgeted (see
-    `test_the_packaged_ssot_and_resource_map_load`), so that exact string
-    would pass on approval, not on being excluded from grading — this test
-    isolates the mechanism instead."""
-    issues, counts = gate.findings(
-        _diff("scripts/build_policy.py", '    actions = ["textract:DetectDocumentText"]'),
+def test_a_slack_state_key_in_a_python_call_is_not_an_action():
+    issues, _ = gate.findings(
+        _diff("scripts/slack_state.py", "    state = cache.get('dm:U1')"), DOC
+    )
+    assert issues == []
+
+
+def test_an_unknown_prefix_in_a_python_policy_list_is_still_a_finding():
+    issues, _ = gate.findings(
+        _diff("scripts/build_policy.py", '    stmt = {"Action": ["dm:*"]}'), DOC
+    )
+    assert len(issues) == 1
+    assert "dm" in issues[0]
+
+
+def test_an_unknown_prefix_in_a_python_policy_scalar_is_still_a_finding():
+    issues, _ = gate.findings(
+        _diff("scripts/build_policy.py", '    stmt = {"Action": "newsvc:Get*"}'), DOC
+    )
+    assert len(issues) == 1
+    assert "newsvc" in issues[0]
+
+
+def test_a_multiline_python_action_list_retains_policy_context():
+    issues, _ = gate.findings(
+        _diff(
+            "scripts/build_policy.py",
+            '    stmt = {"Action": [',
+            '        "newsvc:Get*",',
+            "    ]}",
+        ),
         DOC,
     )
     assert len(issues) == 1
-    assert "textract" in issues[0]
+    assert "newsvc" in issues[0]
+
+
+def test_a_known_action_with_no_preceding_key_in_python_is_still_graded():
+    """A bare list element — the shape a real grant takes when building a
+    policy document by hand in Python — has no key on the same line at all,
+    so it is still graded when its prefix is in the packaged map. ``ce`` is
+    budgeted, so the action passes on approval rather than being excluded
+    from grading; the action count isolates that distinction."""
+    issues, counts = gate.findings(
+        _diff("scripts/build_policy.py", '    actions = ["ce:GetCostAndUsage"]'),
+        DOC,
+    )
+    assert issues == []
     assert counts["actions"] == 1
 
 
