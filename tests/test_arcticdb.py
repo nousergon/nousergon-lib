@@ -57,6 +57,84 @@ def test_arctic_uri_matches_existing_preflight_format(monkeypatch):
     assert ae_arctic.arctic_uri("alpha-engine-research") == expected
 
 
+@pytest.mark.parametrize(
+    ("endpoint_url", "expected"),
+    [
+        (
+            "http://minio:9000",
+            "s3://minio:test-bucket?port=9000&path_prefix=arcticdb&aws_auth=true",
+        ),
+        (
+            "https://objects.example.com:9443",
+            "s3s://objects.example.com:test-bucket?port=9443&path_prefix=arcticdb&aws_auth=true",
+        ),
+        (
+            "https://objects.example.com",
+            "s3s://objects.example.com:test-bucket?path_prefix=arcticdb&aws_auth=true",
+        ),
+    ],
+)
+def test_arctic_uri_custom_endpoint(endpoint_url, expected, monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    assert (
+        ae_arctic.arctic_uri("test-bucket", endpoint_url=endpoint_url) == expected
+    )
+
+
+def test_arctic_uri_endpoint_from_env(monkeypatch):
+    monkeypatch.setenv("CRUCIBLE_S3_ENDPOINT_URL", "http://minio:9000")
+    assert ae_arctic.arctic_uri("test-bucket") == (
+        "s3://minio:test-bucket?port=9000&path_prefix=arcticdb&aws_auth=true"
+    )
+
+
+def test_arctic_uri_explicit_endpoint_overrides_env(monkeypatch):
+    monkeypatch.setenv("CRUCIBLE_S3_ENDPOINT_URL", "http://ignored:9000")
+    assert ae_arctic.arctic_uri(
+        "test-bucket", endpoint_url="https://objects.example.com"
+    ) == (
+        "s3s://objects.example.com:test-bucket?path_prefix=arcticdb&aws_auth=true"
+    )
+
+
+def test_arctic_uri_empty_endpoint_uses_aws(monkeypatch):
+    monkeypatch.setenv("CRUCIBLE_S3_ENDPOINT_URL", "")
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    assert ae_arctic.arctic_uri("test-bucket") == (
+        "s3s://s3.us-east-1.amazonaws.com:test-bucket"
+        "?path_prefix=arcticdb&aws_auth=true"
+    )
+
+
+@pytest.mark.parametrize(
+    "endpoint_url",
+    [
+        "minio:9000",
+        "http:///missing-host",
+        "ftp://minio:9000",
+        "http://minio:9000/path",
+        "http://minio:9000?query=value",
+    ],
+)
+def test_arctic_uri_rejects_malformed_endpoint(endpoint_url):
+    with pytest.raises(ValueError, match="Invalid S3 endpoint URL"):
+        ae_arctic.arctic_uri("test-bucket", endpoint_url=endpoint_url)
+
+
+def test_open_arctic_uses_endpoint_from_env(monkeypatch):
+    seen_uris = []
+    mod = types.ModuleType("arcticdb")
+    mod.Arctic = lambda uri: seen_uris.append(uri) or _StubArctic()
+    monkeypatch.setitem(sys.modules, "arcticdb", mod)
+    monkeypatch.setenv("CRUCIBLE_S3_ENDPOINT_URL", "http://minio:9000")
+
+    ae_arctic.open_arctic("test-bucket")
+
+    assert seen_uris == [
+        "s3://minio:test-bucket?port=9000&path_prefix=arcticdb&aws_auth=true"
+    ]
+
+
 # ── ImportError handling ─────────────────────────────────────────────────────
 
 

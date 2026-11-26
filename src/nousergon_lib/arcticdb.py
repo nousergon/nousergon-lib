@@ -32,6 +32,7 @@ import os
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # pragma: no cover
     from datetime import date
@@ -160,13 +161,48 @@ BITEMPORAL_COLS: tuple[str, ...] = (
 HISTORICAL_CONSTITUENTS_KEY = "market_data/historical_constituents.json"
 
 
-def arctic_uri(bucket: str, *, region: str | None = None) -> str:
+def arctic_uri(
+    bucket: str,
+    *,
+    region: str | None = None,
+    endpoint_url: str | None = None,
+) -> str:
     """Return the canonical ArcticDB S3 URI for ``bucket``.
 
     Format: ``s3s://s3.{region}.amazonaws.com:{bucket}?path_prefix=arcticdb&aws_auth=true``
 
     ``region`` defaults to ``AWS_REGION`` env var, then ``us-east-1``.
+    ``endpoint_url`` overrides ``CRUCIBLE_S3_ENDPOINT_URL`` when supplied.
+    An empty endpoint selects the default AWS URI.
     """
+    endpoint_url = (
+        endpoint_url
+        if endpoint_url is not None
+        else os.environ.get("CRUCIBLE_S3_ENDPOINT_URL")
+    )
+    if endpoint_url:
+        parsed = urlsplit(endpoint_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(f"Invalid S3 endpoint URL: {endpoint_url!r}")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"Invalid S3 endpoint URL: {endpoint_url!r}") from exc
+        scheme = "s3" if parsed.scheme == "http" else "s3s"
+        port_query = f"port={port}&" if port is not None else ""
+        return (
+            f"{scheme}://{parsed.hostname}:{bucket}?{port_query}"
+            "path_prefix=arcticdb&aws_auth=true"
+        )
+
     region = region or os.environ.get("AWS_REGION", "us-east-1")
     return (
         f"s3s://s3.{region}.amazonaws.com:{bucket}"
@@ -257,13 +293,18 @@ def _import_arcticdb() -> _ArcticModule:
     return cast("_ArcticModule", adb)
 
 
-def open_arctic(bucket: str, *, region: str | None = None) -> _OpenedArctic:
+def open_arctic(
+    bucket: str,
+    *,
+    region: str | None = None,
+    endpoint_url: str | None = None,
+) -> _OpenedArctic:
     """Return an ``arcticdb.Arctic`` instance pointed at ``bucket``.
 
     Raises ``RuntimeError`` if ``arcticdb`` is not installed.
     """
     adb = _import_arcticdb()
-    return adb.Arctic(arctic_uri(bucket, region=region))
+    return adb.Arctic(arctic_uri(bucket, region=region, endpoint_url=endpoint_url))
 
 
 def open_universe_lib(
