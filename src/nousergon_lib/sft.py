@@ -46,9 +46,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Sequence
-from typing import Any, Literal
+from typing import Literal, Protocol, TypeAlias, TypeGuard, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing_extensions import TypeAliasType
 
 # v3 (config#1539): adds the typed `provenance` envelope field (source +
 # content_hash) so replay/synthetic corpora are separable from live and dupes
@@ -58,6 +59,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 SFT_SCHEMA_VERSION = 3
 
 Source = Literal["live", "replay", "synthetic"]
+JsonScalar: TypeAlias = str | int | float | bool | None
+JsonValue = TypeAliasType("JsonValue", JsonScalar | list["JsonValue"] | dict[str, "JsonValue"])
+JsonObject: TypeAlias = dict[str, JsonValue]
+
+
+class _S3Client(Protocol):
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> object: ...
 
 __all__ = [
     "SFT_SCHEMA_VERSION",
@@ -78,7 +86,7 @@ __all__ = [
 ]
 
 
-def content_hash(input_messages: Any) -> str:
+def content_hash(input_messages: JsonValue) -> str:
     """Stable SHA-256 over the model INPUT — the dedup key.
 
     Hashes the canonicalized ``input_messages`` (sorted keys, non-ASCII kept) so
@@ -122,14 +130,14 @@ class SftRecord(BaseModel):
     captured_at: str
     model: str | None = None
     call_seq: int | None = None
-    input_messages: Any | None = None
-    invocation_params: Any | None = None
-    output_message: Any | None = None
+    input_messages: JsonValue = None
+    invocation_params: JsonValue = None
+    output_message: JsonValue = None
     output_text: str | None = None
-    structured_output: Any | None = None
-    usage: dict[str, Any] | None = None
+    structured_output: JsonValue = None
+    usage: JsonObject | None = None
     cost_usd: float | None = None
-    meta: dict[str, Any] = Field(default_factory=dict)
+    meta: JsonObject = Field(default_factory=dict)
     # Typed provenance (v3, config#1539). Optional on the model for read-back
     # tolerance of historical v1/v2 dicts; `build_record` always populates it.
     provenance: SftProvenance | None = None
@@ -148,17 +156,17 @@ def build_record(
     captured_at: str,
     model: str | None = None,
     call_seq: int | None = None,
-    input_messages: Any | None = None,
-    invocation_params: Any | None = None,
-    output_message: Any | None = None,
+    input_messages: JsonValue = None,
+    invocation_params: JsonValue = None,
+    output_message: JsonValue = None,
     output_text: str | None = None,
-    structured_output: Any | None = None,
-    usage: dict[str, Any] | None = None,
+    structured_output: JsonValue = None,
+    usage: JsonObject | None = None,
     cost_usd: float | None = None,
-    meta: dict[str, Any] | None = None,
+    meta: JsonObject | None = None,
     source: Source = "live",
     schema_version: int = SFT_SCHEMA_VERSION,
-) -> dict[str, Any]:
+) -> JsonObject:
     """Build a validated canonical SFT record as a plain dict (ready for ``json.dumps``).
 
     ``captured_at`` is an ISO-8601 string supplied by the caller (the producers own
@@ -172,7 +180,7 @@ def build_record(
         source=source,
         content_hash=content_hash(input_messages) if input_messages is not None else None,
     )
-    return SftRecord(
+    record = SftRecord(
         schema_version=schema_version,
         producer=producer,
         captured_at=captured_at,
@@ -187,10 +195,15 @@ def build_record(
         cost_usd=cost_usd,
         meta=dict(meta or {}),
         provenance=provenance,
-    ).model_dump()
+    )
+    return cast(JsonObject, record.model_dump())
 
 
-def record_source(rec: dict[str, Any]) -> Source:
+def _is_source(value: JsonValue) -> TypeGuard[Source]:
+    return isinstance(value, str) and value in ("live", "replay", "synthetic")
+
+
+def record_source(rec: JsonObject) -> Source:
     """Canonical ``source`` extraction for a raw record dict (v1/v2/v3-tolerant).
 
     Prefers the typed ``provenance.source`` (v3); tolerates a legacy top-level or
@@ -199,29 +212,35 @@ def record_source(rec: dict[str, Any]) -> Source:
     (e.g. a producer-specific data-source string) is ignored, never misclassified.
     """
     prov = rec.get("provenance")
-    if isinstance(prov, dict) and prov.get("source") in ("live", "replay", "synthetic"):
-        return prov["source"]  # type: ignore[return-value]
-    for candidate in (rec.get("source"), (rec.get("meta") or {}).get("source")):
-        if candidate in ("live", "replay", "synthetic"):
-            return candidate  # type: ignore[return-value]
+    if isinstance(prov, dict):
+        source = prov.get("source")
+        if _is_source(source):
+            return source
+    meta = rec.get("meta")
+    meta_source = meta.get("source") if isinstance(meta, dict) else None
+    for candidate in (rec.get("source"), meta_source):
+        if _is_source(candidate):
+            return candidate
     return "live"
 
 
-def record_content_hash(rec: dict[str, Any]) -> str:
+def record_content_hash(rec: JsonObject) -> str:
     """The record's dedup key — the stored ``provenance.content_hash`` (v3) if
     present, else computed from ``input_messages`` (v1/v2 back-compat)."""
     prov = rec.get("provenance")
-    if isinstance(prov, dict) and prov.get("content_hash"):
-        return prov["content_hash"]
+    if isinstance(prov, dict):
+        stored_hash = prov.get("content_hash")
+        if isinstance(stored_hash, str) and stored_hash:
+            return stored_hash
     return content_hash(rec.get("input_messages"))
 
 
-def dedup(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedup(records: Iterable[JsonObject]) -> list[JsonObject]:
     """Collapse records sharing a ``content_hash`` to one, keeping the EARLIEST
     (min ``captured_at``) — so a REPLAY mint never displaces the original LIVE
     trace of the same teacher call. Output is ordered by ``captured_at``.
     """
-    by_hash: dict[str, dict[str, Any]] = {}
+    by_hash: dict[str, JsonObject] = {}
     for rec in records:
         h = record_content_hash(rec)
         prior = by_hash.get(h)
@@ -230,17 +249,18 @@ def dedup(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(by_hash.values(), key=_captured)
 
 
-def segregate_by_teacher(records: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def segregate_by_teacher(records: Iterable[JsonObject]) -> dict[str, list[JsonObject]]:
     """Group records by teacher (the envelope ``model`` field). A distillation set
     must be built per-teacher-version — never blended (see :func:`assert_single_teacher`).
     """
-    groups: dict[str, list[dict[str, Any]]] = {}
+    groups: dict[str, list[JsonObject]] = {}
     for rec in records:
-        groups.setdefault(rec.get("model") or "unknown", []).append(rec)
+        model = rec.get("model")
+        groups.setdefault(model if isinstance(model, str) and model else "unknown", []).append(rec)
     return groups
 
 
-def assert_single_teacher(records: Iterable[dict[str, Any]]) -> str:
+def assert_single_teacher(records: Iterable[JsonObject]) -> str:
     """Guard: raise ``ValueError`` if ``records`` mix >1 teacher (``model``) version.
 
     A silent blend of two teachers' behavior is a corpus-integrity defect — a
@@ -257,52 +277,58 @@ def assert_single_teacher(records: Iterable[dict[str, Any]]) -> str:
     return teachers[0] if teachers else "unknown"
 
 
-def _captured(rec: dict[str, Any]) -> str:
+def _captured(rec: JsonObject) -> str:
     return str(rec.get("captured_at") or rec.get("timestamp") or "")
 
 
-def _as_dict(record: SftRecord | dict[str, Any]) -> dict[str, Any]:
-    return record.model_dump() if isinstance(record, SftRecord) else record
+def _as_dict(record: SftRecord | JsonObject) -> JsonObject:
+    return cast(JsonObject, record.model_dump()) if isinstance(record, SftRecord) else record
 
 
-def to_json_bytes(record: SftRecord | dict[str, Any]) -> bytes:
+def to_json_bytes(record: SftRecord | JsonObject) -> bytes:
     """Serialize one record to a single JSON object (object-per-call layout)."""
     return json.dumps(_as_dict(record), default=str).encode("utf-8")
 
 
-def to_jsonl_bytes(records: Sequence[SftRecord | dict[str, Any]]) -> bytes:
+def to_jsonl_bytes(records: Sequence[SftRecord | JsonObject]) -> bytes:
     """Serialize many records to newline-delimited JSON (JSONL-per-run layout)."""
     return "\n".join(json.dumps(_as_dict(r), default=str) for r in records).encode("utf-8")
 
 
 def write_object(
-    record: SftRecord | dict[str, Any],
+    record: SftRecord | JsonObject,
     *,
     bucket: str,
     key: str,
-    s3_client: Any | None = None,
+    s3_client: _S3Client | None = None,
 ) -> None:
     """PUT one record as a JSON object at ``s3://bucket/key`` (metron layout).
 
     ``s3_client`` is injectable for tests; constructed lazily otherwise.
     """
     if s3_client is None:
-        import boto3
+        import boto3  # pyright: ignore[reportMissingTypeStubs] -- boto3 has no bundled typing
 
-        s3_client = boto3.client("s3")
+        s3_client = cast(
+            _S3Client,
+            boto3.client("s3"),  # pyright: ignore[reportUnknownMemberType] -- boto3 is untyped without optional stubs
+        )
     s3_client.put_object(Bucket=bucket, Key=key, Body=to_json_bytes(record), ContentType="application/json")
 
 
 def write_jsonl(
-    records: Sequence[SftRecord | dict[str, Any]],
+    records: Sequence[SftRecord | JsonObject],
     *,
     bucket: str,
     key: str,
-    s3_client: Any | None = None,
+    s3_client: _S3Client | None = None,
 ) -> None:
     """PUT many records as one JSONL object at ``s3://bucket/key`` (research layout)."""
     if s3_client is None:
-        import boto3
+        import boto3  # pyright: ignore[reportMissingTypeStubs] -- boto3 has no bundled typing
 
-        s3_client = boto3.client("s3")
+        s3_client = cast(
+            _S3Client,
+            boto3.client("s3"),  # pyright: ignore[reportUnknownMemberType] -- boto3 is untyped without optional stubs
+        )
     s3_client.put_object(Bucket=bucket, Key=key, Body=to_jsonl_bytes(records), ContentType="application/json")
