@@ -204,6 +204,49 @@ def test_check_arcticdb_fresh_missing_import_raises():
             p.check_arcticdb_fresh("universe", "SPY", max_stale_days=4)
 
 
+@pytest.mark.parametrize(
+    ("endpoint_url", "expected_uri"),
+    [
+        (
+            None,
+            "s3s://s3.us-west-2.amazonaws.com:bkt"
+            "?path_prefix=arcticdb&aws_auth=true",
+        ),
+        (
+            "http://minio:9000",
+            "s3://minio:bkt?port=9000&path_prefix=arcticdb&aws_auth=true",
+        ),
+    ],
+)
+def test_check_arcticdb_fresh_uses_canonical_uri(
+    monkeypatch, endpoint_url, expected_uri
+):
+    """The preflight probes the same endpoint as the shared ArcticDB opener."""
+    pd = pytest.importorskip("pandas")
+    if endpoint_url is None:
+        monkeypatch.delenv("CRUCIBLE_S3_ENDPOINT_URL", raising=False)
+    else:
+        monkeypatch.setenv("CRUCIBLE_S3_ENDPOINT_URL", endpoint_url)
+
+    fresh_df = pd.DataFrame(
+        {"Close": [100.0]},
+        index=pd.DatetimeIndex([pd.Timestamp.now(tz="UTC")]),
+    )
+    mock_lib = mock.Mock()
+    mock_lib.read.return_value.data = fresh_df
+    mock_arctic = mock.Mock()
+    mock_arctic.get_library.return_value = mock_lib
+    stub_arcticdb = mock.Mock()
+    stub_arcticdb.Arctic.return_value = mock_arctic
+
+    with mock.patch.dict("sys.modules", {"arcticdb": stub_arcticdb}):
+        _Concrete("bkt", region="us-west-2").check_arcticdb_fresh(
+            "universe", "SPY", max_stale_days=4
+        )
+
+    stub_arcticdb.Arctic.assert_called_once_with(expected_uri)
+
+
 def test_check_arcticdb_fresh_stale_raises():
     """Full path test: mock arcticdb + pandas and assert the freshness
     check fires when the last date is older than the threshold."""
