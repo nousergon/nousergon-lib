@@ -1341,6 +1341,23 @@ def decide_pointer(
         )
 
     if not comparisons:
+        rejected_challengers = {
+            arm: tuple(check for check in arm_checks if not check.passed)
+            for arm, arm_checks in ineligible.items()
+            if arm != incumbent
+        }
+        if rejected_challengers:
+            reason = "no challenger passes its serving preconditions: " + "; ".join(
+                f"{arm} ({', '.join(f'{check.name}: {check.reason}' for check in arm_checks)})"
+                for arm, arm_checks in sorted(rejected_challengers.items())
+            )
+        else:
+            reason = (
+                "slot contains only the incumbent and therefore has no challenger; "
+                "a slot with one arm produces zero comparisons "
+                "(champion-challenger-policy.md §9.2 requires the champion "
+                "still be scored)"
+            )
         return PointerDecision(
             slot=config.slot,
             as_of=as_of,
@@ -1348,12 +1365,7 @@ def decide_pointer(
             champion=incumbent,
             moved=False,
             status="unmeasurable",
-            reason=(
-                "slot has no eligible challenger to compare against; a slot "
-                "with one arm produces zero comparisons "
-                "(champion-challenger-policy.md §9.2 requires the champion "
-                "still be scored)"
-            ),
+            reason=reason,
             comparisons=(),
             ineligible=ineligible,
         )
