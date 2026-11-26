@@ -344,6 +344,32 @@ def test_guard_verdicts_ride_on_the_manifest_including_passes():
     assert contracts.conformance_errors("data_run_manifest", manifest) == []
 
 
+def test_numeric_stack_compute_details_serialize_and_validate():
+    sink = RecordingSink()
+
+    def body(ctx: UnitRun):
+        ctx.compute["cpu_model"] = "AMD EPYC 7R13"
+        ctx.compute["numpy_version"] = "2.3.5"
+        ctx.compute["cpu_features"] = ["AVX2", "FMA3"]
+        ctx.compute["blas_build"] = {"name": "openblas", "version": "0.3.30", "threading": "pthreads"}
+
+    _run(body, sink)
+
+    manifest = sink.writes[0][1]
+    assert manifest["compute"] == {
+        "instance_type": "local",
+        "spot": False,
+        "escalated_on_demand": False,
+        "interruptions": 0,
+        "region": None,
+        "cpu_model": "AMD EPYC 7R13",
+        "numpy_version": "2.3.5",
+        "cpu_features": ["AVX2", "FMA3"],
+        "blas_build": {"name": "openblas", "version": "0.3.30", "threading": "pthreads"},
+    }
+    assert contracts.conformance_errors("data_run_manifest", manifest) == []
+
+
 def test_not_applicable_reasons_carries_the_i10831_members():
     """A closed list that lacks the word forces the wrong one (I10831 finding
     1): `disabled_by_declaration` (an operator/config decision) and
