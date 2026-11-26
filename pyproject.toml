@@ -60,7 +60,7 @@ workflow-health-semantics = "nousergon_lib.workflow_health_semantics:main"
 # separate maximum-version job would duplicate the existing coverage.
 # arcticdb below 7: 7.0.0 (2026-11-23) no longer names StreamDescriptorMismatch
 # in the static-schema DataError that daily_append keys on (alpha-engine-config-I14262).
-arcticdb = ["arcticdb>=6.11,<7", "pandas>=2.0,<3"]
+arcticdb = ["arcticdb>=6.11,<8", "pandas>=2.0,<3"]
 # Quantitative portfolio analytics (nousergon_lib.quant). Only the
 # factor-risk module needs numpy; the VaR/CVaR, riskstats, returns, and
 # attribution modules are pure stdlib and import without this extra.
