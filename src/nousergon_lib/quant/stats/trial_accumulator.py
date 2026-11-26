@@ -55,7 +55,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import TypedDict
+from collections.abc import Mapping
+from importlib import import_module
+from typing import Protocol, TypedDict, cast
 
 from nousergon_lib import rehearsal
 
@@ -73,12 +75,47 @@ class CumulativeTrialCount(TypedDict):
     by_producer: dict[str, int]
 
 
-def _client(s3_client=None):
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
+class _S3Client(Protocol):
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def put_object(self, **kwargs: object) -> object: ...
+
+
+class _Boto3(Protocol):
+    def client(self, service_name: str) -> object: ...
+
+
+class _BotocoreExceptions(Protocol):
+    ClientError: type[Exception]
+
+
+class _ClientError(Protocol):
+    response: object
+
+
+ClientError = cast(_BotocoreExceptions, import_module("botocore.exceptions")).ClientError
+
+
+def _client(s3_client: _S3Client | None = None) -> _S3Client:
     if s3_client is not None:
         return s3_client
-    import boto3
+    import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no inline types.
 
-    return boto3.client("s3")
+    return cast(_S3Client, cast(_Boto3, boto3).client("s3"))
+
+
+def _error_code(response: object) -> str | None:
+    if not isinstance(response, Mapping):
+        return None
+    error = cast("Mapping[object, object]", response).get("Error")
+    if not isinstance(error, Mapping):
+        return None
+    code = cast("Mapping[object, object]", error).get("Code")
+    return code if isinstance(code, str) else None
 
 
 def _empty_state() -> CumulativeTrialCount:
@@ -86,7 +123,7 @@ def _empty_state() -> CumulativeTrialCount:
 
 
 def _get_with_etag(
-    s3_client, bucket: str, key: str,
+    s3_client: _S3Client, bucket: str, key: str,
 ) -> tuple[CumulativeTrialCount, str | None]:
     """Read the current counter + its ETag. Returns (state, etag).
 
@@ -94,19 +131,18 @@ def _get_with_etag(
     unconditional create (``IfNoneMatch="*"``) instead of a conditional
     update.
     """
-    from botocore.exceptions import ClientError
-
     try:
         obj = s3_client.get_object(Bucket=bucket, Key=key)
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code")
+        code = _error_code(cast(_ClientError, exc).response)
         if code in ("NoSuchKey", "404"):
             return _empty_state(), None
         raise
-    body = obj["Body"].read()
-    etag = obj.get("ETag")
+    body = cast(_Readable, obj["Body"]).read()
+    raw_etag = obj.get("ETag")
+    etag = raw_etag if isinstance(raw_etag, str) else None
     try:
-        state = json.loads(body)
+        parsed = cast(object, json.loads(body))
     except json.JSONDecodeError:
         logger.warning(
             "trial_accumulator: malformed JSON at s3://%s/%s — treating as empty",
@@ -114,15 +150,27 @@ def _get_with_etag(
         )
         return _empty_state(), etag
     # Defensive defaults so a hand-edited or partially-written artifact
-    # doesn't KeyError the merge below.
-    state.setdefault("total", 0)
-    state.setdefault("last_updated", "")
-    state.setdefault("by_producer", {})
-    return state, etag  # type: ignore[return-value]
+    # cannot pass untyped values into the merge below.
+    if not isinstance(parsed, dict):
+        return _empty_state(), etag
+    raw_state = cast("dict[object, object]", parsed)
+    raw_total = raw_state.get("total", 0)
+    raw_updated = raw_state.get("last_updated", "")
+    raw_by_producer = raw_state.get("by_producer", {})
+    if not isinstance(raw_total, int) or not isinstance(raw_updated, str) or not isinstance(raw_by_producer, dict):
+        return _empty_state(), etag
+    by_producer_items = cast("dict[object, object]", raw_by_producer)
+    if not all(isinstance(name, str) and isinstance(count, int) for name, count in by_producer_items.items()):
+        return _empty_state(), etag
+    return {
+        "total": raw_total,
+        "last_updated": raw_updated,
+        "by_producer": cast("dict[str, int]", raw_by_producer),
+    }, etag
 
 
 def read_cumulative_trial_count(
-    bucket: str = DEFAULT_BUCKET, *, key: str = DEFAULT_KEY, s3_client=None,
+    bucket: str = DEFAULT_BUCKET, *, key: str = DEFAULT_KEY, s3_client: _S3Client | None = None,
 ) -> CumulativeTrialCount:
     """Read the current cumulative trial count. Returns the empty state
     (``total=0``) if the artifact does not exist yet — callers (e.g. the DSR
@@ -141,7 +189,7 @@ def increment_trial_count(
     *,
     bucket: str = DEFAULT_BUCKET,
     key: str = DEFAULT_KEY,
-    s3_client=None,
+    s3_client: _S3Client | None = None,
 ) -> CumulativeTrialCount:
     """Add ``n_trials`` to the running total under ``by_producer[producer]``.
 
@@ -187,7 +235,6 @@ def increment_trial_count(
         }
 
     s3 = _client(s3_client)
-    from botocore.exceptions import ClientError
 
     for attempt in range(_MAX_RETRIES):
         state, etag = _get_with_etag(s3, bucket, key)
@@ -214,7 +261,7 @@ def increment_trial_count(
             )
             return new_state
         except ClientError as exc:
-            code = exc.response.get("Error", {}).get("Code")
+            code = _error_code(cast(_ClientError, exc).response)
             if code in ("PreconditionFailed", "412"):
                 # Someone else wrote between our GET and PUT. Backoff + retry
                 # with a fresh read — the merge is commutative (sum), so a
@@ -242,7 +289,7 @@ def backfill_cumulative_trial_count(
     *,
     bucket: str = DEFAULT_BUCKET,
     key: str = DEFAULT_KEY,
-    s3_client=None,
+    s3_client: _S3Client | None = None,
     overwrite: bool = False,
 ) -> CumulativeTrialCount:
     """One-time seed of the counter from historical per-cycle sums.
