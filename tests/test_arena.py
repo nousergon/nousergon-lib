@@ -572,6 +572,7 @@ def test_vetoed_challengers_are_named_when_none_can_be_compared():
     assert decision.champion == "inc"
     assert not decision.moved
     assert decision.comparisons == ()
+    assert set(decision.ineligible) >= {"behavioral", "incomplete"}
     assert "behavioral (behavioral_veto: zero high-confidence names)" in decision.reason
     assert "incomplete (input_completeness: 7 features zeroed)" in decision.reason
     assert "predictive_std" not in decision.reason
