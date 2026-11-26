@@ -54,7 +54,10 @@ import os
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Protocol, TypeAlias, cast, runtime_checkable
+
+JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+JSONDocument: TypeAlias = dict[str, JSONValue]
 
 __all__ = [
     "TRIGGER_RE",
@@ -221,7 +224,7 @@ class Read:
     ``s3:ListBucket`` on the prefix, so absence is a LISTING, not a get.
     """
 
-    document: dict[str, Any] | None
+    document: JSONDocument | None
     reason: str | None
     denied_code: str | None
 
@@ -248,8 +251,10 @@ def _client_error_code(exc: BaseException) -> str | None:
     """
     response = getattr(exc, "response", None)
     if isinstance(response, dict):
+        response = cast(dict[object, object], response)
         error = response.get("Error")
         if isinstance(error, dict):
+            error = cast(dict[object, object], error)
             return str(error.get("Code") or "") or type(exc).__name__
         return type(exc).__name__
     if type(exc).__module__.startswith("botocore."):
@@ -257,7 +262,17 @@ def _client_error_code(exc: BaseException) -> str | None:
     return None
 
 
-def _fetch_document(store: Any, key: str) -> dict[str, Any]:
+@runtime_checkable
+class _JsonStore(Protocol):
+    def get_json(self, key: str) -> object: ...
+
+
+@runtime_checkable
+class _BytesStore(Protocol):
+    def get_bytes(self, key: str) -> bytes | str: ...
+
+
+def _fetch_document(store: object, key: str) -> JSONDocument:
     """``key`` as a JSON object, however this store spells "fetch".
 
     The contract names ``get_json``; `nousergon_lib.gates.store.GateStore` —
@@ -266,21 +281,22 @@ def _fetch_document(store: Any, key: str) -> dict[str, Any]:
     agree about what a store is, and neither adopter has to carry an adapter
     whose only job is renaming one method.
     """
-    getter = getattr(store, "get_json", None)
-    if callable(getter):
-        document = getter(key)
-    else:
+    if isinstance(store, _JsonStore):
+        document = store.get_json(key)
+    elif isinstance(store, _BytesStore):
         raw = store.get_bytes(key)
-        document = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        document = cast(object, json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw))
+    else:
+        raise TypeError(f"{type(store).__name__} carries neither get_json nor get_bytes")
     if not isinstance(document, dict):
         raise ValueError(
             f"{key} parsed as {type(document).__name__}, not an object — a reading whose "
             "shape is not a document cannot be quoted as one."
         )
-    return document
+    return cast(JSONDocument, document)
 
 
-def read_optional(store: Any, key: str) -> Read:
+def read_optional(store: object, key: str) -> Read:
     """Read ``key``. Never raises for absent, corrupt or denied.
 
     FAILURE MODES SWALLOWED: a missing key, a malformed document, and a
@@ -318,7 +334,7 @@ def read_optional(store: Any, key: str) -> Read:
     return Read(document, None, None)
 
 
-def read_required(store: Any, key: str) -> dict[str, Any]:
+def read_required(store: object, key: str) -> JSONDocument:
     """Read ``key``, or RAISE.
 
     The artifact the whole report is ABOUT is not optional: a missing, corrupt
@@ -380,7 +396,7 @@ class Move:
     and never an empty cell a reader skims past.
     """
 
-    row_id: Any
+    row_id: object
     was: str
     now: str
 
@@ -394,7 +410,7 @@ class Move:
 #: none — rather than the two states, because the field a caller classifies on
 #: (a scheduling state, a lifecycle marker) is usually not the field the diff
 #: is about.
-DeferPredicate = Callable[["dict[str, Any] | None", "dict[str, Any] | None"], bool]
+DeferPredicate = Callable[[JSONDocument | None, JSONDocument | None], bool]
 
 
 @dataclass(frozen=True)
@@ -435,8 +451,8 @@ class MovedResult:
 
 def moved_since(
     *,
-    previous: dict[str, Any] | None,
-    current: dict[str, Any],
+    previous: JSONDocument | None,
+    current: JSONDocument,
     previous_reason: str | None,
     row_id_key: str = "id",
     state_key: str = "state",
@@ -469,8 +485,22 @@ def moved_since(
         reason = previous_reason or "the previous reading could not be read"
         sentence = f"cannot say — {reason}"
         return MovedResult([sentence], sentence, None)
-    before = {row.get(row_id_key): row for row in previous.get("rows", []) if isinstance(row, dict)}
-    after = {row.get(row_id_key): row for row in current.get("rows", []) if isinstance(row, dict)}
+    previous_rows = previous.get("rows")
+    current_rows = current.get("rows")
+    before: dict[object, JSONDocument] = {}
+    after: dict[object, JSONDocument] = {}
+    if isinstance(previous_rows, list):
+        before = {
+            cast(object, row.get(row_id_key)): row
+            for row in previous_rows
+            if isinstance(row, dict)
+        }
+    if isinstance(current_rows, list):
+        after = {
+            cast(object, row.get(row_id_key)): row
+            for row in current_rows
+            if isinstance(row, dict)
+        }
     moves: list[Move] = []
     deferred: list[Move] = []
     for row_id in sorted(set(before) | set(after), key=str):
@@ -563,7 +593,44 @@ def resolve_trigger(
     return TRIGGER_UNKNOWN
 
 
-def _krepis_publish(*args: Any, **kwargs: Any) -> Any:
+class _Transport(Protocol):
+    def __call__(
+        self,
+        message: str,
+        *,
+        severity: str,
+        source: str,
+        sns: bool,
+        telegram: bool,
+        silent: bool,
+        dedup_key: None,
+        destination: str,
+        console_artifact: str,
+        raise_on_total_failure: bool,
+        parse_mode: str,
+    ) -> object: ...
+
+
+@runtime_checkable
+class _DeliveryResult(Protocol):
+    @property
+    def any_ok(self) -> bool: ...
+
+
+def _krepis_publish(
+    message: str,
+    *,
+    severity: str,
+    source: str,
+    sns: bool,
+    telegram: bool,
+    silent: bool,
+    dedup_key: None,
+    destination: str,
+    console_artifact: str,
+    raise_on_total_failure: bool,
+    parse_mode: str,
+) -> object:
     """The real transport, imported at call time.
 
     Lazy so that rendering a report — which every unit test and every
@@ -573,7 +640,19 @@ def _krepis_publish(*args: Any, **kwargs: Any) -> Any:
     """
     from krepis.alerts import publish  # noqa: PLC0415 - lazy on purpose
 
-    return publish(*args, **kwargs)
+    return publish(
+        message,
+        severity=severity,
+        source=source,
+        sns=sns,
+        telegram=telegram,
+        silent=silent,
+        dedup_key=dedup_key,
+        destination=destination,
+        console_artifact=console_artifact,
+        raise_on_total_failure=raise_on_total_failure,
+        parse_mode=parse_mode,
+    )
 
 
 def _destination(*, destination: str | None, destination_override_var: str | None) -> str:
@@ -609,7 +688,7 @@ def deliver(
     destination: str | None = None,
     parse_mode: str = "HTML",
     destination_override_var: str | None = None,
-    transport: Callable[..., Any] | None = None,
+    transport: _Transport | None = None,
 ) -> str:
     """Send ``message`` on the operator channel, or RAISE. Returns where it went.
 
@@ -664,7 +743,7 @@ def deliver(
         raise_on_total_failure=True,
         parse_mode=parse_mode,
     )
-    if not hasattr(result, "any_ok"):
+    if not isinstance(result, _DeliveryResult):
         raise TypeError(
             f"{type(result).__name__} carries no `any_ok`; a transport result that cannot "
             "say whether the report was delivered cannot be recorded as delivered."
@@ -687,7 +766,7 @@ def history_row(
     delivered_local: str,
     columns: dict[str, str],
     update_url: str,
-) -> dict[str, Any]:
+) -> JSONDocument:
     """The compact facts one delivery contributes to the history index.
 
     Built by a caller from the SAME inputs the full update renders from —
@@ -704,7 +783,7 @@ def history_row(
     }
 
 
-def _day_of(key: str, document: dict[str, Any] | None) -> str:
+def _day_of(key: str, document: JSONDocument | None) -> str:
     """Which trading day a history row belongs to, readable or not.
 
     A row that could not be PARSED still has to land under its day, or a
@@ -724,7 +803,7 @@ def _day_of(key: str, document: dict[str, Any] | None) -> str:
 
 def render_history_index(
     *,
-    rows: Iterable[tuple[str, dict[str, Any] | None, str | None]],
+    rows: Iterable[tuple[str, JSONDocument | None, str | None]],
     column_titles: list[str],
     title: str = "Daily update history",
 ) -> str:
@@ -742,7 +821,7 @@ def render_history_index(
     index is a VIEW over each day's durable update; a fault in one day's row
     must not blank the rest of the history, and must not be invisible either.
     """
-    latest: dict[str, dict[str, Any]] = {}
+    latest: dict[str, JSONDocument] = {}
     faulted: dict[str, str] = {}
     for key, document, problem in rows:
         day = _day_of(key, document)
@@ -763,7 +842,8 @@ def render_history_index(
             lines.append(f"| {day} | unreadable: {faulted[day]} | {filler} |")
             continue
         row = latest[day]
-        columns = row.get("columns") or {}
+        columns_value = row.get("columns")
+        columns = columns_value if isinstance(columns_value, dict) else {}
         cells = [str(columns.get(name, _MISSING_CELL)) for name in column_titles]
         url = row.get("update_url")
         link = f"[update]({url})" if url else _MISSING_CELL
