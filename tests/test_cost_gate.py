@@ -1,3 +1,4 @@
+# ruff: noqa: ANN001, ANN002, ANN003, ANN201, ANN202, ANN204, ANN205, ANN206
 """Does the pre-merge cost gate actually refuse — and does it stay quiet?
 
 Ported from the single-repo original on its second adoption
@@ -1167,54 +1168,22 @@ def test_a_component_id_value_in_a_python_source_line_is_not_an_action():
     assert counts["actions"] == 1
 
 
-def test_a_slack_state_key_in_a_python_call_is_not_an_action():
-    issues, _ = gate.findings(
-        _diff("scripts/slack_state.py", "    state = cache.get('dm:U1')"), DOC
-    )
-    assert issues == []
-
-
-def test_an_unknown_prefix_in_a_python_policy_list_is_still_a_finding():
-    issues, _ = gate.findings(
-        _diff("scripts/build_policy.py", '    stmt = {"Action": ["dm:*"]}'), DOC
-    )
-    assert len(issues) == 1
-    assert "dm" in issues[0]
-
-
-def test_an_unknown_prefix_in_a_python_policy_scalar_is_still_a_finding():
-    issues, _ = gate.findings(
-        _diff("scripts/build_policy.py", '    stmt = {"Action": "newsvc:Get*"}'), DOC
-    )
-    assert len(issues) == 1
-    assert "newsvc" in issues[0]
-
-
-def test_a_multiline_python_action_list_retains_policy_context():
-    issues, _ = gate.findings(
-        _diff(
-            "scripts/build_policy.py",
-            '    stmt = {"Action": [',
-            '        "newsvc:Get*",',
-            "    ]}",
-        ),
-        DOC,
-    )
-    assert len(issues) == 1
-    assert "newsvc" in issues[0]
-
-
-def test_a_known_action_with_no_preceding_key_in_python_is_still_graded():
+def test_a_quoted_action_with_no_preceding_key_in_python_is_still_a_finding():
     """A bare list element — the shape a real grant takes when building a
     policy document by hand in Python — has no key on the same line at all,
-    so it is still graded when its prefix is in the packaged map. ``ce`` is
-    budgeted, so the action passes on approval rather than being excluded
-    from grading; the action count isolates that distinction."""
+    so it is NOT suppressed. Uses `textract` (unbudgeted): the canonical
+    positive fixture in this file — the PR that motivated this fix (I11289)
+    names `ce:GetCostAndUsage` as the illustrative "must stay a finding"
+    shape, but `ce` is itself budgeted (see
+    `test_the_packaged_ssot_and_resource_map_load`), so that exact string
+    would pass on approval, not on being excluded from grading — this test
+    isolates the mechanism instead."""
     issues, counts = gate.findings(
-        _diff("scripts/build_policy.py", '    actions = ["ce:GetCostAndUsage"]'),
+        _diff("scripts/build_policy.py", '    actions = ["textract:DetectDocumentText"]'),
         DOC,
     )
-    assert issues == []
+    assert len(issues) == 1
+    assert "textract" in issues[0]
     assert counts["actions"] == 1
 
 
@@ -1745,3 +1714,78 @@ def test_the_iam_glob_helpers_match_the_private_resolver():
     assert not gate.pattern_within("codebuild:*", "codebuild:List*")
     assert gate.is_wildcard_pattern("*") and gate.is_wildcard_pattern("*:Get*")
     assert not gate.is_wildcard_pattern("s3:*")
+
+
+# -- Python IAM action discovery (alpha-engine-config-I14108) ----------------
+
+
+def test_python_plain_namespaced_value_is_not_an_iam_action():
+    issues, _ = gate.findings(
+        _diff("scripts/slack_state.py", '    state = dict(channel="dm:U1")'), DOC
+    )
+    assert issues == []
+
+
+def test_python_action_dict_grades_non_aws_prefix():
+    issues, _ = gate.findings(
+        _diff("scripts/policy.py", '    statement = {"Action": ["dm:*"]}'), DOC
+    )
+    assert len(issues) == 1
+    assert "dm" in issues[0]
+
+
+def test_python_action_dict_grades_unknown_new_service_prefix():
+    issues, _ = gate.findings(
+        _diff("scripts/policy.py", '    statement = {"Action": "newsvc:Get*"}'), DOC
+    )
+    assert len(issues) == 1
+    assert "newsvc" in issues[0]
+
+
+def test_packaged_aws_prefixes_cover_real_unbudgeted_services():
+    assert {"textract", "bedrock", "sagemaker"} <= gate._AWS_IAM_PREFIXES
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "textract:DetectDocumentText",
+        "bedrock:InvokeModel",
+        "sagemaker:CreateEndpoint",
+    ],
+)
+def test_known_aws_action_outside_policy_context_is_still_graded(action):
+    issues, _ = gate.findings(_diff("scripts/actions.py", f'    values = ["{action}"]'), DOC)
+    assert len(issues) == 1
+    assert action.split(":", 1)[0] in issues[0]
+
+
+def test_python_multiline_action_list_grades_unknown_prefix():
+    issues, _ = gate.findings(
+        _diff(
+            "scripts/policy.py",
+            '    statement = {"Action": [',
+            '        "newsvc:Get*",',
+            "    ]}",
+        ),
+        DOC,
+    )
+    assert len(issues) == 1
+    assert "newsvc" in issues[0]
+
+
+def test_python_not_action_value_is_graded():
+    issues, _ = gate.findings(
+        _diff("scripts/policy.py", '    statement = {"NotAction": "newsvc:Get*"}'), DOC
+    )
+    assert len(issues) == 1
+    assert "every action EXCEPT" in issues[0]
+
+
+def test_python_action_subscript_assignment_is_graded():
+    issues, _ = gate.findings(
+        _diff("scripts/policy.py", '    statement["Action"] = "comprehend:DetectSentiment"'),
+        DOC,
+    )
+    assert len(issues) == 1
+    assert "comprehend" in issues[0]

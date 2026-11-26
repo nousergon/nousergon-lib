@@ -129,10 +129,8 @@ _CLIENT = re.compile(r"""boto3\s*\.\s*(?:client|resource)\s*\(\s*["']([a-z0-9-]+
 #: head file could not be parsed structurally (see ``parse_action_values``);
 #: otherwise a Condition key shaped like aws colon SourceAccount, or a
 #: component id shaped like pipeline colon unit, reads as a grant it never
-#: was. For every other file it is still the only mechanism, since there is no
-#: structure to parse. Python also retains Action-list context across added
-#: lines and requires an out-of-context prefix to exist in the packaged maps.
-#: DELIBERATELY
+#: was. For every other file (Python call sites, shell, etc.) it is still the
+#: only mechanism, since there is no structure to parse. DELIBERATELY
 #: UNQUOTED in this sentence — a quoted example here would be exactly the
 #: false positive this comment describes, on this file's own next diff.
 #:
@@ -153,6 +151,546 @@ _CLIENT = re.compile(r"""boto3\s*\.\s*(?:client|resource)\s*\(\s*["']([a-z0-9-]+
 #:      any other field name. See ``_is_keyed_by_non_action``.
 _IAM_ACTION = re.compile(r"""["']([a-z0-9-]+):[A-Z*?][A-Za-z0-9*?]*["']""")
 
+#: AWS service identifiers shipped by botocore, including endpoint, signing,
+#: and client names.  This is deliberately broader than the budget/resource
+#: maps: those maps describe approved or provisionable services, while this
+#: set only distinguishes real AWS-looking action strings in Python source
+#: from unrelated namespaced values such as ``dm:U1``.  Policy-shaped context
+#: is always graded even when a newly launched prefix is not here.
+_AWS_IAM_PREFIXES = frozenset(
+    {
+        "abuse",
+        "abuse-signal",
+        "access-analyzer",
+        "accessanalyzer",
+        "account",
+        "account-access",
+        "account-access-runtime",
+        "acm",
+        "acm-pca",
+        "aco-automation",
+        "agent-discovery",
+        "agent-registry",
+        "agent-registry-control",
+        "agreement-marketplace",
+        "aidevops",
+        "aiops",
+        "airflow",
+        "airflow-serverless",
+        "amp",
+        "amplify",
+        "amplifybackend",
+        "amplifyuibuilder",
+        "aoss",
+        "apigateway",
+        "apigatewaymanagementapi",
+        "apigatewayv2",
+        "apiportal",
+        "app-integrations",
+        "appconfig",
+        "appconfigdata",
+        "appfabric",
+        "appflow",
+        "appintegrations",
+        "application-autoscaling",
+        "application-cost-profiler",
+        "application-insights",
+        "application-signals",
+        "applicationcostprofiler",
+        "applicationinsights",
+        "appmesh",
+        "apprunner",
+        "appstream",
+        "appstream2",
+        "appsync",
+        "aps",
+        "arc-region-switch",
+        "arc-zonal-shift",
+        "artifact",
+        "athena",
+        "auditmanager",
+        "autoscaling",
+        "autoscaling-plans",
+        "aws-marketplace",
+        "awsssoportal",
+        "b2bi",
+        "backup",
+        "backup-gateway",
+        "backup-search",
+        "backupsearch",
+        "batch",
+        "bcm-dashboards",
+        "bcm-data-exports",
+        "bcm-pricing-calculator",
+        "bcm-recommended-actions",
+        "bedrock",
+        "bedrock-agent",
+        "bedrock-agent-runtime",
+        "bedrock-agentcore",
+        "bedrock-agentcore-control",
+        "bedrock-data-automation",
+        "bedrock-data-automation-runtime",
+        "bedrock-runtime",
+        "billing",
+        "billingconductor",
+        "braket",
+        "budgets",
+        "cases",
+        "cassandra",
+        "cassandra-streams",
+        "ce",
+        "chatbot",
+        "chime",
+        "chime-sdk-identity",
+        "chime-sdk-media-pipelines",
+        "chime-sdk-meetings",
+        "chime-sdk-messaging",
+        "chime-sdk-voice",
+        "cleanrooms",
+        "cleanrooms-ml",
+        "cleanroomsml",
+        "cloud9",
+        "cloudcontrol",
+        "cloudcontrolapi",
+        "clouddirectory",
+        "cloudformation",
+        "cloudfront",
+        "cloudfront-keyvaluestore",
+        "cloudhsm",
+        "cloudhsmv2",
+        "cloudsearch",
+        "cloudsearchdomain",
+        "cloudtrail",
+        "cloudtrail-data",
+        "cloudwatch",
+        "cloudwatch-omni",
+        "cloudwatchomni",
+        "codeartifact",
+        "codebuild",
+        "codecatalyst",
+        "codecommit",
+        "codeconnections",
+        "codedeploy",
+        "codeguru-profiler",
+        "codeguru-reviewer",
+        "codeguru-security",
+        "codeguruprofiler",
+        "codepipeline",
+        "codestar-connections",
+        "codestar-notifications",
+        "cognito-identity",
+        "cognito-idp",
+        "cognito-sync",
+        "comprehend",
+        "comprehendmedical",
+        "compute-optimizer",
+        "compute-optimizer-automation",
+        "config",
+        "connect",
+        "connect-campaigns",
+        "connect-contact-lens",
+        "connectcampaigns",
+        "connectcampaignsv2",
+        "connectcases",
+        "connecthealth",
+        "connectparticipant",
+        "connectscheduling",
+        "contact-lens",
+        "continuum",
+        "controlcatalog",
+        "controltower",
+        "cost-optimization-hub",
+        "cur",
+        "customer-profiles",
+        "data-signer",
+        "databrew",
+        "dataexchange",
+        "datapipeline",
+        "datasync",
+        "datazone",
+        "dax",
+        "deadline",
+        "deployment-marketplace",
+        "detective",
+        "devicefarm",
+        "devops-agent",
+        "devops-guru",
+        "directconnect",
+        "discovery",
+        "discovery-marketplace",
+        "dlm",
+        "dms",
+        "docdb",
+        "docdb-elastic",
+        "drs",
+        "ds",
+        "ds-data",
+        "dsql",
+        "dynamodb",
+        "dynamodbstreams",
+        "ebs",
+        "ec2",
+        "ec2-instance-connect",
+        "ecr",
+        "ecr-public",
+        "ecs",
+        "efs",
+        "eks",
+        "eks-auth",
+        "elasticache",
+        "elasticbeanstalk",
+        "elasticfilesystem",
+        "elasticloadbalancing",
+        "elasticmapreduce",
+        "elb",
+        "elb-proxy",
+        "elbv2",
+        "elemental-inference",
+        "elementalinference",
+        "email",
+        "emr",
+        "emr-containers",
+        "emr-serverless",
+        "end-user-messaging",
+        "endusermessaging",
+        "entityresolution",
+        "es",
+        "eventbridgev2",
+        "events",
+        "eventsv2",
+        "evs",
+        "execute-api",
+        "firehose",
+        "fis",
+        "fms",
+        "forecast",
+        "forecastquery",
+        "frauddetector",
+        "freetier",
+        "fsx",
+        "gamelift",
+        "gameliftstreams",
+        "geo",
+        "geo-maps",
+        "geo-places",
+        "geo-routes",
+        "glacier",
+        "globalaccelerator",
+        "glue",
+        "grafana",
+        "greengrass",
+        "greengrassv2",
+        "groundstation",
+        "guardduty",
+        "health",
+        "health-agent",
+        "healthlake",
+        "iam",
+        "iam-toolbox",
+        "identity-chime",
+        "identitystore",
+        "imagebuilder",
+        "importexport",
+        "inspector",
+        "inspector-scan",
+        "inspector2",
+        "interconnect",
+        "internetmonitor",
+        "invoicing",
+        "iot",
+        "iot-data",
+        "iot-jobs-data",
+        "iot-managed-integrations",
+        "iotdata",
+        "iotdeviceadvisor",
+        "iotfleetwise",
+        "iotmanagedintegrations",
+        "iotsecuredtunneling",
+        "iotsecuretunneling",
+        "iotsitewise",
+        "iotthingsgraph",
+        "iottwinmaker",
+        "iotwireless",
+        "ivs",
+        "ivs-realtime",
+        "ivschat",
+        "ivsrealtime",
+        "kafka",
+        "kafkaconnect",
+        "kendra",
+        "kendra-ranking",
+        "keyspaces",
+        "keyspacesstreams",
+        "kinesis",
+        "kinesis-video-archived-media",
+        "kinesis-video-media",
+        "kinesis-video-signaling",
+        "kinesis-video-webrtc-storage",
+        "kinesisanalytics",
+        "kinesisanalyticsv2",
+        "kinesisvideo",
+        "kms",
+        "lakeformation",
+        "lambda",
+        "lambda-core",
+        "lambda-microvms",
+        "lambda-web",
+        "launch-wizard",
+        "launchwizard",
+        "lex",
+        "lex-models",
+        "lex-runtime",
+        "lexv2-models",
+        "lexv2-runtime",
+        "license-manager",
+        "license-manager-linux-subscriptions",
+        "license-manager-user-subscriptions",
+        "lightsail",
+        "location",
+        "logs",
+        "lookoutequipment",
+        "m2",
+        "machinelearning",
+        "macie2",
+        "mail-manager",
+        "mailmanager",
+        "managedblockchain",
+        "managedblockchain-query",
+        "marketplace-agreement",
+        "marketplace-catalog",
+        "marketplace-deployment",
+        "marketplace-discovery",
+        "marketplace-entitlement",
+        "marketplace-reporting",
+        "marketplacecommerceanalytics",
+        "media-pipelines-chime",
+        "mediaconnect",
+        "mediaconvert",
+        "medialive",
+        "mediapackage",
+        "mediapackage-vod",
+        "mediapackagev2",
+        "mediastore",
+        "mediastore-data",
+        "mediatailor",
+        "medical-imaging",
+        "meetings-chime",
+        "memory-db",
+        "memorydb",
+        "messaging-chime",
+        "meteringmarketplace",
+        "mgh",
+        "mgn",
+        "migration-hub-refactor-spaces",
+        "migrationhub-config",
+        "migrationhub-orchestrator",
+        "migrationhub-strategy",
+        "migrationhuborchestrator",
+        "migrationhubstrategy",
+        "mobiletargeting",
+        "models-v2-lex",
+        "monitoring",
+        "mpa",
+        "mq",
+        "mturk",
+        "mturk-requester",
+        "mwaa",
+        "mwaa-serverless",
+        "neptune",
+        "neptune-db",
+        "neptune-graph",
+        "neptunedata",
+        "network-firewall",
+        "network-security-manager",
+        "networkflowmonitor",
+        "networkmanager",
+        "networkmonitor",
+        "notifications",
+        "notifications-contacts",
+        "notificationscontacts",
+        "nova-act",
+        "oam",
+        "observabilityadmin",
+        "odb",
+        "oidc",
+        "omics",
+        "opensearch",
+        "opensearchmemory",
+        "opensearchserverless",
+        "organizations",
+        "osis",
+        "osm",
+        "outposts",
+        "partnercentral",
+        "partnercentral-account",
+        "partnercentral-benefits",
+        "partnercentral-channel",
+        "partnercentral-marketing",
+        "partnercentral-prm",
+        "partnercentral-revenue-measurement",
+        "partnercentral-selling",
+        "payment-cryptography",
+        "payment-cryptography-data",
+        "payments",
+        "pca-connector-ad",
+        "pca-connector-scep",
+        "pcs",
+        "personalize",
+        "personalize-events",
+        "personalize-runtime",
+        "pi",
+        "pinpoint",
+        "pinpoint-email",
+        "pinpoint-sms-voice",
+        "pinpoint-sms-voice-v2",
+        "pipes",
+        "polly",
+        "pricing",
+        "pricing-plan-manager",
+        "pricingplanmanager",
+        "profile",
+        "proton",
+        "qapps",
+        "qbusiness",
+        "qconnect",
+        "quicksight",
+        "ram",
+        "rbin",
+        "rds",
+        "rds-data",
+        "redshift",
+        "redshift-data",
+        "redshift-serverless",
+        "refactor-spaces",
+        "rekognition",
+        "reporting-marketplace",
+        "repostspace",
+        "resiliencehub",
+        "resiliencehubv2",
+        "resource-explorer-2",
+        "resource-groups",
+        "resourcegroupstaggingapi",
+        "rolesanywhere",
+        "route53",
+        "route53-recovery-cluster",
+        "route53-recovery-control-config",
+        "route53-recovery-readiness",
+        "route53domains",
+        "route53globalresolver",
+        "route53profiles",
+        "route53resolver",
+        "rtbfabric",
+        "rum",
+        "runtime-v2-lex",
+        "s3",
+        "s3-control",
+        "s3-object-lambda",
+        "s3-outposts",
+        "s3control",
+        "s3files",
+        "s3outposts",
+        "s3tables",
+        "s3vectors",
+        "sagemaker",
+        "sagemaker-a2i-runtime",
+        "sagemaker-edge",
+        "sagemaker-featurestore-runtime",
+        "sagemaker-gateway-runtime",
+        "sagemaker-geospatial",
+        "sagemaker-inference-router-runtime",
+        "sagemaker-metrics",
+        "sagemaker-runtime",
+        "sagemakerjobruntime",
+        "sagemakertrainingsessionruntime",
+        "savingsplans",
+        "scheduler",
+        "schemas",
+        "scn",
+        "sdb",
+        "secretsmanager",
+        "security-ir",
+        "securityagent",
+        "securityhub",
+        "securitylake",
+        "serverlessrepo",
+        "service-quotas",
+        "servicecatalog",
+        "servicecatalog-appregistry",
+        "servicediscovery",
+        "servicequotas",
+        "ses",
+        "sesv2",
+        "shield",
+        "signer",
+        "signer-data",
+        "signin",
+        "simpledbv2",
+        "sms-voice",
+        "snow-device-management",
+        "snowball",
+        "sns",
+        "social-messaging",
+        "socialmessaging",
+        "sqs",
+        "ssm",
+        "ssm-contacts",
+        "ssm-guiconnect",
+        "ssm-incidents",
+        "ssm-quicksetup",
+        "ssm-sap",
+        "sso",
+        "sso-admin",
+        "sso-oauth",
+        "sso-oidc",
+        "states",
+        "stepfunctions",
+        "storagegateway",
+        "sts",
+        "supplychain",
+        "support",
+        "support-app",
+        "supportapp",
+        "supportauthz",
+        "sustainability",
+        "swf",
+        "synthetics",
+        "tagging",
+        "tax",
+        "taxsettings",
+        "textract",
+        "thinclient",
+        "timestream",
+        "timestream-influxdb",
+        "timestream-query",
+        "timestream-write",
+        "transcribe",
+        "transfer",
+        "translate",
+        "trustedadvisor",
+        "uxc",
+        "verifiedpermissions",
+        "voice-chime",
+        "voice-id",
+        "voiceid",
+        "vpc-lattice",
+        "waf",
+        "waf-regional",
+        "wafv2",
+        "wellarchitected",
+        "wickr",
+        "wisdom",
+        "workdocs",
+        "workmail",
+        "workmailmessageflow",
+        "workspaces",
+        "workspaces-instances",
+        "workspaces-thin-client",
+        "workspaces-web",
+        "xray",
+    }
+)
+
+
 #: A quoted value directly keyed by ``Action``/``NotAction`` on the same line
 #: (I11674). Graded as a GRANT whatever its shape — ``"*"``,
 #: ``"CodeBuild:StartBuild"``, ``"ce:Get?ostAndUsage"`` — because the key says
@@ -161,6 +699,12 @@ _IAM_ACTION = re.compile(r"""["']([a-z0-9-]+):[A-Z*?][A-Za-z0-9*?]*["']""")
 #: often not a grant.
 _KEYED_ACTION = re.compile(
     r"""["'](?P<key>Action|NotAction|Actions)["']\s*:\s*["'](?P<value>[^"']+)["']""",
+    re.IGNORECASE,
+)
+
+_PYTHON_SUBSCRIPT_ACTION = re.compile(
+    r"\[\s*[\"'](?P<key>Action|NotAction|Actions)[\"']\s*\]\s*=\s*"
+    r"[\"'](?P<value>[^\"']+)[\"']",
     re.IGNORECASE,
 )
 
@@ -227,17 +771,6 @@ _KEYED_BY = re.compile(r"""["'](?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']\s*:\s*$""")
 #: `word:Word` token keyed by anything ELSE on the same line is someone else's
 #: value, not a grant, no matter how it is shaped.
 _ACTION_KEY_NAMES = frozenset({"action", "actions", "notaction"})
-
-
-def _action_list_key_before(line: str, match_start: int) -> str | None:
-    """Return the Action-shaped key whose list contains a candidate."""
-    prefix = line[:match_start]
-    match = re.search(
-        r'''["'](?P<key>Action|NotAction|Actions)["']\s*:\s*\[[^\]]*$''',
-        prefix,
-        re.IGNORECASE,
-    )
-    return match.group("key").lower() if match is not None else None
 
 #: A TEST. Its call sites and grant strings are both fixtures. This gate's own
 #: test file constructs a `textract` client and names `textract:*` actions to
@@ -815,22 +1348,17 @@ def _grade_actions_by_line(
     approval: Approval,
     found: dict[FindingKey, str],
     counts: Counts,
-    known_prefixes: set[str],
-    *,
-    require_known_prefix: bool = False,
 ) -> None:
-    """Grade quoted action candidates in files without parsed policy structure.
-
-    Same-line Action values and multiline Action lists retain their policy
-    context. When ``require_known_prefix`` is true, an out-of-context token is
-    graded only if its prefix occurs in the packaged maps. JSON/YAML parse
-    failures use the conservative mode and remain fail-closed.
-    """
-    action_list_key: str | None = None
+    """Grade action-like strings, using policy context for Python source."""
+    is_python = path.lower().endswith(".py")
+    action_list_depth = 0
     for line in lines:
         deny = _DENY_ON_LINE.search(line) is not None
         keyed_spans: list[tuple[int, int]] = []
-        for m in _KEYED_ACTION.finditer(line):
+        keyed_matches = list(_KEYED_ACTION.finditer(line))
+        if is_python:
+            keyed_matches.extend(_PYTHON_SUBSCRIPT_ACTION.finditer(line))
+        for m in keyed_matches:
             keyed_spans.append(m.span("value"))
             counts["actions"] += 1
             if deny:
@@ -844,38 +1372,37 @@ def _grade_actions_by_line(
             if issue is not None:
                 k, msg = _action_finding(path, value, issue, svc, approval)
                 found[k] = msg
+
+        action_key_on_line = bool(
+            re.search(
+                r"[\[,{]\s*[\"'](?:Action|Actions|NotAction)[\"']\s*(?:\]|:)",
+                line,
+                re.IGNORECASE,
+            )
+        )
+        policy_context = action_list_depth > 0 or action_key_on_line
         for m in _IAM_ACTION.finditer(line):
             if any(s0 <= m.start() + 1 < e0 for s0, e0 in keyed_spans):
                 continue
             counts["actions"] += 1
-            if _is_keyed_by_non_action(line, m.start()):
+            prefix = m.group(1).lower()
+            if is_python:
+                if prefix not in _AWS_IAM_PREFIXES and not policy_context:
+                    continue
+            elif _is_keyed_by_non_action(line, m.start()):
                 continue
             value = m.group(0)[1:-1]
-            list_key = action_list_key or _action_list_key_before(line, m.start())
-            if list_key == "notaction":
-                k, msg = _not_action_finding(path, [value])
-                found[k] = msg
-                continue
-            if (
-                require_known_prefix
-                and list_key is None
-                and _service_part(value) not in known_prefixes
-            ):
-                continue
             issue, svc = grade_action_pattern(value, approval)
             if issue is not None:
                 k, msg = _action_finding(path, value, issue, svc, approval)
                 found[k] = msg
-        if action_list_key is None:
-            key_match = re.search(
-                r'''["'](?P<key>Action|NotAction|Actions)["']\s*:\s*\[''',
-                line,
-                re.IGNORECASE,
-            )
-            if key_match is not None and line.count("[") > line.count("]"):
-                action_list_key = key_match.group("key").lower()
-        elif "]" in line:
-            action_list_key = None
+
+        if is_python:
+            if action_key_on_line and "[" in line:
+                action_list_depth += line.count("[") - line.count("]")
+            elif action_list_depth > 0:
+                action_list_depth += line.count("[") - line.count("]")
+            action_list_depth = max(0, action_list_depth)
 
 
 def _denied_by(pattern: str, denies: list[PolicyStatement]) -> bool:
@@ -1071,7 +1598,6 @@ def findings(
     known = approval.wholesale
     rmap = resource_map if resource_map is not None else resource_map_mod.load()
     resource_types = rmap["resource_types"]
-    known_action_prefixes = known | set(resource_types.values())
     rules: dict[str, int] = rmap.get("schedule_rules") or {}
     max_retries = rules.get(
         "max_retry_attempts", resource_map_mod.DEFAULT_MAX_RETRY_ATTEMPTS
@@ -1147,19 +1673,13 @@ def findings(
             # a `Condition` key or a component id shaped `word:word`, which a
             # line-level regex cannot do. See the action-class pass.
             continue
-        # Python needs adjacent lines to retain an Action-list context. Grade
-        # it once per file below rather than losing that context here.
-        if not path.endswith(".py"):
-            _grade_actions_by_line(
-                path, [line], approval, found, counts, known_action_prefixes
-            )
 
+    # Grade source files per file so multiline Python Action lists retain their
+    # policy context.
     for path, (_, texts) in by_file.items():
-        if path.endswith(".py") and not _TEST.search(path) and not _CAPTURE.search(path):
-            _grade_actions_by_line(
-                path, texts, approval, found, counts, known_action_prefixes,
-                require_known_prefix=True,
-            )
+        if _TEST.search(path) or _CAPTURE.search(path) or _IAC_FILE.search(path):
+            continue
+        _grade_actions_by_line(path, texts, approval, found, counts)
 
     # -- the action class, per JSON/YAML file ----------------------------------
     #
@@ -1177,17 +1697,13 @@ def findings(
                 "head file could not be read (absent from `--root`, or no "
                 "`read_file` supplied)",
             )
-            _grade_actions_by_line(
-                path, texts, approval, found, counts, known_action_prefixes
-            )
+            _grade_actions_by_line(path, texts, approval, found, counts)
             continue
         try:
             values = resource_map_mod.parse_action_values(text)
         except resource_map_mod.ActionParseError as exc:
             _note_fallback(counts, path, str(exc))
-            _grade_actions_by_line(
-                path, texts, approval, found, counts, known_action_prefixes
-            )
+            _grade_actions_by_line(path, texts, approval, found, counts)
             continue
         _grade_actions_structurally(path, touched, values, approval, found, counts)
 
