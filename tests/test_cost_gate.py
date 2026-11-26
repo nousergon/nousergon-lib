@@ -247,6 +247,27 @@ def test_a_workflow_permissions_block_is_not_a_cloud_grant():
     assert issues == []
 
 
+@pytest.mark.parametrize("permission", ['{"actions": "write"}', '{"contents": "read"}'])
+def test_a_github_token_permission_map_in_python_is_not_a_cloud_grant(permission):
+    issues, _ = gate.findings(_diff("scripts/mint_token.py", f"    permissions={permission}"), DOC)
+    assert issues == []
+
+
+@pytest.mark.parametrize("permission", ["actions: write", "contents: read"])
+def test_a_github_token_permission_map_in_yaml_is_not_a_cloud_grant(tmp_path, permission):
+    text = f"permissions:\n  {permission}\n"
+    issues, _ = _graded(tmp_path, "config/token.yaml", text)
+    assert issues == []
+
+
+@pytest.mark.parametrize("action", ["*", "s3:*"])
+def test_current_iam_wildcards_remain_findings(action):
+    issues, _ = gate.findings(
+        _diff("scripts/build_policy.py", f'    statement = {{"Action": "{action}"}}'), DOC
+    )
+    assert len(issues) == 1
+
+
 # -- always-on resources -----------------------------------------------------
 
 _TEMPLATE = """\
