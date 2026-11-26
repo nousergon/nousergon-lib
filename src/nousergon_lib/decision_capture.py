@@ -46,18 +46,33 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Literal, Protocol, cast
 
-import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+import boto3  # pyright: ignore[reportMissingTypeStubs] -- boto3 has no bundled stubs.
+from botocore.exceptions import (  # pyright: ignore[reportMissingTypeStubs] -- botocore has no bundled stubs.
+    BotoCoreError,
+    ClientError,
+)
 from krepis.model_metadata import ModelMetadata
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 logger = logging.getLogger(__name__)
 
 
-# ── Cross-cutting metadata ────────────────────────────────────────────────
+class _S3Client(Protocol):
+    """Subset of the S3 client used by decision capture."""
 
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+    ) -> object: ...
+
+
+# ── Cross-cutting metadata ────────────────────────────────────────────────
 
 
 class FullPromptContext(BaseModel):
@@ -74,7 +89,7 @@ class FullPromptContext(BaseModel):
 
     system_prompt: str
     user_prompt: str
-    tool_definitions: list[dict] = Field(default_factory=list)
+    tool_definitions: list[dict[str, JsonValue]] = Field(default_factory=list)
     prompt_version_hash: str | None = None
 
 
@@ -135,10 +150,10 @@ class DecisionArtifact(BaseModel):
     agent_id: str
     model_metadata: ModelMetadata | None = None
     full_prompt_context: FullPromptContext | None = None
-    input_data_snapshot: dict[str, Any]
+    input_data_snapshot: dict[str, JsonValue]
     input_data_summary: str | None = None
     input_data_truncated_at: int | None = Field(default=None, ge=0)
-    agent_output: dict[str, Any]
+    agent_output: dict[str, JsonValue]
     # Reproducibility provenance (optional, additive). Stamp the producing
     # code revision + the data snapshot/version the agent's inputs were
     # built from, so a later faithful replay can re-run against the SAME
@@ -200,16 +215,16 @@ def is_llm_decision(artifact: DecisionArtifact) -> bool:
 # ── Truncation helper for the 1MB cap ─────────────────────────────────────
 
 
-def _serialized_size(payload: dict) -> int:
+def _serialized_size(payload: dict[str, JsonValue]) -> int:
     """JSON-serialize and return the byte length. Used as the size metric
     for the cap check (matches what S3 will actually store)."""
     return len(json.dumps(payload, default=str).encode("utf-8"))
 
 
 def truncate_snapshot(
-    payload: dict,
+    payload: dict[str, JsonValue],
     cap_bytes: int = _INPUT_SNAPSHOT_DEFAULT_CAP_BYTES,
-) -> tuple[dict, int | None]:
+) -> tuple[dict[str, JsonValue], int | None]:
     """Truncate ``payload`` to fit under ``cap_bytes`` when serialized to JSON.
 
     Strategy:
@@ -238,7 +253,7 @@ def truncate_snapshot(
         return payload, None
 
     # Truncation: drop largest top-level field, replace with marker, repeat.
-    truncated = dict(payload)
+    truncated: dict[str, JsonValue] = dict(payload)
     while _serialized_size(truncated) > cap_bytes:
         # Find largest top-level field by serialized size.
         sized_fields = [
@@ -314,8 +329,8 @@ def capture_decision(
     agent_id: str,
     model_metadata: ModelMetadata | None,
     full_prompt_context: FullPromptContext | None,
-    input_data_snapshot: dict[str, Any],
-    agent_output: dict[str, Any],
+    input_data_snapshot: dict[str, JsonValue],
+    agent_output: dict[str, JsonValue],
     input_data_summary: str | None = None,
     code_sha: str | None = None,
     data_snapshot_id: str | None = None,
@@ -323,7 +338,7 @@ def capture_decision(
     span_id: str | None = None,
     s3_bucket: str = _DEFAULT_S3_BUCKET,
     s3_prefix: str = _DEFAULT_S3_PREFIX,
-    s3_client: Any | None = None,
+    s3_client: _S3Client | None = None,
     timestamp: datetime | None = None,
     snapshot_cap_bytes: int = _INPUT_SNAPSHOT_DEFAULT_CAP_BYTES,
 ) -> str:
@@ -431,7 +446,12 @@ def capture_decision(
     body = artifact.model_dump_json().encode("utf-8")
 
     # 4. Write to S3 — hard-fail on any error.
-    client = s3_client if s3_client is not None else boto3.client("s3")
+    client = (
+        s3_client
+        if s3_client is not None
+        # boto3's dynamically generated client has no statically typed member.
+        else cast(_S3Client, boto3.client("s3"))  # pyright: ignore[reportUnknownMemberType]
+    )
     try:
         client.put_object(
             Bucket=s3_bucket,
