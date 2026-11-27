@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 import pytest
@@ -191,6 +192,17 @@ class TestDecisionArtifactBasics:
         }
         art = DecisionArtifact(**kwargs)
         assert art.input_data_snapshot["nested"]["deep"]["value"] == [1, 2, 3]
+
+    def test_input_data_snapshot_accepts_non_json_values(self):
+        kwargs = _minimal_artifact_kwargs()
+        kwargs["input_data_snapshot"] = {"portfolio_value": Decimal("123.45")}
+
+        art = DecisionArtifact(**kwargs)
+
+        assert art.input_data_snapshot["portfolio_value"] == Decimal("123.45")
+        assert json.loads(art.model_dump_json())["input_data_snapshot"] == {
+            "portfolio_value": "123.45",
+        }
 
     def test_agent_output_allows_arbitrary_dict_shapes(self):
         kwargs = _minimal_artifact_kwargs()

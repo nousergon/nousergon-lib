@@ -74,7 +74,7 @@ class FullPromptContext(BaseModel):
 
     system_prompt: str
     user_prompt: str
-    tool_definitions: list[dict] = Field(default_factory=list)
+    tool_definitions: list[dict[str, object]] = Field(default_factory=list)
     prompt_version_hash: str | None = None
 
 
@@ -135,10 +135,10 @@ class DecisionArtifact(BaseModel):
     agent_id: str
     model_metadata: ModelMetadata | None = None
     full_prompt_context: FullPromptContext | None = None
-    input_data_snapshot: dict[str, Any]
+    input_data_snapshot: dict[str, object]
     input_data_summary: str | None = None
     input_data_truncated_at: int | None = Field(default=None, ge=0)
-    agent_output: dict[str, Any]
+    agent_output: dict[str, object]
     # Reproducibility provenance (optional, additive). Stamp the producing
     # code revision + the data snapshot/version the agent's inputs were
     # built from, so a later faithful replay can re-run against the SAME
@@ -314,8 +314,8 @@ def capture_decision(
     agent_id: str,
     model_metadata: ModelMetadata | None,
     full_prompt_context: FullPromptContext | None,
-    input_data_snapshot: dict[str, Any],
-    agent_output: dict[str, Any],
+    input_data_snapshot: dict[str, object],
+    agent_output: dict[str, object],
     input_data_summary: str | None = None,
     code_sha: str | None = None,
     data_snapshot_id: str | None = None,
