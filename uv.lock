@@ -1277,7 +1277,7 @@ type-check = [
 
 [package.metadata]
 requires-dist = [
-    { name = "arcticdb", marker = "extra == 'arcticdb'", specifier = ">=6.11,<7" },
+    { name = "arcticdb", marker = "extra == 'arcticdb'", specifier = ">=6.11,<8" },
     { name = "boto3", specifier = ">=1.34" },
     { name = "hnswlib", marker = "extra == 'rag-local-ann'", specifier = ">=0.8" },
     { name = "jsonschema", marker = "extra == 'contracts'", specifier = ">=4.21" },
