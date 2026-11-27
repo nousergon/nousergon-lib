@@ -15,9 +15,13 @@ Pins:
      sums in one shot.
   8. backfill refuses to clobber a non-empty counter unless overwrite=True.
 """
+# Tests use moto's dynamically generated boto3 client and pytest fixtures.
+# pyright: basic, reportExplicitAny=false, reportMissingTypeStubs=false, reportPrivateUsage=false
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
+from typing import Any, NoReturn
 from unittest.mock import patch
 
 import boto3
@@ -26,6 +30,7 @@ from moto import mock_aws
 
 from nousergon_lib.quant.stats.trial_accumulator import (
     DEFAULT_KEY,
+    _get_with_etag,
     backfill_cumulative_trial_count,
     increment_trial_count,
     read_cumulative_trial_count,
@@ -35,7 +40,7 @@ BUCKET = "alpha-engine-research"
 
 
 @pytest.fixture
-def s3():
+def s3() -> Generator[Any, None, None]:
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket=BUCKET)
@@ -43,13 +48,66 @@ def s3():
 
 
 class TestReadEmpty:
-    def test_read_never_written_returns_empty_state(self, s3):
+    def test_read_never_written_returns_empty_state(self, s3: Any) -> None:
         state = read_cumulative_trial_count(BUCKET, s3_client=s3)
         assert state == {"total": 0, "last_updated": "", "by_producer": {}}
 
 
+class TestStoredStateValidation:
+    @staticmethod
+    def _put_state(s3: Any, state: object) -> str:
+        s3.put_object(Bucket=BUCKET, Key=DEFAULT_KEY, Body=json.dumps(state).encode())
+        return s3.head_object(Bucket=BUCKET, Key=DEFAULT_KEY)["ETag"]
+
+    def test_wrong_typed_total_warns_and_returns_empty_with_etag(
+        self, s3: Any, caplog: Any,
+    ) -> None:
+        etag = self._put_state(
+            s3, {"total": "5", "last_updated": "2026-07-14", "by_producer": {}},
+        )
+
+        with caplog.at_level("WARNING"):
+            state, returned_etag = _get_with_etag(s3, BUCKET, DEFAULT_KEY)
+
+        assert state == {"total": 0, "last_updated": "", "by_producer": {}}
+        assert returned_etag == etag
+        assert f"s3://{BUCKET}/{DEFAULT_KEY}" in caplog.text
+
+    def test_extra_key_survives_read_then_is_dropped_by_increment(self, s3: Any) -> None:
+        stored = {
+            "total": 5,
+            "last_updated": "2026-07-14",
+            "by_producer": {"gamma_sweep": 5},
+            "operator_note": "keep until the next increment",
+        }
+        self._put_state(s3, stored)
+
+        assert read_cumulative_trial_count(BUCKET, s3_client=s3) == stored
+        increment_trial_count("gamma_sweep", 2, "2026-07-21", bucket=BUCKET, s3_client=s3)
+        persisted = json.loads(s3.get_object(Bucket=BUCKET, Key=DEFAULT_KEY)["Body"].read())
+
+        assert "operator_note" not in persisted
+        assert persisted["total"] == 7
+
+    def test_missing_fields_receive_defaults(self, s3: Any) -> None:
+        self._put_state(s3, {"total": 5})
+
+        assert read_cumulative_trial_count(BUCKET, s3_client=s3) == {
+            "total": 5, "last_updated": "", "by_producer": {},
+        }
+
+    def test_malformed_json_warns_and_returns_empty(self, s3: Any, caplog: Any) -> None:
+        s3.put_object(Bucket=BUCKET, Key=DEFAULT_KEY, Body=b"{")
+
+        with caplog.at_level("WARNING"):
+            state = read_cumulative_trial_count(BUCKET, s3_client=s3)
+
+        assert state == {"total": 0, "last_updated": "", "by_producer": {}}
+        assert "malformed JSON" in caplog.text
+
+
 class TestIncrement:
-    def test_first_increment_creates_artifact(self, s3):
+    def test_first_increment_creates_artifact(self, s3: Any) -> None:
         state = increment_trial_count(
             "gamma_sweep", 5, "2026-07-14", bucket=BUCKET, s3_client=s3,
         )
@@ -62,14 +120,14 @@ class TestIncrement:
         on_disk = json.loads(obj["Body"].read())
         assert on_disk == state
 
-    def test_same_producer_accumulates_across_cycles(self, s3):
+    def test_same_producer_accumulates_across_cycles(self, s3: Any) -> None:
         increment_trial_count("gamma_sweep", 5, "2026-07-01", bucket=BUCKET, s3_client=s3)
         state = increment_trial_count("gamma_sweep", 7, "2026-07-08", bucket=BUCKET, s3_client=s3)
         assert state["total"] == 12
         assert state["by_producer"] == {"gamma_sweep": 12}
         assert state["last_updated"] == "2026-07-08"
 
-    def test_multiple_producers_accumulate_independently(self, s3):
+    def test_multiple_producers_accumulate_independently(self, s3: Any) -> None:
         increment_trial_count("optimizer_param_sweep", 9, "2026-07-14", bucket=BUCKET, s3_client=s3)
         increment_trial_count("gamma_sweep", 5, "2026-07-14", bucket=BUCKET, s3_client=s3)
         increment_trial_count("cov_estimator_sweep", 8, "2026-07-14", bucket=BUCKET, s3_client=s3)
@@ -84,7 +142,7 @@ class TestIncrement:
             "predictor_param_sweep": 137,
         }
 
-    def test_non_positive_n_trials_is_noop(self, s3):
+    def test_non_positive_n_trials_is_noop(self, s3: Any) -> None:
         increment_trial_count("gamma_sweep", 5, "2026-07-01", bucket=BUCKET, s3_client=s3)
         state = increment_trial_count("gamma_sweep", 0, "2026-07-08", bucket=BUCKET, s3_client=s3)
         assert state["total"] == 5
@@ -95,7 +153,7 @@ class TestIncrement:
 
 
 class TestConcurrentWriteRace:
-    def test_precondition_failure_retries_against_fresh_state(self, s3):
+    def test_precondition_failure_retries_against_fresh_state(self, s3: Any) -> None:
         """Simulate a racing writer landing between our GET and PUT: the
         first put_object call raises PreconditionFailed once, then the
         retry (against the now-current ETag) succeeds and the racing
@@ -104,7 +162,7 @@ class TestConcurrentWriteRace:
         real_put_object = s3.put_object
         call_count = {"n": 0}
 
-        def flaky_put_object(**kwargs):
+        def flaky_put_object(**kwargs: Any) -> object:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # First attempt: simulate a racing writer having already
@@ -135,10 +193,10 @@ class TestConcurrentWriteRace:
         assert state["by_producer"]["gamma_sweep"] == 5
         assert call_count["n"] == 2
 
-    def test_persistent_contention_raises_after_max_retries(self, s3):
+    def test_persistent_contention_raises_after_max_retries(self, s3: Any) -> None:
         from botocore.exceptions import ClientError
 
-        def always_conflict(**kwargs):
+        def always_conflict(**kwargs: Any) -> NoReturn:
             raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
 
         with patch.object(s3, "put_object", side_effect=always_conflict):
@@ -150,7 +208,7 @@ class TestConcurrentWriteRace:
 
 
 class TestBackfill:
-    def test_backfill_seeds_all_producers(self, s3):
+    def test_backfill_seeds_all_producers(self, s3: Any) -> None:
         state = backfill_cumulative_trial_count(
             {
                 "optimizer_param_sweep": 4230,
@@ -169,7 +227,7 @@ class TestBackfill:
         on_disk = read_cumulative_trial_count(BUCKET, s3_client=s3)
         assert on_disk == state
 
-    def test_backfill_refuses_to_clobber_existing_nonzero_counter(self, s3):
+    def test_backfill_refuses_to_clobber_existing_nonzero_counter(self, s3: Any) -> None:
         increment_trial_count("gamma_sweep", 5, "2026-07-01", bucket=BUCKET, s3_client=s3)
         with pytest.raises(RuntimeError, match="refusing backfill"):
             backfill_cumulative_trial_count(
@@ -179,7 +237,7 @@ class TestBackfill:
         state = read_cumulative_trial_count(BUCKET, s3_client=s3)
         assert state["total"] == 5
 
-    def test_backfill_overwrite_true_forces_reseed(self, s3):
+    def test_backfill_overwrite_true_forces_reseed(self, s3: Any) -> None:
         increment_trial_count("gamma_sweep", 5, "2026-07-01", bucket=BUCKET, s3_client=s3)
         state = backfill_cumulative_trial_count(
             {"gamma_sweep": 9999}, "2026-07-14",
