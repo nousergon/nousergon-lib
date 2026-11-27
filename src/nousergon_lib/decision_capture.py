@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -314,8 +315,8 @@ def capture_decision(
     agent_id: str,
     model_metadata: ModelMetadata | None,
     full_prompt_context: FullPromptContext | None,
-    input_data_snapshot: dict[str, Any],
-    agent_output: dict[str, Any],
+    input_data_snapshot: Mapping[str, object],
+    agent_output: Mapping[str, object],
     input_data_summary: str | None = None,
     code_sha: str | None = None,
     data_snapshot_id: str | None = None,
@@ -401,7 +402,7 @@ def capture_decision(
 
     # 1. Apply truncation cap on the snapshot.
     snapshot_for_artifact, truncated_at = truncate_snapshot(
-        input_data_snapshot, cap_bytes=snapshot_cap_bytes,
+        dict(input_data_snapshot), cap_bytes=snapshot_cap_bytes,
     )
 
     # 2. Construct the artifact (Pydantic validates).
@@ -414,7 +415,7 @@ def capture_decision(
         input_data_snapshot=snapshot_for_artifact,
         input_data_summary=input_data_summary,
         input_data_truncated_at=truncated_at,
-        agent_output=agent_output,
+        agent_output=dict(agent_output),
         code_sha=code_sha,
         data_snapshot_id=data_snapshot_id,
         trace_id=trace_id,
