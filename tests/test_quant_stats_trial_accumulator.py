@@ -18,7 +18,7 @@ Pins:
 from __future__ import annotations
 
 import json
-from collections.abc import Generator
+from collections.abc import Iterator
 from typing import NoReturn
 from unittest.mock import patch
 
@@ -38,7 +38,7 @@ BUCKET = "alpha-engine-research"
 
 
 @pytest.fixture
-def s3() -> Generator[object, None, None]:
+def s3() -> Iterator[object]:
     with mock_aws():
         client = boto3.client("s3", region_name="us-east-1")
         client.create_bucket(Bucket=BUCKET)
@@ -50,21 +50,42 @@ class TestReadEmpty:
         state = read_cumulative_trial_count(BUCKET, s3_client=s3)
         assert state == {"total": 0, "last_updated": "", "by_producer": {}}
 
-    def test_wrong_typed_total_warns_and_returns_empty_with_etag(
-        self, s3: object, caplog: pytest.LogCaptureFixture,
-    ) -> None:
+    def test_wrong_typed_total_warns_and_returns_empty_with_etag(self, s3: object, caplog: object) -> None:
         s3.put_object(
             Bucket=BUCKET,
             Key=DEFAULT_KEY,
-            Body=json.dumps({"total": "5"}).encode(),
+            Body=json.dumps(
+                {"total": "5", "last_updated": "2026-07-14", "by_producer": {}},
+            ).encode(),
         )
+        expected_etag = s3.head_object(Bucket=BUCKET, Key=DEFAULT_KEY)["ETag"]
 
         state, etag = _get_with_etag(s3, BUCKET, DEFAULT_KEY)
 
         assert state == {"total": 0, "last_updated": "", "by_producer": {}}
-        assert f"s3://{BUCKET}/{DEFAULT_KEY}" in caplog.text
-        assert "invalid state" in caplog.text
-        assert etag == s3.head_object(Bucket=BUCKET, Key=DEFAULT_KEY)["ETag"]
+        assert etag == expected_etag
+        assert f"invalid state at s3://{BUCKET}/{DEFAULT_KEY}" in caplog.text
+
+    def test_extra_key_survives_read_but_is_dropped_by_increment(self, s3: object) -> None:
+        stored = {
+            "total": 5,
+            "last_updated": "2026-07-01",
+            "by_producer": {"gamma_sweep": 5},
+            "operator_note": "keep until the next write",
+        }
+        s3.put_object(Bucket=BUCKET, Key=DEFAULT_KEY, Body=json.dumps(stored).encode())
+
+        assert read_cumulative_trial_count(BUCKET, s3_client=s3) == stored
+        increment_trial_count(
+            "gamma_sweep", 2, "2026-07-08", bucket=BUCKET, s3_client=s3,
+        )
+
+        persisted = json.loads(s3.get_object(Bucket=BUCKET, Key=DEFAULT_KEY)["Body"].read())
+        assert persisted == {
+            "total": 7,
+            "last_updated": "2026-07-08",
+            "by_producer": {"gamma_sweep": 7},
+        }
 
 
 class TestIncrement:
@@ -111,28 +132,6 @@ class TestIncrement:
 
         state = increment_trial_count("gamma_sweep", -3, "2026-07-08", bucket=BUCKET, s3_client=s3)
         assert state["total"] == 5
-
-    def test_extra_key_is_read_then_dropped_by_increment(self, s3: object) -> None:
-        stored = {
-            "total": 5,
-            "last_updated": "2026-07-01",
-            "by_producer": {"gamma_sweep": 5},
-            "future_field": "preserved on read",
-        }
-        s3.put_object(Bucket=BUCKET, Key=DEFAULT_KEY, Body=json.dumps(stored).encode())
-
-        assert read_cumulative_trial_count(BUCKET, s3_client=s3) == stored
-        state = increment_trial_count(
-            "gamma_sweep", 2, "2026-07-08", bucket=BUCKET, s3_client=s3,
-        )
-
-        assert state == {
-            "total": 7,
-            "last_updated": "2026-07-08",
-            "by_producer": {"gamma_sweep": 7},
-        }
-        persisted = json.loads(s3.get_object(Bucket=BUCKET, Key=DEFAULT_KEY)["Body"].read())
-        assert "future_field" not in persisted
 
 
 class TestConcurrentWriteRace:
