@@ -49,13 +49,14 @@ module does not attempt to infer skip state itself (it has no visibility into
 the caller's phase registry), it only guards against the trivial ``n_trials
 <= 0`` no-op case.
 """
+# pyright: reportExplicitAny=false
 
 from __future__ import annotations
 
 import json
 import logging
 import time
-from typing import Protocol, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 from nousergon_lib import rehearsal
 
@@ -73,11 +74,7 @@ class CumulativeTrialCount(TypedDict):
     by_producer: dict[str, int]
 
 
-class _ReadableBody(Protocol):
-    def read(self) -> bytes: ...
-
-
-def _client(s3_client=None):  # noqa: ANN001, ANN202 - boto3 clients have dynamic service methods
+def _client(s3_client: Any = None) -> Any:
     if s3_client is not None:
         return s3_client
     import boto3
@@ -90,7 +87,7 @@ def _empty_state() -> CumulativeTrialCount:
 
 
 def _get_with_etag(
-    s3_client, bucket: str, key: str,  # noqa: ANN001 - accepts boto3 and moto clients
+    s3_client: Any, bucket: str, key: str,
 ) -> tuple[CumulativeTrialCount, str | None]:
     """Read the current counter + its ETag. Returns (state, etag).
 
@@ -107,37 +104,38 @@ def _get_with_etag(
         if code in ("NoSuchKey", "404"):
             return _empty_state(), None
         raise
-    response = cast(dict[str, object], obj)
-    body = cast(_ReadableBody, response["Body"]).read()
-    etag = cast(str | None, response.get("ETag"))
+    body = obj["Body"].read()
+    etag = obj.get("ETag")
     try:
-        state: object = json.loads(body)
+        decoded: object = json.loads(body)
     except json.JSONDecodeError:
         logger.warning(
             "trial_accumulator: malformed JSON at s3://%s/%s — treating as empty",
             bucket, key,
         )
         return _empty_state(), etag
-    if not isinstance(state, dict):
+    if not isinstance(decoded, dict):
         logger.warning(
             "trial_accumulator: invalid state at s3://%s/%s — treating as empty",
             bucket, key,
         )
         return _empty_state(), etag
-    state = cast(dict[object, object], state)
+    state = cast(dict[str, object], decoded)
     # Defensive defaults so a hand-edited or partially-written artifact
     # doesn't KeyError the merge below.
     state.setdefault("total", 0)
     state.setdefault("last_updated", "")
     state.setdefault("by_producer", {})
-    by_producer = state["by_producer"]
+    by_producer_value = state["by_producer"]
     if (
-        not isinstance(state["total"], int)
+        type(state["total"]) is not int
         or not isinstance(state["last_updated"], str)
-        or not isinstance(by_producer, dict)
-        or not all(
-            isinstance(producer, str) and isinstance(count, int)
-            for producer, count in cast(dict[object, object], by_producer).items()
+        or not isinstance(by_producer_value, dict)
+        or any(
+            not isinstance(producer, str) or type(count) is not int
+            for producer, count in cast(
+                dict[object, object], by_producer_value,
+            ).items()
         )
     ):
         logger.warning(
@@ -149,7 +147,7 @@ def _get_with_etag(
 
 
 def read_cumulative_trial_count(
-    bucket: str = DEFAULT_BUCKET, *, key: str = DEFAULT_KEY, s3_client=None,  # noqa: ANN001
+    bucket: str = DEFAULT_BUCKET, *, key: str = DEFAULT_KEY, s3_client: Any = None,
 ) -> CumulativeTrialCount:
     """Read the current cumulative trial count. Returns the empty state
     (``total=0``) if the artifact does not exist yet — callers (e.g. the DSR
@@ -168,7 +166,7 @@ def increment_trial_count(
     *,
     bucket: str = DEFAULT_BUCKET,
     key: str = DEFAULT_KEY,
-    s3_client=None,  # noqa: ANN001 - accepts boto3 and moto clients
+    s3_client: Any = None,
 ) -> CumulativeTrialCount:
     """Add ``n_trials`` to the running total under ``by_producer[producer]``.
 
@@ -181,8 +179,10 @@ def increment_trial_count(
     Uses conditional PUT (``IfMatch`` the ETag just read, or ``IfNoneMatch:
     "*"`` if the artifact doesn't exist yet) with bounded retry so concurrent
     incrementers (two producers landing in the same run) merge correctly
-    instead of a last-write-wins clobber. Unknown keys in stored state are
-    available when read, but are dropped by the subsequent increment write.
+    instead of a last-write-wins clobber.
+
+    Unknown keys in stored state are returned by reads, but are dropped by
+    the normalized document written by a subsequent increment.
     """
     if n_trials <= 0:
         logger.info(
@@ -270,7 +270,7 @@ def backfill_cumulative_trial_count(
     *,
     bucket: str = DEFAULT_BUCKET,
     key: str = DEFAULT_KEY,
-    s3_client=None,  # noqa: ANN001 - accepts boto3 and moto clients
+    s3_client: Any = None,
     overwrite: bool = False,
 ) -> CumulativeTrialCount:
     """One-time seed of the counter from historical per-cycle sums.
