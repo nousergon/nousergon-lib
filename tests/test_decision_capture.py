@@ -557,22 +557,17 @@ class TestCaptureDecisionHappyPath:
         assert artifact.input_data_truncated_at is None
         assert artifact.input_data_summary is None
 
-    def test_non_json_snapshot_value_is_captured_with_string_serialization(
-        self, mocked_s3,
-    ):
-        price = Decimal("123.45")
+    def test_non_json_snapshot_values_are_captured(self, mocked_s3):
         kwargs = _minimal_capture_kwargs(
             mocked_s3,
-            input_data_snapshot={"closing_price": price},
+            input_data_snapshot={"market_value": Decimal("123.45")},
         )
 
         s3_key = capture_decision(**kwargs)
-        obj = mocked_s3.get_object(
-            Bucket="alpha-engine-research", Key=s3_key,
-        )
+        obj = mocked_s3.get_object(Bucket="alpha-engine-research", Key=s3_key)
         body = json.loads(obj["Body"].read())
 
-        assert body["input_data_snapshot"]["closing_price"] == str(price)
+        assert body["input_data_snapshot"] == {"market_value": "123.45"}
 
     def test_content_type_is_json(self, mocked_s3):
         s3_key = capture_decision(**_minimal_capture_kwargs(mocked_s3))
