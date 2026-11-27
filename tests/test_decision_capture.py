@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 import pytest
 from moto import mock_aws
 
 from nousergon_lib.decision_capture import (
+    _DEFAULT_S3_BUCKET,
     _INPUT_SNAPSHOT_DEFAULT_CAP_BYTES,
     DecisionArtifact,
     DecisionCaptureWriteError,
@@ -332,6 +334,31 @@ class TestCaptureDecisionDeterministic:
         assert artifact.full_prompt_context is None
         assert artifact.agent_id == "executor:entry_triggers"
         assert is_llm_decision(artifact) is False
+
+    @mock_aws
+    def test_capture_accepts_non_json_snapshot_values(self):
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket=_DEFAULT_S3_BUCKET)
+        captured_at = datetime(2026, 11, 26, tzinfo=timezone.utc)
+        price = Decimal("123.45")
+
+        s3_key = capture_decision(
+            run_id="run-non-json-values",
+            agent_id="sector_quant",
+            model_metadata=None,
+            full_prompt_context=None,
+            input_data_snapshot={"captured_at": captured_at, "price": price},
+            agent_output={},
+            s3_client=s3,
+            timestamp=captured_at,
+        )
+
+        body = s3.get_object(Bucket=_DEFAULT_S3_BUCKET, Key=s3_key)["Body"].read()
+        persisted = json.loads(body)["input_data_snapshot"]
+        assert persisted == {
+            "captured_at": "2026-11-26T00:00:00Z",
+            "price": "123.45",
+        }
 
 
 class TestDecisionArtifactRoundTrip:

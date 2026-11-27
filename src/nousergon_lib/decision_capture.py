@@ -48,31 +48,19 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal, Protocol, cast
 
-import boto3  # pyright: ignore[reportMissingTypeStubs] -- boto3 has no bundled stubs.
-from botocore.exceptions import (  # pyright: ignore[reportMissingTypeStubs] -- botocore has no bundled stubs.
+import boto3  # pyright: ignore[reportMissingTypeStubs] -- boto3 ships no inline types
+from botocore.exceptions import (  # pyright: ignore[reportMissingTypeStubs] -- botocore ships no inline types
     BotoCoreError,
     ClientError,
 )
 from krepis.model_metadata import ModelMetadata
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
 
-class _S3Client(Protocol):
-    """Subset of the S3 client used by decision capture."""
-
-    def put_object(
-        self,
-        *,
-        Bucket: str,
-        Key: str,
-        Body: bytes,
-        ContentType: str,
-    ) -> object: ...
-
-
 # ── Cross-cutting metadata ────────────────────────────────────────────────
+
 
 
 class FullPromptContext(BaseModel):
@@ -89,7 +77,7 @@ class FullPromptContext(BaseModel):
 
     system_prompt: str
     user_prompt: str
-    tool_definitions: list[dict[str, JsonValue]] = Field(default_factory=list)
+    tool_definitions: list[dict[str, object]] = Field(default_factory=list)
     prompt_version_hash: str | None = None
 
 
@@ -150,10 +138,10 @@ class DecisionArtifact(BaseModel):
     agent_id: str
     model_metadata: ModelMetadata | None = None
     full_prompt_context: FullPromptContext | None = None
-    input_data_snapshot: dict[str, JsonValue]
+    input_data_snapshot: dict[str, object]
     input_data_summary: str | None = None
     input_data_truncated_at: int | None = Field(default=None, ge=0)
-    agent_output: dict[str, JsonValue]
+    agent_output: dict[str, object]
     # Reproducibility provenance (optional, additive). Stamp the producing
     # code revision + the data snapshot/version the agent's inputs were
     # built from, so a later faithful replay can re-run against the SAME
@@ -215,16 +203,24 @@ def is_llm_decision(artifact: DecisionArtifact) -> bool:
 # ── Truncation helper for the 1MB cap ─────────────────────────────────────
 
 
-def _serialized_size(payload: dict[str, JsonValue]) -> int:
+def _serialized_size(payload: dict[str, object]) -> int:
     """JSON-serialize and return the byte length. Used as the size metric
     for the cap check (matches what S3 will actually store)."""
     return len(json.dumps(payload, default=str).encode("utf-8"))
 
 
+def _is_truncation_marker(value: object) -> bool:
+    """Return whether an opaque snapshot value is our truncation marker."""
+    if not isinstance(value, dict):
+        return False
+    marker = cast(dict[object, object], value)
+    return marker.get("_truncated") is True
+
+
 def truncate_snapshot(
-    payload: dict[str, JsonValue],
+    payload: dict[str, object],
     cap_bytes: int = _INPUT_SNAPSHOT_DEFAULT_CAP_BYTES,
-) -> tuple[dict[str, JsonValue], int | None]:
+) -> tuple[dict[str, object], int | None]:
     """Truncate ``payload`` to fit under ``cap_bytes`` when serialized to JSON.
 
     Strategy:
@@ -253,23 +249,26 @@ def truncate_snapshot(
         return payload, None
 
     # Truncation: drop largest top-level field, replace with marker, repeat.
-    truncated: dict[str, JsonValue] = dict(payload)
+    truncated = dict(payload)
     while _serialized_size(truncated) > cap_bytes:
         # Find largest top-level field by serialized size.
         sized_fields = [
             (k, _serialized_size({k: v}))
             for k, v in truncated.items()
-            if not (isinstance(v, dict) and v.get("_truncated") is True)
+            if not _is_truncation_marker(v)
         ]
         if not sized_fields:
             # Every field is already a truncation marker; pathological case.
             # Replace whole payload with a single marker.
-            truncated = {
-                "_truncated": True,
-                "reason": "exceeded_cap_after_full_field_drop",
-                "original_size_bytes": original_size,
-                "cap_bytes": cap_bytes,
-            }
+            truncated = cast(
+                dict[str, object],
+                {
+                    "_truncated": True,
+                    "reason": "exceeded_cap_after_full_field_drop",
+                    "original_size_bytes": original_size,
+                    "cap_bytes": cap_bytes,
+                },
+            )
             break
         sized_fields.sort(key=lambda x: -x[1])  # largest first
         largest_field, largest_size = sized_fields[0]
@@ -298,6 +297,19 @@ class DecisionCaptureWriteError(RuntimeError):
     exception explicitly at the call site (and add a CloudWatch metric
     so silent capture loss is observable).
     """
+
+
+class _S3Client(Protocol):
+    """Structural type for the only S3 operation capture requires."""
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+    ) -> object: ...
 
 
 def _build_s3_key(
@@ -329,8 +341,8 @@ def capture_decision(
     agent_id: str,
     model_metadata: ModelMetadata | None,
     full_prompt_context: FullPromptContext | None,
-    input_data_snapshot: dict[str, JsonValue],
-    agent_output: dict[str, JsonValue],
+    input_data_snapshot: dict[str, object],
+    agent_output: dict[str, object],
     input_data_summary: str | None = None,
     code_sha: str | None = None,
     data_snapshot_id: str | None = None,
@@ -449,8 +461,11 @@ def capture_decision(
     client = (
         s3_client
         if s3_client is not None
-        # boto3's dynamically generated client has no statically typed member.
-        else cast(_S3Client, boto3.client("s3"))  # pyright: ignore[reportUnknownMemberType]
+        # boto3's dynamic service factory has no inline return type.
+        else cast(
+            _S3Client,
+            boto3.client("s3"),  # pyright: ignore[reportUnknownMemberType]
+        )
     )
     try:
         client.put_object(
