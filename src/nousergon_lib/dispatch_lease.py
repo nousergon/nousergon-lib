@@ -51,10 +51,51 @@ import logging
 import os
 import socket
 import time
+from collections.abc import Mapping
+from typing import Protocol, cast
+
+from botocore.exceptions import (  # pyright: ignore[reportMissingTypeStubs]  # botocore ships no stubs; botocore-stubs is not a dependency
+    ClientError,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUCKET = "alpha-engine-research"
+
+
+class _Readable(Protocol):
+    def read(self) -> bytes: ...
+
+
+class _S3Client(Protocol):
+    """The subset of the boto3 S3 client used by dispatch leases."""
+
+    def get_object(self, *, Bucket: str, Key: str) -> Mapping[str, object]: ...
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        IfNoneMatch: str,
+        ContentType: str,
+    ) -> object: ...
+
+    def delete_object(self, *, Bucket: str, Key: str) -> object: ...
+
+
+def _json_int(value: object) -> int:
+    """Apply ``int`` to the scalar forms a JSON document can contain."""
+    if isinstance(value, (str, int, float)):
+        return int(value)
+    raise TypeError(f"expected a JSON scalar convertible to int, got {type(value).__name__}")
+
+
+def _error_code(exc: ClientError) -> object:
+    """Return a botocore error code without leaking its untyped payload."""
+    response = cast("Mapping[str, Mapping[str, object]]", exc.response)
+    return response.get("Error", {}).get("Code")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -72,13 +113,13 @@ class LeaseHolder:
 
     @classmethod
     def from_json(cls, payload: str) -> LeaseHolder:
-        d = json.loads(payload)
+        d = cast("Mapping[str, object]", json.loads(payload))
         return cls(
             owner_id=str(d["owner_id"]),
             started_at=str(d["started_at"]),
-            ttl_epoch=int(d["ttl_epoch"]),
+            ttl_epoch=_json_int(d["ttl_epoch"]),
             hostname=str(d["hostname"]),
-            pid=int(d["pid"]),
+            pid=_json_int(d["pid"]),
         )
 
 
@@ -115,7 +156,7 @@ def _build_holder(owner_id: str, ttl_seconds: int) -> LeaseHolder:
     )
 
 
-def _read_existing_holder(s3_client, bucket: str, key: str) -> LeaseHolder | None:
+def _read_existing_holder(s3_client: _S3Client, bucket: str, key: str) -> LeaseHolder | None:
     """Read + parse the current lease body, or None if absent / malformed.
 
     A malformed body can't be interpreted as "held by someone we know
@@ -124,17 +165,12 @@ def _read_existing_holder(s3_client, bucket: str, key: str) -> LeaseHolder | Non
     itself, it only decides whether to attempt the recovery PUT).
     """
     try:
-        from botocore.exceptions import ClientError
-    except ImportError:  # pragma: no cover - botocore is a hard dep
-        raise
-
-    try:
         obj = s3_client.get_object(Bucket=bucket, Key=key)
     except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+        if _error_code(exc) in ("NoSuchKey", "404"):
             return None
         raise
-    body = obj["Body"].read().decode("utf-8")
+    body = cast("_Readable", obj["Body"]).read().decode("utf-8")
     try:
         return LeaseHolder.from_json(body)
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
@@ -145,11 +181,11 @@ def _read_existing_holder(s3_client, bucket: str, key: str) -> LeaseHolder | Non
         return None
 
 
-def _try_conditional_put(s3_client, bucket: str, key: str, holder: LeaseHolder) -> bool:
+def _try_conditional_put(
+    s3_client: _S3Client, bucket: str, key: str, holder: LeaseHolder
+) -> bool:
     """Attempt ``put_object(IfNoneMatch='*')``. Return True on acquired,
     False on PreconditionFailed (lease now held by someone else)."""
-    from botocore.exceptions import ClientError
-
     try:
         s3_client.put_object(
             Bucket=bucket, Key=key,
@@ -158,7 +194,7 @@ def _try_conditional_put(s3_client, bucket: str, key: str, holder: LeaseHolder) 
         )
         return True
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code")
+        code = _error_code(exc)
         # S3 returns "PreconditionFailed" on If-None-Match conflict; legacy
         # mocks / older boto3 surface "412" as the bare HTTP status.
         if code in ("PreconditionFailed", "412"):
@@ -166,7 +202,7 @@ def _try_conditional_put(s3_client, bucket: str, key: str, holder: LeaseHolder) 
         raise
 
 
-def _delete_best_effort(s3_client, bucket: str, key: str) -> None:
+def _delete_best_effort(s3_client: _S3Client, bucket: str, key: str) -> None:
     try:
         s3_client.delete_object(Bucket=bucket, Key=key)
     except Exception as exc:  # noqa: BLE001 - best-effort cleanup
@@ -179,7 +215,7 @@ def acquire_lease(
     owner_id: str,
     ttl_seconds: int,
     bucket: str = DEFAULT_BUCKET,
-    s3_client=None,
+    s3_client: _S3Client | None = None,
     force: bool = False,
 ) -> LeaseAcquireResult:
     """Attempt to acquire a singleton lease at ``s3://{bucket}/{lock_key}``.
@@ -204,8 +240,9 @@ def acquire_lease(
     :param s3_client: Optional boto3 S3 client override (for tests).
     """
     if s3_client is None:
-        import boto3
-        s3_client = boto3.client("s3")
+        import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
+
+        s3_client = cast("_S3Client", boto3.client("s3"))  # pyright: ignore[reportUnknownMemberType]  # boto3 ships no stubs
 
     holder = _build_holder(owner_id=owner_id, ttl_seconds=ttl_seconds)
 
@@ -251,12 +288,15 @@ def acquire_lease(
     return LeaseAcquireResult(acquired=False, holder=existing)
 
 
-def release_lease(lock_key: str, *, bucket: str = DEFAULT_BUCKET, s3_client=None) -> None:
+def release_lease(
+    lock_key: str, *, bucket: str = DEFAULT_BUCKET, s3_client: _S3Client | None = None
+) -> None:
     """Best-effort release. Never raises — the hard S3-lifecycle TTL (if
     configured on the ``locks/`` prefix) is the authoritative purger for a
     release that fails to land, mirroring ``krepis.locks``' own posture."""
     if s3_client is None:
-        import boto3
-        s3_client = boto3.client("s3")
+        import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 ships no stubs
+
+        s3_client = cast("_S3Client", boto3.client("s3"))  # pyright: ignore[reportUnknownMemberType]  # boto3 ships no stubs
     _delete_best_effort(s3_client, bucket, lock_key)
     logger.info("Released lease at s3://%s/%s", bucket, lock_key)
