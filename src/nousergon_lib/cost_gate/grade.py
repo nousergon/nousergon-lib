@@ -561,12 +561,14 @@ def is_wildcard_pattern(pattern: str) -> bool:
 
 def grade_action_pattern(pattern: str, approval: Approval) -> tuple[str | None, str]:
     """``(issue, service prefix)`` for one granted action pattern; ``issue`` is
-    ``None`` when approved, else ``"wildcard"``, ``"unapproved"``,
-    ``"narrowed-free"`` or ``"no-line"``."""
+    ``None`` when approved, else ``"wildcard"``, ``"service-wildcard"``,
+    ``"unapproved"``, ``"narrowed-free"`` or ``"no-line"``."""
     p = str(pattern).strip()
     if is_wildcard_pattern(p):
         return "wildcard", "*"
     svc = _service_part(p)
+    if p.split(":", 1)[1].strip() == "*":
+        return "service-wildcard", svc
     if svc in _NOT_A_SERVICE:
         return None, svc
     narrowed = False
@@ -595,6 +597,11 @@ def _action_finding(path: str, pattern: str, issue: str, svc: str,
             f"{path}: grants `{pattern}`, and `{svc}` is on a service line the "
             f"cost SSoT marks UNAPPROVED — named so that any spend on it is "
             f"unapproved, not so that it is budgeted."
+        )
+    if issue == "service-wildcard":
+        return ("action", svc, path), (
+            f"{path}: grants `{pattern}` — every action in the `{svc}` service. "
+            f"Narrow it to the actions the principal needs."
         )
     if issue == "narrowed-free":
         allowed = ", ".join(approval.free_actions.get(svc, []))
@@ -817,6 +824,10 @@ def _grade_actions_by_line(
         keyed_spans: list[tuple[int, int]] = []
         for m in _KEYED_ACTION.finditer(line):
             keyed_spans.append(m.span("value"))
+            if m.group("key") == "actions" and m.group("value").lower() in {"read", "write"}:
+                # GitHub token permission maps use the lower-case `actions`
+                # scope; this is not an IAM `Action` grant.
+                continue
             counts["actions"] += 1
             if deny:
                 continue
