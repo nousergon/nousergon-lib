@@ -226,6 +226,16 @@ _KEYED_BY = re.compile(r"""["'](?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']\s*:\s*$""")
 #: value, not a grant, no matter how it is shaped.
 _ACTION_KEY_NAMES = frozenset({"action", "actions", "notaction"})
 
+#: Python has no policy-document file type, so an unknown prefix is considered
+#: an action only when its surrounding source is policy-shaped. Known AWS
+#: prefixes remain gradeable anywhere; this context check is solely the
+#: disambiguator for unknown prefixes such as a newly launched AWS service.
+_PYTHON_ACTION_CONTEXT = re.compile(
+    r"(?:[\"'](?:Action|Actions|NotAction)[\"']\s*:|\b(?:actions?|not_action)\s*=)",
+    re.IGNORECASE,
+)
+_PYTHON_FILE = re.compile(r"\.py$", re.IGNORECASE)
+
 #: A TEST. Its call sites and grant strings are both fixtures. This gate's own
 #: test file constructs a `textract` client and names `textract:*` actions to
 #: prove the gate fires. **A gate that reds the test proving it works cannot be
@@ -802,17 +812,22 @@ def _grade_actions_by_line(
     approval: Approval,
     found: dict[FindingKey, str],
     counts: Counts,
+    *,
+    recognized_prefixes: set[str] | None = None,
 ) -> None:
-    """The pre-context-aware behaviour: every quoted ``prefix:Word`` token on
-    an added line is graded, with no regard for whether it sits in an
-    ``Action`` value, a ``Condition`` key, or a ``Principal`` — except for the
-    same-line keyed-value disambiguation documented on ``_IAM_ACTION``. A value
-    keyed by ``Action``/``NotAction`` on the same line is graded whatever its
-    shape (``_KEYED_ACTION``). Used for non-structured files (Python, shell)
-    and as the fallback when a file that should be gradeable structurally
-    could not be parsed — never silently, always counted (see
-    ``actions_context_fallback`` in :func:`findings`)."""
+    """Grade quoted ``prefix:Word`` tokens in non-structured source files.
+
+    Python callers pass ``recognized_prefixes`` to retain known-service
+    detection everywhere while requiring policy context for unknown prefixes.
+    Other source formats and structured-document parse fallbacks retain the
+    conservative line scan. A value keyed by ``Action``/``NotAction`` on the
+    same line is always graded, whatever its shape (``_KEYED_ACTION``).
+    """
+    in_python_action_list = False
     for line in lines:
+        python_action_context = in_python_action_list or bool(
+            _PYTHON_ACTION_CONTEXT.search(line)
+        )
         deny = _DENY_ON_LINE.search(line) is not None
         keyed_spans: list[tuple[int, int]] = []
         for m in _KEYED_ACTION.finditer(line):
@@ -836,10 +851,25 @@ def _grade_actions_by_line(
             if _is_keyed_by_non_action(line, m.start()):
                 continue
             value = m.group(0)[1:-1]
+            prefix = m.group(1).lower()
+            if (
+                recognized_prefixes is not None
+                and prefix not in recognized_prefixes
+                and not python_action_context
+            ):
+                continue
             issue, svc = grade_action_pattern(value, approval)
             if issue is not None:
                 k, msg = _action_finding(path, value, issue, svc, approval)
                 found[k] = msg
+        if python_action_context:
+            # Preserve context for the usual multiline policy-list shape. A
+            # closing bracket on the Action line makes this a one-line list.
+            opens = line.count("[")
+            closes = line.count("]")
+            in_python_action_list = in_python_action_list or opens > closes
+            if in_python_action_list and closes > opens:
+                in_python_action_list = False
 
 
 def _denied_by(pattern: str, denies: list[PolicyStatement]) -> bool:
@@ -1033,6 +1063,9 @@ def findings(
     """
     approval = Approval(doc)
     known = approval.wholesale
+    recognized_prefixes = (
+        set(approval.budgeted) | approval.free | set(approval.unapproved)
+    )
     rmap = resource_map if resource_map is not None else resource_map_mod.load()
     resource_types = rmap["resource_types"]
     rules: dict[str, int] = rmap.get("schedule_rules") or {}
@@ -1110,7 +1143,26 @@ def findings(
             # a `Condition` key or a component id shaped `word:word`, which a
             # line-level regex cannot do. See the action-class pass.
             continue
-        _grade_actions_by_line(path, [line], approval, found, counts)
+        if not _PYTHON_FILE.search(path):
+            _grade_actions_by_line(path, [line], approval, found, counts)
+
+    # Python strings are ambiguous without their source context. Grade known
+    # AWS prefixes everywhere, but require policy-shaped context for an
+    # unknown prefix so ordinary application keys such as ``dm:U1`` do not
+    # become invented services. Processing per file preserves multiline
+    # Action/NotAction list context.
+    for path, (_, texts) in by_file.items():
+        if _PYTHON_FILE.search(path) and not (
+            _TEST.search(path) or _CAPTURE.search(path)
+        ):
+            _grade_actions_by_line(
+                path,
+                texts,
+                approval,
+                found,
+                counts,
+                recognized_prefixes=recognized_prefixes,
+            )
 
     # -- the action class, per JSON/YAML file ----------------------------------
     #

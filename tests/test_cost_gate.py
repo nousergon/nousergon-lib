@@ -1167,6 +1167,48 @@ def test_a_component_id_value_in_a_python_source_line_is_not_an_action():
     assert counts["actions"] == 1
 
 
+def test_a_slack_state_key_in_a_plain_python_dict_call_is_not_an_action():
+    issues, counts = gate.findings(
+        _diff("scripts/probe.py", "    previous = state.get('dm:U1')"),
+        DOC,
+    )
+    assert issues == []
+    assert counts["actions"] == 1
+
+
+def test_an_unknown_prefix_in_a_python_action_value_is_still_a_finding():
+    issues, _ = gate.findings(
+        _diff("scripts/policy.py", '    statement = {"Action": ["dm:*"]}'),
+        DOC,
+    )
+    assert len(issues) == 1
+    assert "dm" in issues[0]
+
+
+def test_a_new_service_prefix_in_a_python_policy_is_still_a_finding():
+    issues, _ = gate.findings(
+        _diff("scripts/policy.py", '    statement = {"Action": "newsvc:Get*"}'),
+        DOC,
+    )
+    assert len(issues) == 1
+    assert "newsvc" in issues[0]
+
+
+def test_unknown_python_actions_keep_multiline_and_not_action_context():
+    issues, _ = gate.findings(
+        _diff(
+            "scripts/policy.py",
+            '    statement = {"Action": [',
+            '        "newsvc:Get*",',
+            "    ]}",
+            '    exception = {"NotAction": "newsvc:List*"}',
+        ),
+        DOC,
+    )
+    assert len(issues) == 2
+    assert all("newsvc" in issue for issue in issues)
+
+
 def test_a_quoted_action_with_no_preceding_key_in_python_is_still_a_finding():
     """A bare list element — the shape a real grant takes when building a
     policy document by hand in Python — has no key on the same line at all,
@@ -1686,6 +1728,16 @@ def test_a_narrowed_free_prefix_does_not_approve_a_client():
     wholesale["capability_gate"].pop("free_actions")
     issues, _ = gate.findings(_diff("scripts/x.py", '    c = boto3.client("codebuild")'), wholesale)
     assert issues == []
+
+
+def test_a_known_aws_prefix_outside_python_policy_context_is_still_graded():
+    doc = _as_regenerated(DOC)
+    issues, _ = gate.findings(
+        _diff("scripts/x.py", '    record("codebuild:StartBuild")'),
+        doc,
+    )
+    assert len(issues) == 1
+    assert "codebuild" in issues[0]
 
 
 def test_an_unapproved_service_line_does_not_approve_its_prefix(tmp_path):
