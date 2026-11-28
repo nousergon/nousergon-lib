@@ -63,10 +63,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from .window import elapsed_weeks as _elapsed_weeks
 
@@ -466,7 +465,7 @@ class ArmRegister:
         notes: str = "",
         control: bool = False,
         *,
-        filed_on: str | None = None,
+        filed_on: str,
     ) -> tuple[ArmRegister, ArmRecord]:
         """Append a new vintage. Returns the new register and the record.
 
@@ -489,24 +488,8 @@ class ArmRegister:
         "every registered arm was scored" demanded them on days whose cycles
         ran before the rows existed.
 
-        ``filed_on=None`` is a DEPRECATED compatibility path for callers
-        pinned to a release older than this one: it reproduces the defect
-        above (the event takes ``created_date``) and warns. It is not a
-        graceful degrade for a caller that could state the day — every caller
-        in this package's own tree passes it — and it is removed once the v1
-        `crucible-research` / `crucible-predictor` call sites are retired.
         """
-        if filed_on is None:
-            warnings.warn(
-                "ArmRegister.register(filed_on=...) is not set: the appended `registered` "
-                "event will take its date from `created_date`, which is the recipe's "
-                "declared date and NOT the day the row was filed. Pass the trading day of "
-                "the run doing the append. See alpha-engine-config-I10948.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            filed_on = created_date
-        elif not isinstance(filed_on, str) or not filed_on.strip():
+        if not isinstance(cast(object, filed_on), str) or not filed_on.strip():
             raise ValueError(
                 f"filed_on must be a non-empty ISO-8601 trading day; got {filed_on!r}"
             )

@@ -1190,7 +1190,7 @@ def test_the_filing_day_survives_a_round_trip_through_from_dicts():
     assert rebuilt.state(record.arm_id).record.created_date == "2026-06-01"
 
 
-@pytest.mark.parametrize("bad", ["", "   ", 20260917])
+@pytest.mark.parametrize("bad", ["", "   ", 20260917, None])
 def test_an_unusable_filing_day_is_refused_rather_than_stamped(bad):
     """`filed_on` is what a grader reads; an empty or non-string value would
     produce an event whose date says nothing, which reads as "always
@@ -1205,18 +1205,25 @@ def test_an_unusable_filing_day_is_refused_rather_than_stamped(bad):
         )
 
 
-def test_omitting_the_filing_day_warns_and_is_not_silent():
-    """The compatibility path for callers pinned to an older release
-    reproduces the defect, so it must be audible. A silent fallback would be
-    indistinguishable from the bug it replaces."""
-    with pytest.warns(DeprecationWarning, match="filed_on"):
-        reg, record = ArmRegister().register(
+def test_the_filing_day_is_required_with_no_none_fallback():
+    """Omission is a call error and ``None`` is rejected, so neither can
+    silently reproduce the old event-date defect by copying ``created_date``."""
+    with pytest.raises(TypeError, match="filed_on"):
+        ArmRegister().register(
             slot="model",
             name="no_filing_day",
             spec={"recipe": "no_filing_day"},
             created_date="2026-06-01",
         )
-    assert reg.events[-1].date == record.created_date
+
+    with pytest.raises(ValueError, match="filed_on"):
+        ArmRegister().register(
+            slot="model",
+            name="none_filing_day",
+            spec={"recipe": "none_filing_day"},
+            created_date="2026-06-01",
+            filed_on=None,
+        )
 
 
 # --------------------------------------------------------------------------
