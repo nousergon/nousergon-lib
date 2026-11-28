@@ -138,7 +138,7 @@ class BasePreflight:
         Requires the ``arcticdb`` optional extra
         (``nousergon-lib[arcticdb]``).
         """
-        from nousergon_lib.arcticdb import configure_arcticdb_io_threads
+        from nousergon_lib.arcticdb import arctic_uri, configure_arcticdb_io_threads
 
         configure_arcticdb_io_threads()
         try:
@@ -151,10 +151,7 @@ class BasePreflight:
                 f"{exc}"
             ) from exc
 
-        uri = (
-            f"s3s://s3.{self.region}.amazonaws.com:{self.bucket}"
-            "?path_prefix=arcticdb&aws_auth=true"
-        )
+        uri = arctic_uri(self.bucket, region=self.region)
         try:
             lib = adb.Arctic(uri).get_library(library)
         except Exception as exc:
@@ -276,7 +273,7 @@ class BasePreflight:
         from concurrent.futures import ThreadPoolExecutor
         from datetime import date, timedelta
 
-        from nousergon_lib.arcticdb import configure_arcticdb_io_threads
+        from nousergon_lib.arcticdb import arctic_uri, configure_arcticdb_io_threads
 
         configure_arcticdb_io_threads()
         try:
@@ -289,10 +286,7 @@ class BasePreflight:
                 f"{exc}"
             ) from exc
 
-        uri = (
-            f"s3s://s3.{self.region}.amazonaws.com:{self.bucket}"
-            "?path_prefix=arcticdb&aws_auth=true"
-        )
+        uri = arctic_uri(self.bucket, region=self.region)
         try:
             lib = adb.Arctic(uri).get_library(library)
         except Exception as exc:
