@@ -23,22 +23,128 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterable, Sequence
+from typing import Literal, Protocol, TypedDict, cast
 
-import boto3
+import boto3  # pyright: ignore[reportMissingTypeStubs]  # boto3 does not ship type hints
+import krepis.ec2_spot as _ec2_spot
 from krepis import alerts
 
-from nousergon_lib import ec2_spot
-
-# ec2_spot.py is a sys.modules rebind shim to krepis.ec2_spot; pyright can't
-# see through the dynamic rebind (verified correct at runtime), so each
-# symbol needs its own reportAttributeAccessIssue ignore on the line pyright
-# actually flags (a single ignore on the `from ... import (` line, as this
-# used to be written as a one-liner, only silences the first diagnostic).
-from nousergon_lib.ec2_spot import (
-    SpotCapacityExhausted,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
-    SpotLaunchError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
-    SpotQuotaExceededError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportAttributeAccessIssue]
+# Import from the typed implementation rather than the sys.modules rebind shim
+# in nousergon_lib.ec2_spot. These names remain re-exported for existing callers.
+from krepis.ec2_spot import (
+    SpotCapacityExhausted,  # noqa: F401 - re-exported for callers
+    SpotLaunchError,  # noqa: F401 - re-exported for callers  # pyright: ignore[reportUnusedImport]
+    SpotQuotaExceededError,  # noqa: F401 - re-exported for callers
 )
+from typing_extensions import Unpack
+
+
+class _Ec2Spot(Protocol):
+    def launch(
+        self,
+        instance_types: Sequence[str],
+        subnets: Sequence[str],
+        *,
+        spot: bool,
+        **kwargs: Unpack[_LaunchKwargs],
+    ) -> str: ...
+
+
+class _LaunchKwargs(TypedDict):
+    image_id: str
+    key_name: str
+    security_group_ids: list[str]
+    iam_instance_profile: str
+    volume_size_gb: int
+    shutdown_behavior: str
+    tag_name: str
+    extra_tags: dict[str, str]
+    region: str
+
+
+class _InstanceState(TypedDict, total=False):
+    Name: str
+
+
+class _InstanceRequired(TypedDict):
+    InstanceId: str
+
+
+class _Instance(_InstanceRequired, total=False):
+    State: _InstanceState
+    SpotInstanceRequestId: str
+
+
+class _Reservation(TypedDict, total=False):
+    Instances: list[_Instance]
+
+
+class _DescribeInstancesResponse(TypedDict, total=False):
+    Reservations: list[_Reservation]
+
+
+class _SpotStatus(TypedDict, total=False):
+    Code: str
+
+
+class _SpotRequest(TypedDict, total=False):
+    SpotInstanceRequestId: str
+    Status: _SpotStatus
+    State: str
+
+
+class _SpotPage(TypedDict, total=False):
+    SpotInstanceRequests: list[_SpotRequest]
+
+
+class _InstanceInformation(TypedDict, total=False):
+    PingStatus: str
+
+
+class _InstanceInformationResponse(TypedDict, total=False):
+    InstanceInformationList: list[_InstanceInformation]
+
+
+class _Command(TypedDict):
+    CommandId: str
+
+
+class _SendCommandResponse(TypedDict):
+    Command: _Command
+
+
+class _Waiter(Protocol):
+    def wait(self, **kwargs: object) -> None: ...
+
+
+class _SpotPaginator(Protocol):
+    def paginate(self, *, SpotInstanceRequestIds: list[str]) -> Iterable[_SpotPage]: ...
+
+
+class _Ec2Client(Protocol):
+    def get_waiter(self, waiter_name: Literal["instance_running"]) -> _Waiter: ...
+
+    def describe_instances(self, **kwargs: object) -> _DescribeInstancesResponse: ...
+
+    def get_paginator(
+        self, operation_name: Literal["describe_spot_instance_requests"]
+    ) -> _SpotPaginator: ...
+
+    def create_tags(self, *, Resources: list[str], Tags: list[dict[str, str]]) -> object: ...
+
+    def terminate_instances(self, *, InstanceIds: list[str]) -> object: ...
+
+
+class _SsmClient(Protocol):
+    def describe_instance_information(
+        self, *, Filters: list[dict[str, object]]
+    ) -> _InstanceInformationResponse: ...
+
+    def send_command(self, **kwargs: object) -> _SendCommandResponse: ...
+
+
+ec2_spot = cast(_Ec2Spot, _ec2_spot)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +235,7 @@ def launch_with_fallback(
     library-set keys take precedence over ``extra_tags`` on collision: they
     are measured facts about the launch, not a caller preference.
     """
-    def common(market: str, reason: str) -> dict:
+    def common(market: str, reason: str) -> _LaunchKwargs:
         # Launch provenance rides the SAME RunInstances TagSpecifications entry
         # as Name (krepis.ec2_spot merges extra_tags into it), so recording it
         # costs no new IAM anywhere: every caller can already tag the box it is
@@ -161,24 +267,22 @@ def launch_with_fallback(
             "extra_tags": tags,
             "region": region,
         }
-    # ec2_spot.launch(...) below: ec2_spot.py is a sys.modules rebind shim
-    # to krepis.ec2_spot; pyright can't see through the dynamic rebind,
-    # verified correct at runtime — see the ignore-reason on the import
-    # above.
+    # The module is cast to the precise protocol above; at runtime it remains
+    # the same krepis.ec2_spot implementation exposed by the compatibility shim.
     if force_on_demand:
         logger.warning("force_on_demand set — launching ON-DEMAND directly")
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,
                               **common("on-demand", REASON_FORCED))
         return iid, "on-demand"
     try:
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=True,  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=True,
                               **common("spot", REASON_SPOT_OK))
         return iid, "spot"
     except SpotCapacityExhausted:
         logger.warning(
             "spot capacity exhausted across all type×subnet pools — relaunching ON-DEMAND"
         )
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,
                               **common("on-demand", REASON_CAPACITY))
         return iid, "on-demand"
     except SpotQuotaExceededError as exc:
@@ -195,15 +299,15 @@ def launch_with_fallback(
             source="nousergon_lib.spot_dispatch.launch_with_fallback",
             dedup_key=f"spot-quota-exceeded-{region}",
         )
-        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,  # pyright: ignore[reportAttributeAccessIssue]
+        iid = ec2_spot.launch(list(instance_types), list(subnets), spot=False,
                               **common("on-demand", REASON_QUOTA))
         return iid, "on-demand"
 
 
 def wait_ssm_online(instance_id: str, *, region: str, ssm_online_budget_sec: int = 180) -> None:
     """Block until the instance is running AND its SSM agent registers Online."""
-    ec2 = boto3.client("ec2", region_name=region)
-    ssm = boto3.client("ssm", region_name=region)
+    ec2 = cast(_Ec2Client, boto3.client("ec2", region_name=region))  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
+    ssm = cast(_SsmClient, boto3.client("ssm", region_name=region))  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
     ec2.get_waiter("instance_running").wait(
         InstanceIds=[instance_id], WaiterConfig={"Delay": 5, "MaxAttempts": 40}
     )
@@ -233,7 +337,7 @@ def send_async_command(
     command id. ``execution_timeout_seconds`` bounds the command itself (NOT
     the start timeout) — without it SSM kills the command at its own 3600s
     default, guillotining a longer-running workload."""
-    ssm = boto3.client("ssm", region_name=region)
+    ssm = cast(_SsmClient, boto3.client("ssm", region_name=region))  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
     resp = ssm.send_command(
         InstanceIds=[instance_id],
         DocumentName="AWS-RunShellScript",
@@ -264,7 +368,7 @@ def running_instance_ids(
     vanishing the duplicate-box guard). The caller decides whether a failed
     probe blocks the launch or degrades to launch-with-logged-flag."""
     try:
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = cast(_Ec2Client, boto3.client("ec2", region_name=region))  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
         filters = [
             {"Name": "tag:Name", "Values": [tag_name]},
             {"Name": "instance-state-name", "Values": ["pending", "running"]},
@@ -352,7 +456,7 @@ def termination_imminent(instance_ids: list[str], *, region: str) -> set[str]:
     if not instance_ids:
         return set()
     try:
-        ec2 = boto3.client("ec2", region_name=region)
+        ec2 = cast(_Ec2Client, boto3.client("ec2", region_name=region))  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
         resp = ec2.describe_instances(InstanceIds=list(instance_ids))
         ids_by_state: dict[str, str] = {}  # instance_id -> state
         spot_request_ids: list[str] = []
@@ -437,7 +541,7 @@ def terminate_on_failure(
     """
     if reason:
         try:
-            boto3.client("ec2", region_name=region).create_tags(
+            cast(_Ec2Client, boto3.client("ec2", region_name=region)).create_tags(  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
                 Resources=[instance_id],
                 Tags=[
                     {"Key": TERMINATION_REASON_TAG, "Value": reason[:_TAG_VALUE_MAX]},
@@ -456,7 +560,9 @@ def terminate_on_failure(
                 label, instance_id, exc,
             )
     try:
-        boto3.client("ec2", region_name=region).terminate_instances(InstanceIds=[instance_id])
+        cast(_Ec2Client, boto3.client("ec2", region_name=region)).terminate_instances(  # pyright: ignore[reportUnknownMemberType]  # boto3 has no stubs
+            InstanceIds=[instance_id]
+        )
         logger.warning(
             "terminated %s box %s after post-launch failure (no orphan)", label, instance_id
         )
