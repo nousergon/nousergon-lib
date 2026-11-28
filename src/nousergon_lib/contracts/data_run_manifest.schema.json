@@ -211,7 +211,15 @@
         "spot": { "type": "boolean" },
         "escalated_on_demand": { "type": "boolean" },
         "interruptions": { "minimum": 0, "type": "integer" },
-        "region": { "type": ["string", "null"] }
+        "region": { "type": ["string", "null"] },
+        "cpu_model": { "minLength": 1, "type": "string" },
+        "numpy_version": { "minLength": 1, "type": "string" },
+        "cpu_features": {
+          "type": "array",
+          "items": { "minLength": 1, "type": "string" },
+          "uniqueItems": true
+        },
+        "blas_build": { "type": "object" }
       }
     },
     "Denominator": {

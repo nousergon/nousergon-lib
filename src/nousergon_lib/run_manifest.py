@@ -303,14 +303,21 @@ class DenominatorRecord(TypedDict):
     floor: float | None
 
 
-class ComputeRecord(TypedDict):
-    """The ``compute`` block, from what the box declared."""
-
+class _RequiredComputeRecord(TypedDict):
     instance_type: str
     spot: bool
     escalated_on_demand: bool
     interruptions: int
     region: str | None
+
+
+class ComputeRecord(_RequiredComputeRecord, total=False):
+    """The ``compute`` block, from what the box declared."""
+
+    cpu_model: str
+    numpy_version: str
+    cpu_features: list[str]
+    blas_build: dict[str, object]
 
 
 class _ModelDumpable(Protocol):
