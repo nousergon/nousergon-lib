@@ -31,13 +31,14 @@ red banner always names a specific cause.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, NoReturn, Protocol, TypedDict, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,6 +56,11 @@ if TYPE_CHECKING:  # pragma: no cover — type-only import
     from .cycles import ReliabilityWindow
 
 logger = logging.getLogger(__name__)
+
+
+class _Boto3Module(Protocol):
+    def client(self, service_name: str, *, region_name: str | None) -> object: ...
+
 
 # Failure-cause truncation — kept verbatim with sf-telegram-notifier
 # (alpha-engine-data/infrastructure/lambdas/sf-telegram-notifier/index.py
@@ -324,15 +330,17 @@ def _sfn_client(any_sfn_arn: str) -> SFNClient:
     environment declares one, while every state-machine and execution ARN
     always carries it.
     """
-    import boto3
-
     # mypy-boto3-stepfunctions is a stub-only package (no runtime overloads
     # for boto3.client's service-name dispatch), so the cast tells the type
     # checker what boto3 actually hands back at runtime.
-    return cast("SFNClient", boto3.client("stepfunctions", region_name=_region_from_arn(any_sfn_arn)))
+    boto3 = cast(_Boto3Module, importlib.import_module("boto3"))
+    return cast(
+        "SFNClient",
+        boto3.client("stepfunctions", region_name=_region_from_arn(any_sfn_arn)),
+    )
 
 
-def _paged_execution_history(client: SFNClient, execution_arn: str) -> list[Mapping[str, Any]]:
+def _paged_execution_history(client: SFNClient, execution_arn: str) -> list[Mapping[str, object]]:
     """Every history event for one execution, following ``nextToken`` to the end.
 
     A single 1000-event page is not the history — measured 2026-08-21, the
@@ -347,18 +355,23 @@ def _paged_execution_history(client: SFNClient, execution_arn: str) -> list[Mapp
     There is no partial-read mode. A caller that cannot afford the pages
     must not be making a claim about what the execution did.
     """
-    events: list[Mapping[str, Any]] = []
+    events: list[Mapping[str, object]] = []
     token: str | None = None
     while True:
-        kwargs: dict[str, Any] = {
-            "executionArn": execution_arn,
-            "maxResults": _HISTORY_PAGE_SIZE,
-            "reverseOrder": False,
-        }
-        if token:
-            kwargs["nextToken"] = token
         try:
-            resp = client.get_execution_history(**kwargs)
+            if token:
+                resp = client.get_execution_history(
+                    executionArn=execution_arn,
+                    maxResults=_HISTORY_PAGE_SIZE,
+                    reverseOrder=False,
+                    nextToken=token,
+                )
+            else:
+                resp = client.get_execution_history(
+                    executionArn=execution_arn,
+                    maxResults=_HISTORY_PAGE_SIZE,
+                    reverseOrder=False,
+                )
         except Exception as exc:  # noqa: BLE001 — narrow + re-raise typed
             _raise_for_boto_error(exc, "GetExecutionHistory")
         events.extend(resp.get("events") or [])
@@ -367,7 +380,7 @@ def _paged_execution_history(client: SFNClient, execution_arn: str) -> list[Mapp
             return events
 
 
-def _failure_cause_from(describe_resp: Mapping[str, Any]) -> str:
+def _failure_cause_from(describe_resp: Mapping[str, object]) -> str:
     """Extract + truncate the failure cause from DescribeExecution response.
 
     Mirrors sf-telegram-notifier's ``_failure_cause_from`` (lines 125-136)
@@ -375,8 +388,10 @@ def _failure_cause_from(describe_resp: Mapping[str, Any]) -> str:
     render the same snippet. Truncation policy: 280 chars max, ``…``
     appended on overflow.
     """
-    error = (describe_resp.get("error") or "").strip()
-    cause = (describe_resp.get("cause") or "").strip()
+    error_value = describe_resp.get("error")
+    cause_value = describe_resp.get("cause")
+    error = error_value.strip() if isinstance(error_value, str) else ""
+    cause = cause_value.strip() if isinstance(cause_value, str) else ""
     if error and cause:
         snippet = f"{error}: {cause}"
     else:
@@ -386,7 +401,7 @@ def _failure_cause_from(describe_resp: Mapping[str, Any]) -> str:
     return snippet
 
 
-def _parse_ts(value: Any) -> datetime | None:
+def _parse_ts(value: object) -> datetime | None:
     """Normalize boto3's datetime values to UTC.
 
     boto3 returns ``datetime`` objects with offset-aware ``tzinfo`` (usually
@@ -402,19 +417,21 @@ def _parse_ts(value: Any) -> datetime | None:
     return None
 
 
-def _is_substantive_event(event: dict) -> bool:
-    """Filter for events that name a substantive state.
+def _mapping(value: object) -> Mapping[str, object]:
+    """Narrow an untrusted JSON value to a string-keyed mapping."""
+    return cast(Mapping[str, object], value) if isinstance(value, Mapping) else {}
 
-    Used to scan the history for ``TaskStateEntered`` / ``TaskStateExited``
-    events whose state corresponds to a Task with a substantive Resource.
-    The history's event-type taxonomy is one filter axis; the registry's
-    ``SUBSTANTIVE_RESOURCES`` is the second (applied via the state
-    definition lookup, which the SF JSON walk handles upstream).
 
-    The history events don't carry the Resource ARN directly — we rely on
-    the registry membership check at materialization time instead.
-    """
-    return event.get("type", "").startswith(("TaskStateEntered", "TaskStateExited"))
+def _text(value: object) -> str:
+    """Return a string JSON value, or the empty string for another shape."""
+    return value if isinstance(value, str) else ""
+
+
+class _TaskRecord(TypedDict):
+    start: datetime | None
+    end: datetime | None
+    status: TaskStatus
+    cause: str | None
 
 
 def _absorb_wait_companion(state_name: str) -> str:
@@ -429,7 +446,7 @@ def _absorb_wait_companion(state_name: str) -> str:
     return WAIT_GROUPING.get(state_name, state_name)
 
 
-def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[TaskRow]:
+def _materialize_tasks(history_events: Sequence[Mapping[str, object]]) -> list[TaskRow]:
     """Walk the execution history and produce one TaskRow per substantive state.
 
     Algorithm:
@@ -445,10 +462,10 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
     """
     # state_name → {"start": dt | None, "end": dt | None, "status": TaskStatus,
     #               "cause": str | None}
-    by_state: dict[str, dict[str, Any]] = {}
+    by_state: dict[str, _TaskRecord] = {}
 
     for event in history_events:
-        etype = event.get("type", "")
+        etype = _text(event.get("type"))
         details_key = None
         if etype == "TaskStateEntered":
             details_key = "stateEnteredEventDetails"
@@ -459,8 +476,9 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
             # attach to the most recently-entered state. boto3's history
             # iteration preserves chronological order, so the "last
             # entered" state at TaskFailed time is the failing state.
-            cause = (event.get("taskFailedEventDetails") or {}).get("cause", "")
-            error = (event.get("taskFailedEventDetails") or {}).get("error", "")
+            failure_details = _mapping(event.get("taskFailedEventDetails"))
+            cause = _text(failure_details.get("cause"))
+            error = _text(failure_details.get("error"))
             snippet = f"{error}: {cause}" if (error and cause) else (error or cause)
             if len(snippet) > _CAUSE_MAX_CHARS:
                 snippet = snippet[: _CAUSE_MAX_CHARS - 1] + "…"
@@ -474,8 +492,8 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
         else:
             continue
 
-        details = event.get(details_key) or {}
-        state_name = details.get("name")
+        details = _mapping(event.get(details_key))
+        state_name = _text(details.get("name"))
         if not state_name:
             continue
 
@@ -531,28 +549,29 @@ def _materialize_tasks(history_events: Sequence[Mapping[str, Any]]) -> list[Task
     return rows
 
 
-def _failing_state_from_history(history_events: Sequence[Mapping[str, Any]]) -> str | None:
+def _failing_state_from_history(history_events: Sequence[Mapping[str, object]]) -> str | None:
     """Identify the state that emitted TaskFailed (or ExecutionFailed) first."""
     for event in history_events:
-        etype = event.get("type", "")
+        etype = _text(event.get("type"))
         if etype == "TaskFailed":
             # Walk backwards through prior events to find the most-recent
             # TaskStateEntered without a matching TaskStateExited.
             idx = history_events.index(event)
             for prior in reversed(history_events[:idx]):
                 if prior.get("type") == "TaskStateEntered":
-                    name = (prior.get("stateEnteredEventDetails") or {}).get("name")
+                    name = _text(_mapping(prior.get("stateEnteredEventDetails")).get("name"))
                     return _absorb_wait_companion(name) if name else None
         if etype == "ExecutionFailed":
-            cause_details = event.get("executionFailedEventDetails") or {}
+            cause_details = _mapping(event.get("executionFailedEventDetails"))
             # ExecutionFailed doesn't directly carry state name; walk back.
             idx = history_events.index(event)
             for prior in reversed(history_events[:idx]):
                 if prior.get("type") == "TaskStateEntered":
-                    name = (prior.get("stateEnteredEventDetails") or {}).get("name")
+                    name = _text(_mapping(prior.get("stateEnteredEventDetails")).get("name"))
                     return _absorb_wait_companion(name) if name else None
             # Fallback: synthesize from the cause if no entered event found.
-            return (cause_details.get("error") or None)
+            error = cause_details.get("error")
+            return error if isinstance(error, str) and error else None
     return None
 
 
@@ -572,7 +591,7 @@ _DEFAULT_ROLE_SEARCH_LIMIT = 50
 _LIST_EXECUTIONS_PAGE_SIZE = 25
 
 
-def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> str | None:
+def _extract_pipeline_role(describe_resp: Mapping[str, object]) -> str | None:
     """Parse ``input.pipeline_role`` from a DescribeExecution response.
 
     DescribeExecution returns ``input`` as a JSON-encoded string. The
@@ -596,15 +615,13 @@ def _extract_pipeline_role(describe_resp: Mapping[str, Any]) -> str | None:
     if not raw_input or not isinstance(raw_input, str):
         return None
     try:
-        parsed = json.loads(raw_input)
+        parsed: object = json.loads(raw_input)
     except (ValueError, TypeError) as exc:
-        logger.warning(
-            "Could not parse SF execution input JSON; pipeline_role=None: %s", exc
-        )
+        logger.warning("Could not parse SF execution input JSON; pipeline_role=None: %s", exc)
         return None
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, Mapping):
         return None
-    role = parsed.get("pipeline_role")
+    role = cast(Mapping[str, object], parsed).get("pipeline_role")
     return role if isinstance(role, str) and role else None
 
 
@@ -640,9 +657,7 @@ def _extract_execution_degradation(
         report_card_degraded=_boolean(output.get("report_card_degraded")),
         parity_degraded=_boolean(output.get("parity_degraded")),
         degraded_summary_degraded=_boolean(
-            cast(Mapping[str, object], summary).get("degraded")
-            if isinstance(summary, Mapping)
-            else None
+            cast(Mapping[str, object], summary).get("degraded") if isinstance(summary, Mapping) else None
         ),
     )
 
@@ -677,9 +692,7 @@ def _build_pipeline_run_from_execution_arn(
     try:
         run_status = RunStatus(status_str)
     except ValueError as exc:
-        raise PipelineStatusError(
-            f"Unknown SF execution status {status_str!r} from boto3 for {execution_arn}"
-        ) from exc
+        raise PipelineStatusError(f"Unknown SF execution status {status_str!r} from boto3 for {execution_arn}") from exc
 
     start_utc = _parse_ts(describe_resp.get("startDate"))
     end_utc = _parse_ts(describe_resp.get("stopDate"))
@@ -687,17 +700,13 @@ def _build_pipeline_run_from_execution_arn(
     if start_utc is not None and end_utc is not None:
         duration = (end_utc - start_utc).total_seconds()
 
-    failure_cause = (
-        _failure_cause_from(describe_resp) if run_status == RunStatus.FAILED else None
-    )
+    failure_cause = _failure_cause_from(describe_resp) if run_status == RunStatus.FAILED else None
     pipeline_role = _extract_pipeline_role(describe_resp)
     degradation = _extract_execution_degradation(describe_resp)
 
     events = _paged_execution_history(client, execution_arn)
     tasks = _materialize_tasks(events)
-    failing_state = (
-        _failing_state_from_history(events) if run_status == RunStatus.FAILED else None
-    )
+    failing_state = _failing_state_from_history(events) if run_status == RunStatus.FAILED else None
 
     return PipelineRun(
         state_machine_arn=state_machine_arn,
@@ -740,14 +749,16 @@ def _find_execution_matching_role(
     inspected = 0
     next_token: str | None = None
     while inspected < search_limit:
-        kwargs: dict[str, Any] = {
-            "stateMachineArn": state_machine_arn,
-            "maxResults": min(_LIST_EXECUTIONS_PAGE_SIZE, search_limit - inspected),
-        }
-        if next_token:
-            kwargs["nextToken"] = next_token
         try:
-            list_resp = client.list_executions(**kwargs)
+            max_results = min(_LIST_EXECUTIONS_PAGE_SIZE, search_limit - inspected)
+            if next_token:
+                list_resp = client.list_executions(
+                    stateMachineArn=state_machine_arn,
+                    maxResults=max_results,
+                    nextToken=next_token,
+                )
+            else:
+                list_resp = client.list_executions(stateMachineArn=state_machine_arn, maxResults=max_results)
         except Exception as exc:  # noqa: BLE001 — narrow + re-raise
             _raise_for_boto_error(exc, "ListExecutions")
 
@@ -842,24 +853,18 @@ def read_pipeline_state(
 
     # Path 1: explicit execution_arn — fetch directly.
     if execution_arn is not None:
-        return _build_pipeline_run_from_execution_arn(
-            execution_arn, state_machine_arn, client=client
-        )
+        return _build_pipeline_run_from_execution_arn(execution_arn, state_machine_arn, client=client)
 
     # Path 2: role_filter — walk ListExecutions until match.
     if role_filter:
-        match = _find_execution_matching_role(
-            state_machine_arn, role_filter, client=client, search_limit=search_limit
-        )
+        match = _find_execution_matching_role(state_machine_arn, role_filter, client=client, search_limit=search_limit)
         if match is None:
             raise SFNNoExecutions(
                 f"No execution with pipeline_role in {sorted(role_filter)!r} "
                 f"found within last {search_limit} executions of {state_machine_arn}."
             )
         matched_arn, _matched_role = match
-        return _build_pipeline_run_from_execution_arn(
-            matched_arn, state_machine_arn, client=client
-        )
+        return _build_pipeline_run_from_execution_arn(matched_arn, state_machine_arn, client=client)
 
     # Path 3 (default): most-recent execution regardless of role —
     # backwards-compatible with pre-Option-D callers.
@@ -873,14 +878,10 @@ def read_pipeline_state(
 
     executions = list_resp.get("executions") or []
     if not executions:
-        raise SFNNoExecutions(
-            f"State machine {state_machine_arn} has no executions yet."
-        )
+        raise SFNNoExecutions(f"State machine {state_machine_arn} has no executions yet.")
 
     latest = executions[0]
-    return _build_pipeline_run_from_execution_arn(
-        latest.get("executionArn"), state_machine_arn, client=client
-    )
+    return _build_pipeline_run_from_execution_arn(latest.get("executionArn"), state_machine_arn, client=client)
 
 
 def list_recent_pipeline_runs(
@@ -927,14 +928,16 @@ def list_recent_pipeline_runs(
     next_token: str | None = None
 
     while len(summaries) < limit and inspected < walk_cap:
-        kwargs: dict[str, Any] = {
-            "stateMachineArn": state_machine_arn,
-            "maxResults": min(_LIST_EXECUTIONS_PAGE_SIZE, walk_cap - inspected),
-        }
-        if next_token:
-            kwargs["nextToken"] = next_token
         try:
-            list_resp = client.list_executions(**kwargs)
+            max_results = min(_LIST_EXECUTIONS_PAGE_SIZE, walk_cap - inspected)
+            if next_token:
+                list_resp = client.list_executions(
+                    stateMachineArn=state_machine_arn,
+                    maxResults=max_results,
+                    nextToken=next_token,
+                )
+            else:
+                list_resp = client.list_executions(stateMachineArn=state_machine_arn, maxResults=max_results)
         except Exception as exc:  # noqa: BLE001 — narrow + re-raise
             _raise_for_boto_error(exc, "ListExecutions")
 
@@ -1025,24 +1028,19 @@ def _raise_for_boto_error(exc: Exception, action: str) -> NoReturn:
     with the boto3 cause attached.
     """
     code = ""
-    response = getattr(exc, "response", None) or {}
-    error_dict = response.get("Error") or {}
-    code = error_dict.get("Code", "")
+    response = _mapping(getattr(exc, "response", None))
+    error_dict = _mapping(response.get("Error"))
+    code = _text(error_dict.get("Code"))
 
     if code in ("AccessDeniedException", "AccessDenied"):
         role_hint = _denied_role_hint(exc)
         raise SFNAccessDenied(
-            f"states:{action} denied — add the action to {role_hint}'s "
-            f"inline policy. Boto3 detail: {exc}"
+            f"states:{action} denied — add the action to {role_hint}'s inline policy. Boto3 detail: {exc}"
         ) from exc
     if code in ("ThrottlingException", "Throttling", "TooManyRequestsException"):
-        raise SFNThrottled(
-            f"states:{action} rate-limited; page falls back to last-good cache."
-        ) from exc
+        raise SFNThrottled(f"states:{action} rate-limited; page falls back to last-good cache.") from exc
     if code in ("StateMachineDoesNotExist", "ExecutionDoesNotExist"):
-        raise SFNNoExecutions(
-            f"states:{action} returned {code}: {exc}"
-        ) from exc
+        raise SFNNoExecutions(f"states:{action} returned {code}: {exc}") from exc
     raise PipelineStatusError(
         f"Unexpected boto3 error on states:{action}: {code or type(exc).__name__}: {exc}"
     ) from exc
@@ -1054,7 +1052,7 @@ def _raise_for_boto_error(exc: Exception, action: str) -> NoReturn:
 _RUN_DATE_IN_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
-def _extract_run_date(describe_resp: Mapping[str, Any]) -> str | None:
+def _extract_run_date(describe_resp: Mapping[str, object]) -> str | None:
     """The cycle key: ``input.run_date``, the execution name, then ``startDate``.
 
     THREE sources, and the third is the one that was missing. Scheduled
@@ -1100,7 +1098,7 @@ def _extract_run_date(describe_resp: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _explicit_run_date(describe_resp: Mapping[str, Any]) -> str | None:
+def _explicit_run_date(describe_resp: Mapping[str, object]) -> str | None:
     """The run date the execution STATES — input field, else execution name.
 
     Split out of :func:`_extract_run_date` so a caller can ask for the
@@ -1112,11 +1110,11 @@ def _explicit_run_date(describe_resp: Mapping[str, Any]) -> str | None:
     raw_input = describe_resp.get("input")
     if isinstance(raw_input, str) and raw_input:
         try:
-            parsed = json.loads(raw_input)
+            parsed: object = json.loads(raw_input)
         except (ValueError, TypeError):
             parsed = None
-        if isinstance(parsed, dict):
-            value = parsed.get("run_date")
+        if isinstance(parsed, Mapping):
+            value = cast(Mapping[str, object], parsed).get("run_date")
             if isinstance(value, str) and _RUN_DATE_IN_NAME.fullmatch(value):
                 return value
     name = describe_resp.get("name")
@@ -1127,7 +1125,7 @@ def _explicit_run_date(describe_resp: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _entered_state_names(history_events: Sequence[Mapping[str, Any]]) -> list[str]:
+def _entered_state_names(history_events: Sequence[Mapping[str, object]]) -> list[str]:
     """Every Task state this execution ENTERED, completed or not.
 
     Entered, not exited: a run that reached PredictorTraining and died inside
@@ -1138,7 +1136,7 @@ def _entered_state_names(history_events: Sequence[Mapping[str, Any]]) -> list[st
     for event in history_events:
         if event.get("type") != "TaskStateEntered":
             continue
-        name = (event.get("taskStateEnteredEventDetails") or {}).get("name")
+        name = _text(_mapping(event.get("taskStateEnteredEventDetails")).get("name"))
         if name:
             names.append(_absorb_wait_companion(name))
     return names
@@ -1177,10 +1175,10 @@ def read_reliability_window(
 
     # One describe + one history per execution, memoised so the three
     # callables below do not each pay for their own round trip.
-    described: dict[str, Mapping[str, Any]] = {}
-    histories: dict[str, list[Mapping[str, Any]]] = {}
+    described: dict[str, Mapping[str, object]] = {}
+    histories: dict[str, list[Mapping[str, object]]] = {}
 
-    def _describe(arn: str) -> Mapping[str, Any]:
+    def _describe(arn: str) -> Mapping[str, object]:
         if arn not in described:
             try:
                 described[arn] = client.describe_execution(executionArn=arn)
@@ -1188,7 +1186,7 @@ def read_reliability_window(
                 _raise_for_boto_error(exc, "DescribeExecution")
         return described[arn]
 
-    def _history(arn: str) -> list[Mapping[str, Any]]:
+    def _history(arn: str) -> list[Mapping[str, object]]:
         if arn not in histories:
             histories[arn] = _paged_execution_history(client, arn)
         return histories[arn]
@@ -1198,11 +1196,10 @@ def read_reliability_window(
         state = _failing_state_from_history(events)
         error: str | None = None
         for event in events:
-            details = event.get("taskFailedEventDetails") or event.get(
-                "executionFailedEventDetails"
-            )
-            if details and details.get("error"):
-                error = details["error"]
+            details = _mapping(event.get("taskFailedEventDetails") or event.get("executionFailedEventDetails"))
+            event_error = details.get("error")
+            if isinstance(event_error, str) and event_error:
+                error = event_error
                 break
         return state, error
 
